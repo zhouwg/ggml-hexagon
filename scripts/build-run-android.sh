@@ -179,6 +179,22 @@ function run_test-backend-ops()
 
 }
 
+function run_ut()
+{
+    check_qnn_libs
+
+    if [ -f ./out/android/bin/libggml-qnn.so ]; then
+        adb push ./out/android/bin/*.so ${REMOTE_PATH}/
+    fi
+    adb push ./out/android/bin/ggml-qnn-ut ${REMOTE_PATH}/
+    adb shell chmod +x ${REMOTE_PATH}/ggml-qnn-ut
+
+    adb shell "cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && ${REMOTE_PATH}/ggml-qnn-ut -t GGML_OP_ADD -b $qnnbackend"
+
+}
+
 
 function show_usage()
 {
@@ -186,6 +202,7 @@ function show_usage()
     echo "  $0 build"
     echo "  $0 updateqnnlib"
     echo "  $0 run_testop"
+    echo "  $0 run_ut           0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo "  $0 run_llamacli     0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo "  $0 run_llamabench   0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo -e "\n\n\n"
@@ -213,6 +230,7 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_testop" ]; then
         run_test-backend-ops
         exit 0
+
     elif [ "$1" == "updateqnnlib" ]; then
         update_qnn_libs
         exit 0
@@ -232,6 +250,9 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
         run_llamabench
+        exit 0
+    elif [ "$1" == "run_ut" ]; then
+        run_ut
         exit 0
     fi
 else
