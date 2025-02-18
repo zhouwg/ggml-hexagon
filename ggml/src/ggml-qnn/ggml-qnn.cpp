@@ -1903,7 +1903,7 @@ public:
         return _qnn_mem_set.count(handle) != 0U;
     }
 
-    bool enalbe_qnn_rpc() {
+    bool enable_qnn_rpc() {
         return _enable_qnn_rpc;
     }
 
@@ -3109,7 +3109,7 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
     uint32_t * tensor_1_dimensions = QNN_VER_PTR(*tensor_1)->dimensions;
     uint32_t * tensor_2_dimensions = QNN_VER_PTR(*tensor_2)->dimensions;
 
-    bool enable_npu_rpc = instance->enalbe_qnn_rpc() && ctx->device == QNN_BACKEND_NPU;
+    bool enable_npu_rpc = instance->enable_qnn_rpc() && ctx->device == QNN_BACKEND_NPU;
 
     if (!graph_initialized) {
         graph_name = map_entry;
@@ -3250,7 +3250,7 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
 
         if (enable_npu_rpc) {
             //FIXME:why failure with test-backend-ops
-            uint8_t *qnn_buffer_2 = static_cast<uint8_t *>(instance->get_rpcmem_from_memhandle(QNN_VER_PTR(*tensor_2)->memHandle));
+            uint8_t * qnn_buffer_2 = static_cast<uint8_t *>(instance->get_rpcmem_from_memhandle(QNN_VER_PTR(*tensor_2)->memHandle));
             if (nullptr != qnn_buffer_2) {
                 memcpy(dst->data, qnn_buffer_2, ggml_nbytes(dst));
             }
