@@ -1989,6 +1989,9 @@ private:
     std::string _graph_name;
     QNNBackend _device_id;
     bool       _enable_qnn_rpc = false; //FIXME:unknown issue with QNN RPC feature
+
+    DISABLE_COPY(qnn_instance);
+    DISABLE_MOVE(qnn_instance);
 };
 
 std::mutex qnn_instance::_init_mutex;
@@ -3134,12 +3137,9 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
             }
         }
 
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_0);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_1);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_2);
-        CHECK_QNN_API(error);
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_0));
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_1));
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_2));
 
         if (instance->enalbe_qnn_rpc()) {
             if (ctx->device == QNN_BACKEND_NPU) { // QNN RPC feature only available for NPU backend
@@ -3179,10 +3179,8 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
                         tensor_outputs
                 }
         };
-        error = qnn_raw_interface.graphAddNode(graph_handle, op_config);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr);
-        CHECK_QNN_API(error);
+        CHECK_QNN_API(error = qnn_raw_interface.graphAddNode(graph_handle, op_config));
+        CHECK_QNN_API(error = qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr));
         error = qnn_raw_interface.graphExecute(graph_handle,
                                                tensor_inputs, 2,
                                                tensor_outputs, 1,
@@ -3255,9 +3253,7 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
                                                tensor_inputs, 2,
                                                tensor_outputs, 1,
                                                nullptr, nullptr);
-        if (QNN_SUCCESS != error) {
-            GGMLQNN_LOG_INFO("error = %d\n", error);
-        }
+        CHECK_QNN_API(error);
 
         if (instance->enalbe_qnn_rpc()) {
             if (ctx->device == QNN_BACKEND_NPU) { // QNN RPC feature only available for NPU backend
@@ -3278,7 +3274,7 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
 #endif
 }
 
-//TODO:
+//WIP(work in progress):
 /*
  * the logic of ggml_qnn_mul_mat is similar to ggml_qnn_add,but type trait and matrix transpose are required
  * for offload mulmat to QNN backend, so it's a standalone function.
@@ -3358,12 +3354,9 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
             GGMLQNN_LOG_INFO("can't create qnn graph handle with graph name %s, error = %d\n", graph_name.c_str(), error);
             return;
         }
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_0);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_1);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_2);
-        CHECK_QNN_API(error);
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_0));
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_1));
+        CHECK_QNN_API(error = qnn_raw_interface.tensorCreateGraphTensor(graph_handle, tensor_2));
 
         QNN_VER_PTR(*tensor_0)->clientBuf = {src0->data, ggml_get_tensor_data_size(src0)};
         QNN_VER_PTR(*tensor_1)->clientBuf = {src1->data, ggml_get_tensor_data_size(src1)};
@@ -3389,10 +3382,8 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
                         tensor_outputs
                 }
         };
-        error = qnn_raw_interface.graphAddNode(graph_handle, op_config);
-        CHECK_QNN_API(error);
-        error = qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr);
-        CHECK_QNN_API(error);
+        CHECK_QNN_API(error = qnn_raw_interface.graphAddNode(graph_handle, op_config));
+        CHECK_QNN_API(error = qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr));
         error = qnn_raw_interface.graphExecute(graph_handle,
                                                tensor_inputs, 2,
                                                tensor_outputs, 1,
@@ -3656,7 +3647,7 @@ static enum ggml_status ggml_backend_qnn_graph_compute(ggml_backend_t backend, s
     ggml_backend_qnn_context * ctx  = (ggml_backend_qnn_context *) backend->context;
     GGML_UNUSED(ctx);
 
-    //GGMLQNN_LOG_DEBUG("cgraph->n_nodes %d", cgraph->n_nodes);
+    GGMLQNN_LOG_DEBUG("cgraph->n_nodes %d", cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE

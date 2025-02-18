@@ -505,7 +505,6 @@ int main(int argc, char * argv[]) {
     ggml_free(ctx);
     ggml_backend_buffer_free(buffer);
     ggml_backend_free(backend);
-    ggml_backend_free(backend_cpu);
 
     n_end_time = ggml_time_us();
     n_duration = (n_end_time - n_begin_time) / 1000;
