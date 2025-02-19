@@ -420,9 +420,9 @@ int main(int argc, char * argv[]) {
         sizex = ggml_blck_size(qtype);
     }
 
-    src0 = ggml_new_tensor_2d(ctx, qtype, sizex, sizey);
+    src0 = ggml_new_tensor_2d(ctx, qtype, 4, 2);
     ggml_set_input(src0);
-    src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, sizex, sizey);
+    src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 8);
     ggml_set_input(src1);
 
     switch (n_ggml_op_type) {
@@ -481,8 +481,14 @@ int main(int argc, char * argv[]) {
         ggml_set_f32(src1, (rand() % 100 + 1));
         ggml_set_f32(dst, 0.0f);
     }
+
+    //for compare compute result between cpu backend and QNN backend
+    ggml_set_f32(src0, 1.0f);
+    ggml_set_f32(src1, 2.0f);
+    ggml_set_f32(dst, 0.0f);
+
     ggml_graph_compute_helper(backend, gf, work_buffer, num_threads, nullptr, nullptr);
-    if (get_tensor_data_size(dst) < (32 * 32)) {
+    if (get_tensor_data_size(dst) < (100 * 100)) {
         QNN_LOG_DEBUG("dump result tensors:\n");
         TENSOR_DUMP(src0);
         TENSOR_DUMP(src1);
