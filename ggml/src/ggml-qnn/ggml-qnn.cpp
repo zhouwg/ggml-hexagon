@@ -13,9 +13,10 @@
  * section-5 does ggml-qnn backend helper macro / data structure / function / class
  * section-6 does implementation of ggml-qnn backend according to ggml's backend subsystem
  *
- * currently only provide OPs' QNN backend implementation of GGML_OP_ADD & GGML_OP_MUL_MAT:
+ * currently provide following ggml ops' QNN backend implementation:
  * - GGML_OP_ADD:    this is a simple skeleton, can expand other ggml ops according to expertise
- * - GGML_OP_MUL_MAT:this is a complicated skeleton, can expand other complex op accordingly
+ * - GGML_OP_MUL:    this is a simple skeleton, can expand other ggml ops according to expertise
+ * - GGML_OP_MUL_MAT:this is a complicated skeleton, can expand other complex ggml ops accordingly
  *
  * of course, can porting ggml-qnn to Windows on ARM as need.
  *
@@ -95,7 +96,6 @@
 #include "ggml-qnn.h"
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
-
 // =================================================================================================
 //  section-1: forward/external declaration
 // =================================================================================================
@@ -110,9 +110,9 @@ static void ggmlqnn_log_internal(ggml_log_level level, const char * file, const 
 // =================================================================================================
 #define GGMLQNN_DEBUG                           1  // for troubleshooting QNN backend
 #define GGML_QNN_LOGBUF_LEN                     4096
-#define ENABLE_QNNBACKEND_PERF                  1  // enable/disable op's perf info
+#define ENABLE_QNNBACKEND_PERF                  0  // enable/disable op's perf info
 #define GGMLQNN_PRINT_QNN_INTERNAL_LOG          0  // enable/disable QNN's internal log
-#define GGMLQNN_PRINT_OP_ADD_LOG                1  // GGML_OP_ADD already verified with QNN-CPU / QNN-GPU / QNN-NPU
+#define GGMLQNN_PRINT_OP_ADD_LOG                0  // GGML_OP_ADD already verified with QNN-CPU / QNN-GPU / QNN-NPU
 #define GGMLQNN_PRINT_OP_MUL_MAT_LOG            1
 
 #define GGMLQNN_LOG_ERROR(...) ggmlqnn_log_internal(GGML_LOG_LEVEL_DEBUG,  __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
@@ -1187,25 +1187,28 @@ static struct ggml_backend_qnn_context g_qnn_mgr[GGML_QNN_MAX_DEVICES] = {
                 .socinfo              = {}},
 };
 
-
 struct qnn_op_caps_t {
     const char * qnn_op_name = nullptr;
     const size_t input_param_count = 0;
     const char * qnn_param_name = nullptr;
 };
 
-static const qnn_op_caps_t kOpCaps[] = {
+static const qnn_op_caps_t k_op_caps[] = {
         {}, // GGML_OP_NONE
         {}, // GGML_OP_DUP
         {
                 // GGML_OP_ADD
-                QNN_OP_ELEMENT_WISE_ADD, // qnn_op_name
-                2,                   // input_param_count
+                QNN_OP_ELEMENT_WISE_ADD,
+                2,
         },
         {}, // GGML_OP_ADD1
         {}, // GGML_OP_ACC
         {}, // GGML_OP_SUB
-        {}, // GGML_OP_MUL
+        {
+                // GGML_OP_MUL
+                QNN_OP_ELEMENT_WISE_MULTIPLY,
+                2,
+        },
         {}, // GGML_OP_DIV
         {}, // GGML_OP_SQR
         {}, // GGML_OP_SQRT
@@ -1227,8 +1230,8 @@ static const qnn_op_caps_t kOpCaps[] = {
         {}, // GGML_OP_GROUP_NORM
         {
                 // GGML_OP_MUL_MAT
-                QNN_OP_MAT_MUL,  // qnn_op_name
-                2,               // input_param_count
+                QNN_OP_MAT_MUL,
+                2,
         },
         {}, // GGML_OP_MUL_MAT_ID
         {}, // GGML_OP_OUT_PROD
@@ -1580,11 +1583,9 @@ static void append_tensor_dimensions(const ggml_tensor * tensor, std::string & o
     output.append(buffer, len);
 }
 
-constexpr const size_t kGgmlUnaryOpStart = GGML_OP_COUNT;
-
 static size_t get_qnn_op_index(const ggml_tensor * tensor) {
     if (tensor->op == GGML_OP_UNARY) {
-        return kGgmlUnaryOpStart + ggml_get_unary_op(tensor);
+        return GGML_OP_COUNT + ggml_get_unary_op(tensor);
     }
 
     return tensor->op;
@@ -1592,8 +1593,8 @@ static size_t get_qnn_op_index(const ggml_tensor * tensor) {
 
 static size_t get_qnn_op_input_param_count(const ggml_tensor * op) {
     auto op_index = get_qnn_op_index(op);
-    GGML_ASSERT(op_index < std::size(kOpCaps));
-    return kOpCaps[op_index].input_param_count;
+    GGML_ASSERT(op_index < std::size(k_op_caps));
+    return k_op_caps[op_index].input_param_count;
 }
 
 static void get_graph_key_from_op(const ggml_tensor * op, std::string & output) {
@@ -2963,6 +2964,7 @@ static void get_qnn_dimensions_from_ggml_dimensions(uint32_t * qnn_dimensions, u
 // =================================================================================================
 //  section-6: implementation of ggml-qnn backend
 // =================================================================================================
+//TODO: refine this function as it is a performance hotspot/bottleneck function
 static bool ggml_qnn_can_handle_op(const struct ggml_tensor * tensor) {
     if (tensor->op == GGML_OP_NONE) {
         return true;
@@ -2973,7 +2975,9 @@ static bool ggml_qnn_can_handle_op(const struct ggml_tensor * tensor) {
         return false;
     }
 
-    bool supported_op = ((tensor->op == GGML_OP_ADD) || (tensor->op == GGML_OP_MUL_MAT));
+    //TODO: support other op
+    bool supported_op = ((tensor->op == GGML_OP_ADD) || (tensor->op == GGML_OP_MUL_MAT)
+            || (tensor->op == GGML_OP_MUL));
     if (!supported_op) {
         return false;
     }
@@ -2981,37 +2985,34 @@ static bool ggml_qnn_can_handle_op(const struct ggml_tensor * tensor) {
     struct ggml_tensor * src0 = tensor->src[0];
     struct ggml_tensor * src1 = tensor->src[1];
 
-    int64_t ne00 = tensor->src[0]->ne[0];
-    int64_t ne01 = tensor->src[0]->ne[1];
+    const int64_t ne00 = tensor->src[0]->ne[0];
+    const int64_t ne01 = tensor->src[0]->ne[1];
 
-    int64_t ne10 = tensor->src[1]->ne[0];
-    int64_t ne11 = tensor->src[1]->ne[1];
+    const int64_t ne10 = tensor->src[1]->ne[0];
+    const int64_t ne11 = tensor->src[1]->ne[1];
 
-    int64_t ne0 = tensor->ne[0];
-    int64_t ne1 = tensor->ne[1];
+    const int64_t ne0 = tensor->ne[0];
+    const int64_t ne1 = tensor->ne[1];
+
+    const uint32_t src0_rank = ggml_get_tensor_rank(src0);
+    const uint32_t src1_rank = ggml_get_tensor_rank(src1);
 
     if (tensor->op == GGML_OP_ADD) {
         //dump_tensors_info(tensor);
         if (!ggml_are_same_shape(src0, src1)) {
             return false;
         }
-
         if (ne00 < 32)
             return false;
-
         return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16)
                && (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
     }
 
     if (tensor->op == GGML_OP_MUL_MAT) {
-        dump_tensors_info(tensor);
-        uint32_t src0_rank = ggml_get_tensor_rank(src0);
-        uint32_t src1_rank = ggml_get_tensor_rank(src1);
-
+        //dump_tensors_info(tensor);
         if ((src0_rank != 2) || (src1_rank != 2)) //TODO: only support offload 2D matrix mulmat to QNN backend
             return false;
-
-        //TODO: support more data type in func ggml_qnn_mul_mat(...):
+        //TODO: support more data type in func ggml_qnn_mul_mat(...)
         //src0: q4_0, q6_k, ...
         //src1: f32
         //dst : f32
@@ -3020,19 +3021,30 @@ static bool ggml_qnn_can_handle_op(const struct ggml_tensor * tensor) {
                 && (src0->type == src1->type) && (src0->type == tensor->type);
     }
 
-    //TODO:for other op
+    if (tensor->op == GGML_OP_MUL) {
+        dump_tensors_info(tensor);
+        if ((src0_rank != 2) || (src1_rank != 2)) //TODO: only support offload 2D matrix mul to QNN backend
+            return false;
+        return  (src0->type == GGML_TYPE_F32)
+                && (src1->type == GGML_TYPE_F32)
+                && (tensor->type == src1->type);
+    }
+
     return  (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16)
             && (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16)
             && (src0->type == src1->type) && (src0->type == tensor->type);
 }
 
-static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
+/*
+ * provide a general skeleton to offload ggml op to QNN backend: a single node contains 2 input
+ * tensor and 1 output tensor
+*/
+static void ggml_qnn_general_node(ggml_backend_t backend, ggml_tensor * op) {
     Qnn_ErrorHandle_t error                     = QNN_SUCCESS;
     enum ggml_status result                     = GGML_STATUS_SUCCESS;
     bool graph_initialized                      = false;
     qnn_instance * instance                     = nullptr;
     ggml_backend_qnn_context * ctx              = (ggml_backend_qnn_context *)backend->context;
-    qnn_perf op_perf                            = qnn_perf("ggml_qnn_add");
     Qnn_GraphHandle_t graph_handle              = nullptr;
     Qnn_Tensor_t * p_tensor0                    = nullptr;
     Qnn_Tensor_t * p_tensor1                    = nullptr;
@@ -3045,6 +3057,14 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
     GGMLQNN_CHECK_PARAMS(ctx, src0, src1, dst);
     instance                                    = ctx->instance;
     QNN_INTERFACE_VER_TYPE qnn_raw_interface    = ctx->raw_interface;
+
+    size_t qnn_op_index = get_qnn_op_index(op);
+    GGML_ASSERT(qnn_op_index < std::size(k_op_caps));
+    const char * qnn_op_name = k_op_caps[qnn_op_index].qnn_op_name;
+    std::string ggml_op_name_string = std::string("ggml_") + ggml_op_name(op->op);
+    const char * ggml_op_name = ggml_op_name_string.c_str();
+
+    qnn_perf op_perf                            = qnn_perf(ggml_op_name);
     op_perf.start();
 
     std::string graph_name;
@@ -3124,9 +3144,9 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
         };
         Qnn_OpConfig_t op_config = {
                 QNN_OPCONFIG_VERSION_1, .v1 = {
-                        "ggml_op_add",
+                        ggml_op_name,
                         QNN_OP_PACKAGE_NAME_QTI_AISW,
-                        QNN_OP_ELEMENT_WISE_ADD,
+                        qnn_op_name,
                         0,
                         qnn_params,
                         2,
@@ -3138,9 +3158,9 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, op_config));
         CHECK_QNN_API(error, qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr));
         CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle,
-                                               tensor_inputs, 2,
-                                               tensor_outputs, 1,
-                                               nullptr, nullptr));
+                                                            tensor_inputs, 2,
+                                                            tensor_outputs, 1,
+                                                            nullptr, nullptr));
 
         if (enable_npu_rpc) {
             uint8_t * qnn_rpcbuffer = static_cast<uint8_t *>(instance->get_rpcmem_from_memhandle(QNN_VER_PTR(*p_tensor2)->memHandle));
@@ -3214,9 +3234,9 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
                 *p_tensor2
         };
         CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle,
-                                               tensor_inputs, 2,
-                                               tensor_outputs, 1,
-                                               nullptr, nullptr));
+                                                            tensor_inputs, 2,
+                                                            tensor_outputs, 1,
+                                                            nullptr, nullptr));
 
         if (enable_npu_rpc) {
             //TODO:NPU RPC feature will failed with test-backend-ops
@@ -3231,18 +3251,17 @@ static void ggml_qnn_add(ggml_backend_t backend, ggml_tensor * op) {
     QNN_VER_PTR(*p_tensor0)->dimensions = tensor_0_dimensions;
     QNN_VER_PTR(*p_tensor1)->dimensions = tensor_1_dimensions;
     QNN_VER_PTR(*p_tensor2)->dimensions = tensor_2_dimensions;
-#if GGMLQNN_PRINT_OP_ADD_LOG
     op_perf.info();
-#endif
 }
 
 /*
- * the logic of ggml_qnn_mul_mat is similar to ggml_qnn_add but much more complicated than ggml_qnn_add,
+ * the logic of ggml_qnn_mul_mat is similar to ggml_qnn_general_node but much more complicated
+ * than ggml_qnn_general_node.
  * matrix transpose and type trait are required for offload mulmat to QNN backend,
  * so it's a standalone function. accordingly, this is another typical skeleton for offload other
  * ggml ops to QNN backend
  *
- * MUL_MAT take most of the compute time (about 95%).so to speed up llama inference, we should focus on MUL_MAT.
+ * MUL_MAT take most of the compute time (about 95%).so to speed up llama inference, should focus on MUL_MAT.
  *
  * have three kinds of MUL_MAT to compute:
  * mul_mat_f32:     both src0 and src1 are F32, this will be naturally handled in QNN backend
@@ -3288,7 +3307,7 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
         p_tensor2 = ggml_qnn_create_general_tensor(dst, nullptr, QNN_TENSOR_TYPE_APP_READ,QNN_DATATYPE_FLOAT_32, 2, nullptr, nullptr, 0);
     }
 
-    print_tensors_info(__func__, ctx, src0, src1, dst);
+    //print_tensors_info(__func__, ctx, src0, src1, dst);
 
     //ensure QNN tensor has correct tensor type
     QNN_VER_PTR(*p_tensor0)->type = QNN_TENSOR_TYPE_APP_WRITE;
@@ -3444,8 +3463,8 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
         // QNN SDK, details could be found at
         // https://github.com/kantv-ai/llama.cpp/wiki/mapping-ggml-compute-graph-to-QNN-compute-graph
         CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle,
-                                              tensor_inputs, 2,
-                                             tensor_outputs, 1,
+                                         tensor_inputs, 2,
+                                         tensor_outputs, 1,
                                          nullptr, nullptr));
     }
 
@@ -3453,7 +3472,6 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
     QNN_VER_PTR(*p_tensor0)->dimensions = tensor_0_dimensions;
     QNN_VER_PTR(*p_tensor1)->dimensions = tensor_1_dimensions;
     QNN_VER_PTR(*p_tensor2)->dimensions = tensor_2_dimensions;
-
     op_perf.info();
 }
 
@@ -3462,11 +3480,15 @@ static bool ggml_qnn_compute_forward(ggml_backend_t backend, struct ggml_tensor 
 
     switch (tensor->op) {
         case GGML_OP_ADD:
-            func = ggml_qnn_add;
+            func = ggml_qnn_general_node;
             break;
 
         case GGML_OP_MUL_MAT:
             func = ggml_qnn_mul_mat;
+            break;
+
+        case GGML_OP_MUL:
+            func = ggml_qnn_general_node;
             break;
 
         default:
@@ -3667,7 +3689,6 @@ static enum ggml_status ggml_backend_qnn_graph_compute(ggml_backend_t backend, s
     ggml_backend_qnn_context * ctx  = (ggml_backend_qnn_context *) backend->context;
     GGML_UNUSED(ctx);
 
-    GGMLQNN_LOG_DEBUG("cgraph->n_nodes %d", cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
