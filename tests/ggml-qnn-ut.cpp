@@ -1,20 +1,26 @@
 /*
- * Copyright (c) 2024- KanTV Authors
+ * Copyright (c) 2023-2024 The ggml authors
  *
  * implementation of self-made Android command line tool for verify ggml-qnn backend
  * this file will help you to understand fundamental principle of ggml and ggml-qnn backend
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -420,9 +426,9 @@ int main(int argc, char * argv[]) {
         sizex = ggml_blck_size(qtype);
     }
 
-    src0 = ggml_new_tensor_2d(ctx, qtype, 4, 2);
+    src0 = ggml_new_tensor_2d(ctx, qtype, 64, 64);
     ggml_set_input(src0);
-    src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, 8);
+    src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
     ggml_set_input(src1);
 
     switch (n_ggml_op_type) {
@@ -507,6 +513,7 @@ int main(int argc, char * argv[]) {
               dst->type, ggml_type_name(dst->type), dst->ne[0], dst->ne[1], dst->ne[2], dst->nb[0],
               dst->nb[1], dst->nb[2]);
     }
+    TENSOR_DUMP(dst);
 
     ggml_free(ctx);
     ggml_backend_buffer_free(buffer);

@@ -198,6 +198,17 @@ function run_ut_mulmat()
 
 }
 
+function run_ut_mul()
+{
+    prepare_run_on_phone ggml-qnn-ut
+
+    adb shell "cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && ${REMOTE_PATH}/ggml-qnn-ut -t GGML_OP_MUL -b $qnnbackend"
+
+}
+
+
 function show_usage()
 {
     echo "Usage:"
@@ -206,6 +217,7 @@ function show_usage()
     echo "  $0 run_testop"
     echo "  $0 run_ut_add       0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo "  $0 run_ut_mulmat    0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
+    echo "  $0 run_ut_mul       0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo "  $0 run_llamacli     0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo "  $0 run_llamabench   0 (QNN_CPU) / 1 (QNN_GPU) / 2 (QNN_NPU) / 3 (ggml)"
     echo -e "\n\n\n"
@@ -259,6 +271,9 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_ut_mulmat" ]; then
         run_ut_mulmat
+        exit 0
+    elif [ "$1" == "run_ut_mul" ]; then
+        run_ut_mul
         exit 0
     fi
 else
