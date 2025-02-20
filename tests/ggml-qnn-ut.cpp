@@ -426,18 +426,23 @@ int main(int argc, char * argv[]) {
         sizex = ggml_blck_size(qtype);
     }
 
-    if (n_ggml_op_type == GGML_OP_ADD)
+    if (n_ggml_op_type == GGML_OP_ADD) {
         src0 = ggml_new_tensor_2d(ctx, qtype, sizey, sizex);
-    else
-        src0 = ggml_new_tensor_2d(ctx, qtype, 64, 64);
-    ggml_set_input(src0);
-
-    if (n_ggml_op_type == GGML_OP_ADD)
         src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, sizey, sizex);
-    else
-        src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
-    ggml_set_input(src1);
+    } else {
+        //verify 2D matrix
+        //src0 = ggml_new_tensor_2d(ctx, qtype, 128, 64);
+        //src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 128, 2);
+        //verify 3D matrix
+        src0 = ggml_new_tensor_3d(ctx, qtype, 128, 64, 8);
+        src1 = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, 2, 8);
+        //verify 4D matrix
+        //src0 = ggml_new_tensor_4d(ctx, qtype, 256, 16, 3, 2);
+        //src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 6, 4);
+    }
 
+    ggml_set_input(src0);
+    ggml_set_input(src1);
     switch (n_ggml_op_type) {
         case GGML_OP_ADD:
             dst = ggml_add(ctx, src0, src1);
