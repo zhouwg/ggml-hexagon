@@ -426,9 +426,16 @@ int main(int argc, char * argv[]) {
         sizex = ggml_blck_size(qtype);
     }
 
-    src0 = ggml_new_tensor_2d(ctx, qtype, 64, 64);
+    if (n_ggml_op_type == GGML_OP_ADD)
+        src0 = ggml_new_tensor_2d(ctx, qtype, sizey, sizex);
+    else
+        src0 = ggml_new_tensor_2d(ctx, qtype, 64, 64);
     ggml_set_input(src0);
-    src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
+
+    if (n_ggml_op_type == GGML_OP_ADD)
+        src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, sizey, sizex);
+    else
+        src1 = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 64);
     ggml_set_input(src1);
 
     switch (n_ggml_op_type) {
