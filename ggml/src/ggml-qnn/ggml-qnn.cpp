@@ -218,7 +218,7 @@ static size_t get_system_total_memory_in_bytes() {
     auto page_size = (size_t)sysconf(_SC_PAGE_SIZE);
 
     return pages * page_size;
-#elif defined(WIN32) || defined(_MSC_VER)
+#elif defined(_WIN32) || defined(_MSC_VER)
     //TODO
     return 0;
 #else
@@ -237,7 +237,7 @@ static size_t get_system_free_memory_in_bytes() {
     auto page_size = (size_t)sysconf(_SC_PAGE_SIZE);
 
     return avail_pages * page_size;
-#elif defined(WIN32) || defined(_MSC_VER)
+#elif defined(_WIN32) || defined(_MSC_VER)
     //TODO:
     return 0;
 #else
