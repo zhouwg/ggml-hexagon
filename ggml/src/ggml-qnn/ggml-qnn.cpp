@@ -1073,7 +1073,7 @@ enum qcom_chipset_soc_model {
     SM8550 = 43,  // v73, SD 8 Gen 2
     SM8650 = 57,  // v75, SD 8 Gen 3
     SM8750 = 69,  // v79, SD 8 Gen 4
-#if defined(WIN32) || defined(_MSC_VER)
+#if defined(_WIN32) || defined(_MSC_VER)
     SC7280X     = 44,
     SC8280X     = 37,
     SC8380XP    = 60,
