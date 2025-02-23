@@ -187,13 +187,13 @@ int main(int argc, char * argv[]) {
                     n_ggml_op_type = GGML_OP_MUL;
                 } else {
                     show_usage();
-                    return 1;
+                    return 0;
                 }
                 i++;
             }
         } else {
             show_usage();
-            return 1;
+            return 0;
         }
     }
 
