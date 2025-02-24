@@ -195,7 +195,7 @@ option(GGML_OPENCL                          "ggml: use OpenCL"                  
 option(GGML_OPENCL_PROFILING                "ggml: use OpenCL profiling (increases overhead)" OFF)
 option(GGML_OPENCL_EMBED_KERNELS            "ggml: embed kernels"                             ON)
 option(GGML_OPENCL_USE_ADRENO_KERNELS       "ggml: use optimized kernels for Adreno"          ON)
-option(GGML_QNN                             "ggml: use QNN"                                   ON)
+option(GGML_QNN                             "ggml: use QNN"                                   OFF)
 
 # toolchain for vulkan-shaders-gen
 set   (GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "" CACHE FILEPATH "ggml: toolchain file for vulkan-shaders-gen")
