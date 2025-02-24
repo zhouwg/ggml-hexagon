@@ -3556,9 +3556,7 @@ static void ggml_qnn_mul_mat(ggml_backend_t backend, ggml_tensor * op) {
         Qnn_Tensor_t tensor_outputs[] = {
                 *p_tensor2
         };
-        // this is the second technical approach of "how to utilize the Hexagon NPU maximally" through
-        // QNN SDK, details could be found at
-        // https://github.com/kantv-ai/llama.cpp/wiki/mapping-ggml-compute-graph-to-QNN-compute-graph
+        // this is the second technical approach of "how to utilize the Hexagon NPU maximally" through QNN SDK
         CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle,
                                          tensor_inputs, 2,
                                          tensor_outputs, 1,
