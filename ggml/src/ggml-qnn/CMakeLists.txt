@@ -4,9 +4,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
     find_library(LOG_LIB log)
     set(QNN_LINK_LIBRARIES ${LOG_LIB})
     set(QNN_DEFAULT_LIB_SEARCH_PATH "/data/local/tmp/" CACHE STRING "customized library search path for QNN backend")
-else()
-    message(FATAL_ERROR "QNN now only available on Android")
-endif()
 
 if(NOT DEFINED GGML_QNN_SDK_PATH)
     # try read from environment variable
@@ -31,3 +28,7 @@ target_link_libraries(ggml-qnn PRIVATE ${QNN_LINK_LIBRARIES})
 
 string(REGEX REPLACE "/$" "" GGML_QNN_DEFAULT_LIB_SEARCH_PATH "${QNN_DEFAULT_LIB_SEARCH_PATH}")
 target_compile_definitions(ggml-qnn PRIVATE GGML_QNN_DEFAULT_LIB_SEARCH_PATH="${QNN_DEFAULT_LIB_SEARCH_PATH}/")
+
+else()
+    message(FATAL_ERROR "QNN now only available on Android")
+endif()
