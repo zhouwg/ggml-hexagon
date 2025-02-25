@@ -3680,14 +3680,6 @@ static void ggml_backend_qnn_buffer_clear(ggml_backend_buffer_t buffer, uint8_t 
     memset(ctx->buffer, value, ctx->buffer_size);
 }
 
-[[maybe_unused]]static void ggml_backend_qnn_buffer_reset(ggml_backend_buffer_t buffer) {
-    ggml_backend_qnn_buffer_context * ctx = (ggml_backend_qnn_buffer_context *)buffer->context;
-    for (auto * sub_buffer : ctx->sub_buffers) {
-        free(sub_buffer);
-    }
-    ctx->sub_buffers.clear();
-}
-
 static ggml_backend_buffer_i ggml_backend_qnn_buffer_interface = {
         /* .free_buffer     = */ ggml_backend_qnn_buffer_free_buffer,
         /* .get_base        = */ ggml_backend_qnn_buffer_get_base,
