@@ -480,8 +480,8 @@ int main(int argc, char ** argv) {
         LOG_INF(       " - Press Ctrl+C to interject at any time.\n");
 #endif
         LOG_INF(       "%s", control_message);
-        if (params.conversation_mode && params.enable_chat_template && params.prompt.empty()) {
-            LOG_INF(   " - Using default system message. To change it, set a different value via -p PROMPT or -f FILE argument.\n");
+        if (params.conversation_mode && params.enable_chat_template && params.system_prompt.empty()) {
+            LOG_INF(   " - Not using system message. To change it, set a different value via -sys PROMPT\n");
         }
         LOG_INF("\n");
 
