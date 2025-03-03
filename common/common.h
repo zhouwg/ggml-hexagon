@@ -200,6 +200,8 @@ struct common_params_vocoder {
     std::string model     = ""; // model path                                                // NOLINT
     std::string model_url = ""; // model url to download                                     // NOLINT
 
+    std::string speaker_file = ""; // speaker file path                                      // NOLINT
+
     bool use_guide_tokens = false; // enable guide tokens to improve TTS accuracy            // NOLINT
 };
 
