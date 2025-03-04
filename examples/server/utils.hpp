@@ -590,8 +590,8 @@ static json oaicompat_completion_params_parse(
         if (response_type == "json_object") {
             json_schema = json_value(response_format, "schema", json::object());
         } else if (response_type == "json_schema") {
-            json json_schema = json_value(response_format, "json_schema", json::object());
-            json_schema = json_value(json_schema, "schema", json::object());
+            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+            json_schema = json_value(schema_wrapper, "schema", json::object());
         } else if (!response_type.empty() && response_type != "text") {
             throw std::runtime_error("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
         }
