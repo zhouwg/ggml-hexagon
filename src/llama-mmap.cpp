@@ -8,6 +8,7 @@
 #include <climits>
 #include <stdexcept>
 #include <cerrno>
+#include <algorithm>
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
