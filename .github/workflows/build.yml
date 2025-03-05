@@ -1368,6 +1368,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           path: llama-${{ steps.tag.outputs.name }}-xcframework.zip
+          name: llama-${{ steps.tag.outputs.name }}-xcframework
 
   android-build:
     runs-on: ubuntu-latest
