@@ -31,6 +31,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 #if (defined __ANDROID__) || (defined ANDROID)
 #include "android/log.h"
 #endif
@@ -548,56 +552,33 @@ struct test_case {
             const char * bn1 = ggml_backend_name(ud->backend1);
             const char * bn2 = ggml_backend_name(ud->backend2);
 
+            GGMLQNN_LOG_DEBUG("index %d, bn1:%s, bn2:%s  t1 = %p, t1->data = %p, t1->data[0] = %f\n",
+                              index, bn1, bn2, t1, t1->data, ((float *)t1->data)[0]);
+            GGMLQNN_LOG_DEBUG("index %d, bn1:%s, bn2:%s  t2 = %p, t2->data = %p, t2->data[0] = %f\n",
+                              index, bn1, bn2, t2, t2->data, ((float *)t2->data)[0]);
+
             std::vector<float> f1 = tensor_to_float(t1);
 
             if (strcmp(ggml_op_desc(t1), "MUL_MAT") == 0) {
-                GGMLQNN_LOG_DEBUG("Default backend output shape: [%d, %d, %d, %d]\n", t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
-                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
-                    GGMLQNN_LOG_DEBUG("default_dst[%d] = %f\n", i, f1[i]);
+                GGMLQNN_LOG_DEBUG("t1 %p(data %p) output shape: [%d, %d, %d, %d]\n", t1, t1->data, t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
+                std::ostringstream tmposs;
+                for (int i = 0; i < std::min(100, (int)f1.size()); i++) {
+                    tmposs << std::setw(8) << std::fixed << std::setprecision(8) << f1[i] << " ";
                 }
+                GGMLQNN_LOG_DEBUG("data:\n%s\n", tmposs.str().c_str());
             }
 
-            // Log t2->data directly before tensor_to_float
-            GGMLQNN_LOG_DEBUG("Log t2->data directly before tensor_to_float");
             if (strcmp(ggml_op_desc(t2), "MUL_MAT") == 0) {
-                GGMLQNN_LOG_DEBUG("QNN backend t2 shape: [%d, %d, %d, %d]\n", t2->ne[0], t2->ne[1], t2->ne[2], t2->ne[3]);
+                GGMLQNN_LOG_DEBUG("t2 %p(data %p) shape: [%d, %d, %d, %d]\n", t2, t2->data, t2->ne[0], t2->ne[1], t2->ne[2], t2->ne[3]);
+                std::ostringstream tmposs;
                 float * t2_data = (float *)t2->data;
-                for (int i = 0; i < std::min(50, static_cast<int>(t2->ne[0] * t2->ne[1] * t2->ne[2] * t2->ne[3])); i++) {
-                    GGMLQNN_LOG_DEBUG("t2_data[%d] = %f\n", i, t2_data[i]);
+                for (int i = 0; i < std::min(100, static_cast<int>(t2->ne[0] * t2->ne[1] * t2->ne[2] * t2->ne[3])); i++) {
+                    tmposs << std::setw(8) << std::fixed << std::setprecision(8) << t2_data[i] << " ";
                 }
+                GGMLQNN_LOG_DEBUG("data:\n%s\n", tmposs.str().c_str());
             }
 
             std::vector<float> f2 = tensor_to_float(t2);
-            GGMLQNN_LOG_DEBUG("after tensor_to_float(t2)");
-            double err = nmse(f1.data(), f2.data(), f1.size());
-            if (err > ud->max_err) {
-                GGMLQNN_LOG_INFO("[%s] NMSE = %.9f > %.9f ", ggml_op_desc(t1), err, ud->max_err);
-                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
-                    if (f1[i] != f2[i]) {
-                        GGMLQNN_LOG_DEBUG("Mismatch at index %d: default=%f, qnn=%f, diff=%f\n", i, f1[i], f2[i], f1[i] - f2[i]);
-                    }
-                }
-                ud->ok = false;
-            }
-            return ud->ok;
-
-
-            if (t1->op == GGML_OP_NONE) {
-                // sentinels must be unchanged
-                std::vector<uint8_t> t1_data(ggml_nbytes(t1));
-                std::vector<uint8_t> t2_data(ggml_nbytes(t2));
-                ggml_backend_tensor_get(t1, t1_data.data(), 0, ggml_nbytes(t1));
-                ggml_backend_tensor_get(t2, t2_data.data(), 0, ggml_nbytes(t2));
-
-                if (memcmp(t1_data.data(), t2_data.data(), ggml_nbytes(t1)) != 0) {
-                    printf("sentinel mismatch: %s ", t1->name);
-                    ud->ok = false;
-                    return true;
-                }
-            }
-
-           // std::vector<float> f1 = tensor_to_float(t1);
-           // std::vector<float> f2 = tensor_to_float(t2);
 
             double err2 = nmse(f1.data(), f2.data(), f1.size());
             if (err2 > ud->max_err) {
@@ -605,7 +586,7 @@ struct test_case {
                 // Log first few mismatched elements
                 for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
                     if (f1[i] != f2[i]) {
-                        GGMLQNN_LOG_DEBUG("Mismatch at index %d: default=%f, qnn=%f, diff=%f\n", i, f1[i], f2[i], f1[i] - f2[i]);
+                        //GGMLQNN_LOG_DEBUG("Mismatch at index %d: default=%f, qnn=%f, diff=%f\n", i, f1[i], f2[i], f1[i] - f2[i]);
                     }
                 }
                 ud->ok = false;
@@ -616,6 +597,7 @@ struct test_case {
                 if (std::isnan(f1[i]) || std::isnan(f2[i])) {
                     printf("[%s] NaN at index %zu (%s=%f %s=%f) ", ggml_op_desc(t1), i, bn1, f1[i], bn2, f2[i]);
                     ud->ok = false;
+                    GGMLQNN_LOG_INFO("return true");
                     return true;
                 }
                 // check for infs: both must be inf of the same sign, or both must be finite
@@ -624,17 +606,19 @@ struct test_case {
                         if (std::signbit(f1[i]) != std::signbit(f2[i])) {
                             printf("[%s] inf sign mismatch: %s=%f %s=%f ", ggml_op_desc(t1), bn1, f1[i], bn2, f2[i]);
                             ud->ok = false;
+                            GGMLQNN_LOG_INFO("return true");
                             return true;
                         }
                     } else {
                         printf("[%s] inf mismatch: %s=%f %s=%f ", ggml_op_desc(t1), bn1, f1[i], bn2, f2[i]);
                         ud->ok = false;
+                        GGMLQNN_LOG_INFO("return true");
                         return true;
                     }
                 }
             }
 
-            err = nmse(f1.data(), f2.data(), f1.size());
+            double err = nmse(f1.data(), f2.data(), f1.size());
             if (err > ud->max_err) {
                 GGMLQNN_LOG_INFO("[%s] NMSE = %.9f > %.9f ", ggml_op_desc(t1), err, ud->max_err);
                 //for (int i = 0; i < (int) f1.size(); i++) {
@@ -650,6 +634,7 @@ struct test_case {
         };
 
         const bool cmp_ok = ggml_backend_compare_graph_backend(backend1, backend2, gf, callback, &ud);
+
 
         if (!cmp_ok) {
             GGMLQNN_LOG_INFO("compare failed ");
@@ -914,6 +899,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     // test cases without permutation
     const ggml_type type_a = GGML_TYPE_F32;
     const ggml_type type_b = GGML_TYPE_F32;
+
     /*
     test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 16, 256, {1, 1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 16, 256, {1, 1}, {2, 1}));

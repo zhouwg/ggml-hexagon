@@ -3997,190 +3997,6 @@ void ggml_qnn_mul_mat(ggml_backend_qnn_context * ctx, ggml_tensor * op) {
  * than ggml_qnn_mul_mat, so it's a standalone function.
  * it will be combined with ggml_qnn_mul_mat in the future
  */
-static void ggml_qnn_mul_mat_4d_lastweek(ggml_backend_qnn_context *ctx, ggml_tensor *op) {
-    Qnn_ErrorHandle_t error = QNN_SUCCESS;
-    bool graph_initialized = false;
-    qnn_perf op_perf = qnn_perf("ggml_qnn_mul_mat_4d");
-    qnn_instance *instance = ctx->instance;
-    QNN_INTERFACE_VER_TYPE qnn_raw_interface = ctx->raw_interface;
-
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
-    ggml_tensor *dst = op;
-
-    GGMLQNN_CHECK_PARAMS(ctx, src0, src1, dst);
-    GGML_ASSERT(ggml_n_dims(src0) == 4 && ggml_n_dims(src1) == 4);
-    op_perf.start();
-
-    std::string graph_name;
-    ggmlqnn_get_graphkey_from_op(op, graph_name);
-    GGMLQNN_LOG_DEBUG("graph name %s\n", graph_name.c_str());
-
-    ggmlqnn_print_tensors_info(__func__, ctx, src0, src1, dst);
-
-    Qnn_GraphHandle_t graph_handle = nullptr;
-    Qnn_Tensor_t *p_tensor0 = nullptr;
-    Qnn_Tensor_t *p_reshape0_out = nullptr;
-    Qnn_Tensor_t *p_tile0_out = nullptr;
-    Qnn_Tensor_t *p_tensor1 = nullptr;
-    Qnn_Tensor_t *p_permute1_out = nullptr;
-    Qnn_Tensor_t *p_reshape1_out = nullptr;
-    Qnn_Tensor_t *p_matmul_out = nullptr;
-    Qnn_Tensor_t *p_reshape2_out = nullptr;
-
-    if (instance->_qnn_graph_map.find(graph_name) != instance->_qnn_graph_map.end()) {
-        graph_initialized = true;
-        qnn_res_t &graph_item = instance->_qnn_graph_map[graph_name];
-        graph_handle = std::get<0>(graph_item);
-        qnn_tensors_t &tensors = std::get<1>(graph_item);
-        p_tensor0 = tensors[0];
-        p_reshape0_out = tensors[1];
-        p_tile0_out = tensors[2];
-        p_tensor1 = tensors[3];
-        p_permute1_out = tensors[4];
-        p_reshape1_out = tensors[5];
-        p_matmul_out = tensors[6];
-        p_reshape2_out = tensors[7];
-    } else {
-        CHECK_QNN_API(error, qnn_raw_interface.graphCreate(instance->get_qnn_context_handle(),
-                                                           graph_name.c_str(), NULL, &graph_handle));
-
-        // Define dimensions
-        uint32_t K = src0->ne[0];               // Inner dimension
-        uint32_t M = src0->ne[1];               // Rows of src0
-        uint32_t N = src1->ne[1];               // Columns of src1
-        uint32_t B0 = src0->ne[2] * src0->ne[3]; // src0 batch
-        uint32_t B1 = src1->ne[2] * src1->ne[3]; // src1 batch (drives output)
-
-        // Validate K only
-        GGML_ASSERT(src0->ne[0] == src1->ne[0]); // K must match
-
-        // src0: [K, M, H0, B0] -> QNN: [B0, H0, M, K]
-        uint32_t src0_dims[] = {static_cast<uint32_t>(src0->ne[3]), static_cast<uint32_t>(src0->ne[2]), static_cast<uint32_t>(src0->ne[1]), static_cast<uint32_t>(src0->ne[0])};
-        p_tensor0 = GQCGT(src0, "input0", QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
-                          src0_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tensor0));
-
-        // Reshape src0 to [B0, M, K]
-        uint32_t reshape0_out_dims[] = {B0, M, K};
-        p_reshape0_out = GQCGT(nullptr, "reshape0_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
-                               reshape0_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_reshape0_out));
-        Qnn_Tensor_t reshape0_inputs[] = {*p_tensor0};
-        Qnn_Tensor_t reshape0_outputs[] = {*p_reshape0_out};
-        Qnn_OpConfig_t reshape0_op = ggmlqnn_create_op_config("reshape0", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                              QNN_OP_RESHAPE, nullptr, 0,
-                                                              reshape0_inputs, 1, reshape0_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape0_op));
-
-        // Tile src0 to match B1: [B0, M, K] -> [B1, M, K]
-        uint32_t tile0_out_dims[] = {B1, M, K};
-        p_tile0_out = GQCGT(nullptr, "tile0_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
-                            tile0_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tile0_out));
-        uint32_t tile_multiples[] = {B1 / B0, 1, 1};
-        uint32_t tile_dims[] = {3};
-        Qnn_Tensor_t *p_tile_multiples = GQCGT(nullptr, "tile_multiples", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, 1,
-                                               tile_dims, tile_multiples, sizeof(tile_multiples));
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tile_multiples));
-        Qnn_Param_t tile_params[] = {{QNN_PARAMTYPE_TENSOR, "multiples", .tensorParam = *p_tile_multiples}};
-        Qnn_Tensor_t tile0_inputs[] = {*p_reshape0_out};
-        Qnn_Tensor_t tile0_outputs[] = {*p_tile0_out};
-        Qnn_OpConfig_t tile0_op = ggmlqnn_create_op_config("tile0", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                           QNN_OP_TILE, tile_params, 1,
-                                                           tile0_inputs, 1, tile0_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, tile0_op));
-
-        // src1: [N, K, H1, B1] -> QNN: [B1, H1, N, K]
-        uint32_t src1_dims[] = {static_cast<uint32_t>(src1->ne[3]), static_cast<uint32_t>(src1->ne[2]), static_cast<uint32_t>(src1->ne[1]), static_cast<uint32_t>(src1->ne[0])};
-        p_tensor1 = GQCGT(src1, "input1", QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
-                          src1_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tensor1));
-
-        // Permute src1 to [B1, H1, K, N]
-        uint32_t perm_data[] = {0, 1, 3, 2};
-        uint32_t perm_dims[] = {4};
-        Qnn_Tensor_t *p_perm = GQCGT(nullptr, "perm", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, 1,
-                                     perm_dims, perm_data, sizeof(perm_data));
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_perm));
-        uint32_t permute1_out_dims[] = {static_cast<uint32_t>(src1->ne[3]), static_cast<uint32_t>(src1->ne[2]), static_cast<uint32_t>(src1->ne[0]), static_cast<uint32_t>(src1->ne[1])};
-        p_permute1_out = GQCGT(nullptr, "permute1_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 4,
-                               permute1_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_permute1_out));
-        Qnn_Param_t permute1_params[] = {{QNN_PARAMTYPE_TENSOR, "perm", .tensorParam = *p_perm}};
-        Qnn_Tensor_t permute1_inputs[] = {*p_tensor1};
-        Qnn_Tensor_t permute1_outputs[] = {*p_permute1_out};
-        Qnn_OpConfig_t permute1_op = ggmlqnn_create_op_config("permute1", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                              QNN_OP_TRANSPOSE, permute1_params, 1,
-                                                              permute1_inputs, 1, permute1_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, permute1_op));
-
-        // Reshape src1 to [B1, K, N]
-        uint32_t reshape1_out_dims[] = {B1, K, N};
-        p_reshape1_out = GQCGT(nullptr, "reshape1_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
-                               reshape1_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_reshape1_out));
-        Qnn_Tensor_t reshape1_inputs[] = {*p_permute1_out};
-        Qnn_Tensor_t reshape1_outputs[] = {*p_reshape1_out};
-        Qnn_OpConfig_t reshape1_op = ggmlqnn_create_op_config("reshape1", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                              QNN_OP_RESHAPE, nullptr, 0,
-                                                              reshape1_inputs, 1, reshape1_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape1_op));
-
-        // MatMul: [B1, M, K] x [B1, K, N] -> [B1, M, N]
-        uint32_t matmul_out_dims[] = {B1, M, N};
-        p_matmul_out = GQCGT(nullptr, "matmul_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
-                             matmul_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_matmul_out));
-        Qnn_Tensor_t matmul_inputs[] = {*p_tile0_out, *p_reshape1_out};
-        Qnn_Tensor_t matmul_outputs[] = {*p_matmul_out};
-        Qnn_OpConfig_t matmul_op = ggmlqnn_create_op_config("matmul", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                            QNN_OP_MAT_MUL, nullptr, 0,
-                                                            matmul_inputs, 2, matmul_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, matmul_op));
-
-        // Output: [N, M, H1, B1] -> QNN: [B1, H1, M, N]
-        uint32_t reshape2_out_dims[] = {static_cast<uint32_t>(dst->ne[3]), static_cast<uint32_t>(dst->ne[2]), static_cast<uint32_t>(dst->ne[1]), static_cast<uint32_t>(dst->ne[0])};
-        p_reshape2_out = GQCGT(dst, "output", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, 4,
-                               reshape2_out_dims, nullptr, 0);
-        CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_reshape2_out));
-        Qnn_Tensor_t reshape2_inputs[] = {*p_matmul_out};
-        Qnn_Tensor_t reshape2_outputs[] = {*p_reshape2_out};
-        Qnn_OpConfig_t reshape2_op = ggmlqnn_create_op_config("reshape2", QNN_OP_PACKAGE_NAME_QTI_AISW,
-                                                              QNN_OP_RESHAPE, nullptr, 0,
-                                                              reshape2_inputs, 1, reshape2_outputs, 1);
-        CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape2_op));
-
-        // Finalize
-        CHECK_QNN_API(error, qnn_raw_interface.graphFinalize(graph_handle, NULL, NULL));
-
-        // Cache
-        qnn_tensors_t ggml_op_mulmat_tensors = {p_tensor0, p_reshape0_out, p_tile0_out, p_tensor1, p_permute1_out, p_reshape1_out, p_matmul_out, p_reshape2_out};
-        instance->_qnn_graph_map[graph_name] = std::make_tuple(graph_handle, ggml_op_mulmat_tensors);
-    }
-
-    // Execute
-    QNN_VER_PTR(*p_tensor0)->clientBuf = {src0->data, static_cast<uint32_t>(ggml_nbytes(src0))};
-    QNN_VER_PTR(*p_tensor1)->clientBuf = {src1->data, static_cast<uint32_t>(ggml_nbytes(src1))};
-    QNN_VER_PTR(*p_reshape2_out)->clientBuf = {dst->data, static_cast<uint32_t>(ggml_nbytes(dst))};
-
-    Qnn_Tensor_t input_tensors[] = {*p_tensor0, *p_tensor1};
-    Qnn_Tensor_t output_tensors[] = {*p_reshape2_out};
-    CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle, input_tensors, 2,
-                                                        output_tensors, 1, NULL, NULL));
-
-#if 0
-    // Log dst for debugging
-    float *dst_data = (float *)dst->data;
-    GGMLQNN_LOG_DEBUG("dst shape: [%d, %d, %d, %d]\n", dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
-    for (int i = 0; i < dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3]; i++) {
-        GGMLQNN_LOG_DEBUG("dst[%d] = %f\n", i, dst_data[i]);
-    }
-#endif
-
-    op_perf.info();
-}
-
 static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) {
     Qnn_ErrorHandle_t error = QNN_SUCCESS;
     bool graph_initialized = false;
@@ -4199,6 +4015,7 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     std::string graph_name;
     ggmlqnn_get_graphkey_from_op(op, graph_name);
     GGMLQNN_LOG_DEBUG("graph name %s\n", graph_name.c_str());
+    GGMLQNN_LOG_INFO("dst %p, dst->data %p", dst, dst->data);
 
     ggmlqnn_print_tensors_info(__func__, ctx, src0, src1, dst);
 
@@ -4340,22 +4157,18 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     Qnn_Tensor_t output_tensors[] = {*p_reshape2_out};
     CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle, input_tensors, 2,
                                                         output_tensors, 1, NULL, NULL));
-
-    // Copy QNN output to dst->data if buffers differ
-    if (p_reshape2_out->v1.clientBuf.data != dst->data) {
-        GGMLQNN_LOG_DEBUG("Copying QNN output to dst->data\n");
-        memcpy(dst->data, p_reshape2_out->v1.clientBuf.data, ggml_nbytes(dst));
-    }
-
-
-#if 1 // Enable for debugging
+#if 1
     // Log dst for debugging
     float *dst_data = (float *)dst->data;
     GGMLQNN_LOG_DEBUG("dst shape: [%d, %d, %d, %d]\n", dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
-    for (int i = 0; i < std::min(50, static_cast<int>(dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3])); i++) {
-        GGMLQNN_LOG_DEBUG("dst[%d] = %f\n", i, dst_data[i]);
+    std::ostringstream tmposs;
+    for (int i = 0; i < std::min(100, static_cast<int>(dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3])); i++) {
+        tmposs << std::setw(8) << std::fixed << std::setprecision(8) << dst_data[i] << " ";
     }
+    GGMLQNN_LOG_DEBUG("dst->data:\n %s\n", tmposs.str().c_str());
 #endif
+
+    GGMLQNN_LOG_DEBUG("Returning dst = %p, dst->data %p, dst->data[0] = %f\n", dst, dst->data, ((float *)dst->data)[0]);
 
     op_perf.info();
 }
