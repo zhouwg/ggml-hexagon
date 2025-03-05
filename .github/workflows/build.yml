@@ -716,31 +716,6 @@ jobs:
         run: |
           ./build-xcframework.sh
 
-      - name: Determine tag name
-        id: tag
-        shell: bash
-        run: |
-          BUILD_NUMBER="$(git rev-list --count HEAD)"
-          SHORT_HASH="$(git rev-parse --short=7 HEAD)"
-          if [[ "${{ env.BRANCH_NAME }}" == "master" ]]; then
-            echo "name=b${BUILD_NUMBER}" >> $GITHUB_OUTPUT
-          else
-            SAFE_NAME=$(echo "${{ env.BRANCH_NAME }}" | tr '/' '-')
-            echo "name=${SAFE_NAME}-b${BUILD_NUMBER}-${SHORT_HASH}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Pack artifacts
-        id: pack_artifacts
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
-        run: |
-          zip -r llama-${{ steps.tag.outputs.name }}-xcframework.zip build-apple/llama.xcframework
-
-      - name: Upload artifacts
-        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          path: llama-${{ steps.tag.outputs.name }}-xcframework.zip
-
   windows-msys2:
     runs-on: windows-latest
 
@@ -1368,6 +1343,31 @@ jobs:
 
       - name: Build Xcode project
         run: xcodebuild -project examples/llama.swiftui/llama.swiftui.xcodeproj -scheme llama.swiftui -sdk iphoneos CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= -destination 'generic/platform=iOS' FRAMEWORK_FOLDER_PATH=./build-ios build
+
+      - name: Determine tag name
+        id: tag
+        shell: bash
+        run: |
+          BUILD_NUMBER="$(git rev-list --count HEAD)"
+          SHORT_HASH="$(git rev-parse --short=7 HEAD)"
+          if [[ "${{ env.BRANCH_NAME }}" == "master" ]]; then
+            echo "name=b${BUILD_NUMBER}" >> $GITHUB_OUTPUT
+          else
+            SAFE_NAME=$(echo "${{ env.BRANCH_NAME }}" | tr '/' '-')
+            echo "name=${SAFE_NAME}-b${BUILD_NUMBER}-${SHORT_HASH}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pack artifacts
+        id: pack_artifacts
+        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+        run: |
+          zip -r llama-${{ steps.tag.outputs.name }}-xcframework.zip build-apple/llama.xcframework
+
+      - name: Upload artifacts
+        if: ${{ ( github.event_name == 'push' && github.ref == 'refs/heads/master' ) || github.event.inputs.create_release == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: llama-${{ steps.tag.outputs.name }}-xcframework.zip
 
   android-build:
     runs-on: ubuntu-latest
