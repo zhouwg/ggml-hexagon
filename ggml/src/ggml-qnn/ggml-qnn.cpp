@@ -69,6 +69,7 @@
 #include <memory>
 #include <regex>
 #include <random>
+#include <algorithm>
 #include <functional>
 #include <unordered_map>
 #include <condition_variable>
@@ -4225,32 +4226,29 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
                                                            graph_name.c_str(), NULL, &graph_handle));
 
         // Define dimensions
-        uint32_t K = src0->ne[3];  // Inner dimension (e.g., 2)
-        uint32_t M = src0->ne[2];  // Rows of src0 (e.g., 3)
-        uint32_t N = src1->ne[3];  // Columns of src1 (e.g., 4)
-        uint32_t B0 = src0->ne[0]; // Batch dim 0 of src0 (e.g., 256)
-        uint32_t B1 = src0->ne[1]; // Batch dim 1 of src0 (e.g., 16)
-        uint32_t B2 = src1->ne[0]; // Batch dim 0 of src1 (e.g., 256)
-        uint32_t B3 = src1->ne[1]; // Batch dim 1 of src1 (e.g., 16)
-        uint32_t B4 = src1->ne[2]; // Batch dim 2 of src1 (e.g., 6)
+        uint32_t K = src0->ne[0];  // Contraction dim (256)
+        uint32_t M = src0->ne[1];  // Rows (16)
+        uint32_t N = src1->ne[1];  // Columns (16)
+        uint32_t B0 = src0->ne[2]; // Batch dim 0 of src0 (3)
+        uint32_t B1 = src0->ne[3]; // Batch dim 1 of src0 (2)
+        uint32_t B2 = src1->ne[2]; // Batch dim 0 of src1 (6)
+        uint32_t B3 = src1->ne[3]; // Batch dim 1 of src1 (4)
 
-        // Validate dimensions for batched matmul
-        GGML_ASSERT(src0->ne[3] == src1->ne[2]); // K must match (e.g., 2 == 6, adjust if test intent differs)
-        GGML_ASSERT(src0->ne[0] == src1->ne[0]); // Batch dim 0 must match
-        GGML_ASSERT(src0->ne[1] == src1->ne[1]); // Batch dim 1 must match
-        GGML_ASSERT(dst->ne[0] == src0->ne[1]);  // Output dim 0 from src0
-        GGML_ASSERT(dst->ne[1] == src1->ne[1]);  // Output dim 1 from src1
-        GGML_ASSERT(dst->ne[2] == src1->ne[2]);  // Output dim 2 from src1
-        GGML_ASSERT(dst->ne[3] == src1->ne[3]);  // Output dim 3 from src1
+        // Validate dimensions
+        GGML_ASSERT(src0->ne[0] == src1->ne[0]); // K must match (256 == 256)
+        GGML_ASSERT(src0->ne[1] == dst->ne[0]);  // M matches output (16 == 16)
+        GGML_ASSERT(src1->ne[1] == dst->ne[1]);  // N matches output (16 == 16)
+        GGML_ASSERT(src1->ne[2] == dst->ne[2]);  // Batch dim matches (6 == 6)
+        GGML_ASSERT(src1->ne[3] == dst->ne[3]);  // Batch dim matches (4 == 4)
 
-        // src0: [B0, B1, M, K] -> QNN: [B0 * B1, M, K]
+        // src0: [K, M, B0, B1] -> QNN: [B0 * B1, M, K]
         uint32_t src0_dims[] = {static_cast<uint32_t>(src0->ne[0]), static_cast<uint32_t>(src0->ne[1]),
                                 static_cast<uint32_t>(src0->ne[2]), static_cast<uint32_t>(src0->ne[3])};
         p_tensor0 = GQCGT(src0, "input0", QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
                           src0_dims, nullptr, 0);
         CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tensor0));
 
-        // Reshape src0 to [B0 * B1, M, K] (e.g., [4096, 3, 2])
+        // Reshape src0 to [B0 * B1, M, K] (e.g., [6, 16, 256])
         uint32_t reshape0_out_dims[] = {B0 * B1, M, K};
         p_reshape0_out = GQCGT(nullptr, "reshape0_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                reshape0_out_dims, nullptr, 0);
@@ -4262,14 +4260,14 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
                                                               reshape0_inputs, 1, reshape0_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape0_op));
 
-        // src1: [B2, B3, K, N] -> QNN: [B2 * B3, K, N]
+        // src1: [K, N, B2, B3] -> QNN: [B2 * B3, K, N]
         uint32_t src1_dims[] = {static_cast<uint32_t>(src1->ne[0]), static_cast<uint32_t>(src1->ne[1]),
                                 static_cast<uint32_t>(src1->ne[2]), static_cast<uint32_t>(src1->ne[3])};
         p_tensor1 = GQCGT(src1, "input1", QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
                           src1_dims, nullptr, 0);
         CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_tensor1));
 
-        // Reshape src1 to [B2 * B3, K, N] (e.g., [4096, 6, 4])
+        // Reshape src1 to [B2 * B3, K, N] (e.g., [24, 256, 16])
         uint32_t reshape1_out_dims[] = {B2 * B3, K, N};
         p_reshape1_out = GQCGT(nullptr, "reshape1_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                reshape1_out_dims, nullptr, 0);
@@ -4281,7 +4279,7 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
                                                               reshape1_inputs, 1, reshape1_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape1_op));
 
-        // MatMul: [B0 * B1, M, K] x [B2 * B3, K, N] -> [B0 * B1, M, N] (e.g., [4096, 3, 4])
+        // MatMul: [B0 * B1, M, K] x [B2 * B3, K, N] -> [B0 * B1, M, N] (e.g., [6, 16, 16])
         uint32_t matmul_out_dims[] = {B0 * B1, M, N};
         p_matmul_out = GQCGT(nullptr, "matmul_out", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                              matmul_out_dims, nullptr, 0);
@@ -4293,9 +4291,8 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
                                                             matmul_inputs, 2, matmul_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, matmul_op));
 
-        // Output: Reshape to [B1, B3, B4, N] (e.g., [16, 16, 6, 4])
-        uint32_t reshape2_out_dims[] = {static_cast<uint32_t>(dst->ne[0]), static_cast<uint32_t>(dst->ne[1]),
-                                        static_cast<uint32_t>(dst->ne[2]), static_cast<uint32_t>(dst->ne[3])};
+        // Output: Reshape to [M, N, B2, B3] (e.g., [16, 16, 6, 4])
+        uint32_t reshape2_out_dims[] = {M, N, B2, B3};
         p_reshape2_out = GQCGT(dst, "output", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, 4,
                                reshape2_out_dims, nullptr, 0);
         CHECK_QNN_API(error, qnn_raw_interface.tensorCreateGraphTensor(graph_handle, p_reshape2_out));
@@ -4328,7 +4325,8 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     // Log dst for debugging
     float *dst_data = (float *)dst->data;
     GGMLQNN_LOG_DEBUG("dst shape: [%d, %d, %d, %d]\n", dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
-    for (int i = 0; i < 10; i++) {
+    int tmp = dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3];
+    for (int i = 0; i < std::min(10, tmp); i++) {
         GGMLQNN_LOG_DEBUG("dst[%d] = %f\n", i, dst_data[i]);
     }
 #endif
