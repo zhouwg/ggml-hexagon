@@ -542,10 +542,45 @@ struct test_case {
             backend2
         };
 
+
         auto callback = [](int index, ggml_tensor * t1, ggml_tensor * t2, void * user_data) -> bool {
             callback_userdata * ud = (callback_userdata *) user_data;
             const char * bn1 = ggml_backend_name(ud->backend1);
             const char * bn2 = ggml_backend_name(ud->backend2);
+
+            std::vector<float> f1 = tensor_to_float(t1);
+
+            if (strcmp(ggml_op_desc(t1), "MUL_MAT") == 0) {
+                GGMLQNN_LOG_DEBUG("Default backend output shape: [%d, %d, %d, %d]\n", t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
+                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
+                    GGMLQNN_LOG_DEBUG("default_dst[%d] = %f\n", i, f1[i]);
+                }
+            }
+
+            // Log t2->data directly before tensor_to_float
+            GGMLQNN_LOG_DEBUG("Log t2->data directly before tensor_to_float");
+            if (strcmp(ggml_op_desc(t2), "MUL_MAT") == 0) {
+                GGMLQNN_LOG_DEBUG("QNN backend t2 shape: [%d, %d, %d, %d]\n", t2->ne[0], t2->ne[1], t2->ne[2], t2->ne[3]);
+                float * t2_data = (float *)t2->data;
+                for (int i = 0; i < std::min(50, static_cast<int>(t2->ne[0] * t2->ne[1] * t2->ne[2] * t2->ne[3])); i++) {
+                    GGMLQNN_LOG_DEBUG("t2_data[%d] = %f\n", i, t2_data[i]);
+                }
+            }
+
+            std::vector<float> f2 = tensor_to_float(t2);
+            GGMLQNN_LOG_DEBUG("after tensor_to_float(t2)");
+            double err = nmse(f1.data(), f2.data(), f1.size());
+            if (err > ud->max_err) {
+                GGMLQNN_LOG_INFO("[%s] NMSE = %.9f > %.9f ", ggml_op_desc(t1), err, ud->max_err);
+                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
+                    if (f1[i] != f2[i]) {
+                        GGMLQNN_LOG_DEBUG("Mismatch at index %d: default=%f, qnn=%f, diff=%f\n", i, f1[i], f2[i], f1[i] - f2[i]);
+                    }
+                }
+                ud->ok = false;
+            }
+            return ud->ok;
+
 
             if (t1->op == GGML_OP_NONE) {
                 // sentinels must be unchanged
@@ -561,15 +596,8 @@ struct test_case {
                 }
             }
 
-            std::vector<float> f1 = tensor_to_float(t1);
-            std::vector<float> f2 = tensor_to_float(t2);
-
-            if (strcmp(ggml_op_desc(t1), "MUL_MAT") == 0) {
-                GGMLQNN_LOG_DEBUG("Default backend output shape: [%d, %d, %d, %d]\n", t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
-                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
-                    GGMLQNN_LOG_DEBUG("default_dst[%d] = %f\n", i, f1[i]);
-                }
-            }
+           // std::vector<float> f1 = tensor_to_float(t1);
+           // std::vector<float> f2 = tensor_to_float(t2);
 
             double err2 = nmse(f1.data(), f2.data(), f1.size());
             if (err2 > ud->max_err) {
@@ -606,7 +634,7 @@ struct test_case {
                 }
             }
 
-            double err = nmse(f1.data(), f2.data(), f1.size());
+            err = nmse(f1.data(), f2.data(), f1.size());
             if (err > ud->max_err) {
                 GGMLQNN_LOG_INFO("[%s] NMSE = %.9f > %.9f ", ggml_op_desc(t1), err, ud->max_err);
                 //for (int i = 0; i < (int) f1.size(); i++) {
