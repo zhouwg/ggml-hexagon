@@ -4341,6 +4341,13 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle, input_tensors, 2,
                                                         output_tensors, 1, NULL, NULL));
 
+    // Copy QNN output to dst->data if buffers differ
+    if (p_reshape2_out->v1.clientBuf.data != dst->data) {
+        GGMLQNN_LOG_DEBUG("Copying QNN output to dst->data\n");
+        memcpy(dst->data, p_reshape2_out->v1.clientBuf.data, ggml_nbytes(dst));
+    }
+
+
 #if 1 // Enable for debugging
     // Log dst for debugging
     float *dst_data = (float *)dst->data;
