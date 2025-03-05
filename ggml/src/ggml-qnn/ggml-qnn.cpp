@@ -75,7 +75,11 @@
 #include <cassert>
 #include <unordered_set>
 #include <utility>
+
+#if (defined __ANDROID__) || (defined ANDROID)
 #include <stdatomic.h>
+#endif
+
 #include <future>
 #if (defined __ANDROID__) || (defined ANDROID)
 #include "android/log.h"
@@ -136,7 +140,7 @@ static Qnn_Tensor_t * ggmlqnn_create_general_tensor(const ggml_tensor * tensor, 
 
 static void ggml_qnn_general_node(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
 static void ggml_qnn_mul_mat(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
-static 
+
 static void ggml_qnn_repeat(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
 static void ggml_qnn_div(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
 static void ggml_qnn_leaky_relu(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
@@ -175,7 +179,7 @@ static void ggml_qnn_rope(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
 #else
 #define GGMLQNN_DEBUG                           1  // for troubleshooting QNN backend
 #define ENABLE_QNNBACKEND_PERF                  0  // enable/disable op's perf info
-#define GGMLQNN_PRINT_QNN_INTERNAL_LOG          0  // enable/disable QNN's internal log
+#define GGMLQNN_PRINT_QNN_INTERNAL_LOG          1  // enable/disable QNN's internal log
 #define GGMLQNN_PRINT_OP_ADD_LOG                0  // GGML_OP_ADD already verified with QNN-CPU / QNN-GPU / QNN-NPU
 #define GGMLQNN_PRINT_OP_MUL_MAT_LOG            1
 #endif
@@ -190,7 +194,7 @@ static void ggml_qnn_rope(ggml_backend_qnn_context * ctx, ggml_tensor * dst);
 #else
 #define GGMLQNN_LOG_DEBUG(...)
 #endif
-void ggmlqnn_log_internal(ggml_log_level level, const char * file, const char * func, int line, const char * format, ...) {
+static void ggmlqnn_log_internal(ggml_log_level level, const char * file, const char * func, int line, const char * format, ...) {
     static std::mutex ggmlqnn_log_internal_mutex;
     static char s_ggmlqnn_log_internal_buf[GGML_QNN_LOGBUF_LEN];
 
@@ -204,7 +208,8 @@ void ggmlqnn_log_internal(ggml_log_level level, const char * file, const char * 
         if (len < (GGML_QNN_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
             //for Android application(standard APP or command line tool)
-            __android_log_print(ANDROID_LOG_INFO, "ggml-qnn", "%s\n", s_ggmlqnn_log_internal_buf);
+            //modify from "ggml-qnn" to "kantv" to make AI happy
+            __android_log_print(ANDROID_LOG_INFO, "kantv", "%s\n", s_ggmlqnn_log_internal_buf);
             if (GGML_LOG_LEVEL_INFO == level) {
                 printf("%s\n", s_ggmlqnn_log_internal_buf);
             }
@@ -242,7 +247,7 @@ const char *        dlerror(void);
 
 static const char * last_func = nullptr;
 static long last_err;
-void * dlopen(const char * dll, int flags) {
+static void * dlopen(const char * dll, int flags) {
   HINSTANCE h = LoadLibraryA(dll);
   GGML_UNUSED(flags);
   if (h == NULL) {
@@ -252,7 +257,7 @@ void * dlopen(const char * dll, int flags) {
   return h;
 }
 
-int dlclose(void * h) {
+static int dlclose(void * h) {
   if (!FreeLibrary((HINSTANCE)h)) {
     last_err  = GetLastError();
     last_func = "dlclose";
@@ -261,7 +266,7 @@ int dlclose(void * h) {
   return 0;
 }
 
-void * dlsym(void * h, const char * name) {
+static void * dlsym(void * h, const char * name) {
   FARPROC p = GetProcAddress((HINSTANCE)h, name);
   if (!p) {
     last_err  = GetLastError();
@@ -270,7 +275,7 @@ void * dlsym(void * h, const char * name) {
   return (void*)(intptr_t)p;
 }
 
-const char * dlerror(void) {
+static const char * dlerror(void) {
   static char str[512];
   if (!last_err) return nullptr;
 
@@ -639,7 +644,7 @@ static int free_qnn_tensor(Qnn_Tensor_t * tensor) {
     return err;
 }
 
-const char * ggmlqnn_get_error_string(Qnn_ErrorHandle_t qnn_error_code) {
+static const char * ggmlqnn_get_error_string(Qnn_ErrorHandle_t qnn_error_code) {
     // file:///opt/qcom/aistack/qairt/2.31.0.250130/docs/QNN/general/api_error_codes.html
     switch (qnn_error_code) {
         case QNN_SUCCESS:
@@ -743,7 +748,7 @@ const char * ggmlqnn_get_error_string(Qnn_ErrorHandle_t qnn_error_code) {
 }
 
 // helper function to create an operation config
-Qnn_OpConfig_t ggmlqnn_create_op_config(const char * name, const char * package, const char * type,
+static Qnn_OpConfig_t ggmlqnn_create_op_config(const char * name, const char * package, const char * type,
                                        Qnn_Param_t * params, uint32_t num_params,
                                        Qnn_Tensor_t * inputs, uint32_t num_inputs,
                                        Qnn_Tensor_t * outputs, uint32_t num_outputs) {
@@ -813,7 +818,6 @@ struct qnn_op_caps_t {
     const size_t input_param_count  = 0;
     const char * qnn_param_name     = nullptr;
 };
-extern const qnn_op_caps_t ggmlqnn_k_op_caps[];
 
 #if ENABLE_QNNBACKEND_PERF
 class qnn_perf {
@@ -1260,6 +1264,20 @@ static struct qcom_socinfo g_qnn_soc_info_table[] = {
 };
 
 //the following helper funcs are used to ensure every QNN tensor name is unique
+#if 1//defined(_WIN32)
+static uint32_t g_ggmltensor_idx = 0;
+static void reset_idx() {
+    g_ggmltensor_idx = 0;
+}
+
+static void inc_idx() {
+    g_ggmltensor_idx++;
+}
+
+static int32_t get_idx() {
+    return g_ggmltensor_idx;
+}
+#else
 static std::atomic<int32_t>  g_ggmltensor_idx(0);
 static void reset_idx() {
     g_ggmltensor_idx = 0;
@@ -1272,6 +1290,7 @@ static void inc_idx() {
 static int32_t get_idx() {
     return g_ggmltensor_idx.load();
 }
+#endif
 
 // file:///opt/qcom/aistack/qairt/2.31.0.250130/docs/QNN/general/quantization.html
 // CPU - Choose a non-quantized model.Quantized models are currently incompatible with the CPU backend
@@ -1326,7 +1345,7 @@ static struct ggml_backend_qnn_context g_qnn_mgr[GGML_QNN_MAX_DEVICES] = {
                 .socinfo              = {}},
 };
 
-const qnn_op_caps_t ggmlqnn_k_op_caps[] = {
+static const qnn_op_caps_t ggmlqnn_k_op_caps[] = {
         {}, // GGML_OP_NONE
         {}, // GGML_OP_DUP
         {
@@ -1498,7 +1517,7 @@ static const char * get_ggml_type_name(ggml_type type) {
 }
 
 // ref:explanation of k-quants, https://github.com/ggerganov/llama.cpp/pull/1684
-Qnn_DataType_t ggmlqnn_datatype_from_ggml_datatype(enum ggml_type ggmltype) {
+static Qnn_DataType_t ggmlqnn_datatype_from_ggml_datatype(enum ggml_type ggmltype) {
     switch (ggmltype) {
         case GGML_TYPE_F16:
             return QNN_DATATYPE_FLOAT_16;
@@ -1557,7 +1576,7 @@ static void get_qnn_dimensions_from_ggml_dimensions(uint32_t * qnn_dimensions, c
     }
 }
 
-Qnn_Tensor_t * ggmlqnn_create_general_tensor(const ggml_tensor * tensor, const char * name,
+static Qnn_Tensor_t * ggmlqnn_create_general_tensor(const ggml_tensor * tensor, const char * name,
                                                      Qnn_TensorType_t qnn_tensor_type,
                                                      Qnn_DataType_t qnn_data_type,
                                                      uint32_t rank, uint32_t * dims,
@@ -1643,7 +1662,7 @@ Qnn_Tensor_t * ggmlqnn_create_general_tensor(const ggml_tensor * tensor, const c
     return p_qnn_tensor;
 }
 
-Qnn_Tensor_t * ggmlqnn_create_compute_tensor(qnn_instance * instance, Qnn_GraphHandle_t graph_handle, const ggml_tensor * tensor, Qnn_TensorType_t tensor_type) {
+static Qnn_Tensor_t * ggmlqnn_create_compute_tensor(qnn_instance * instance, Qnn_GraphHandle_t graph_handle, const ggml_tensor * tensor, Qnn_TensorType_t tensor_type) {
     Qnn_ErrorHandle_t error = QNN_SUCCESS;
     uint32_t dimensions[]   = {(uint32_t) tensor->ne[0], (uint32_t) tensor->ne[1],
                                (uint32_t) tensor->ne[2], (uint32_t) tensor->ne[3]};
@@ -1677,7 +1696,7 @@ Qnn_Tensor_t * ggmlqnn_create_compute_tensor(qnn_instance * instance, Qnn_GraphH
     return p_qnn_tensor;
 }
 
-void * ggmlqnn_type_trait(ggml_backend_qnn_context * ctx, ggml_tensor * op) {
+static void * ggmlqnn_type_trait(ggml_backend_qnn_context * ctx, ggml_tensor * op) {
     const ggml_tensor * src0        = op->src[0];
     const ggml_tensor * src1        = op->src[1];
     ggml_tensor * dst               = op;
@@ -1770,11 +1789,11 @@ static void append_tensor_dimensions(const ggml_tensor * tensor, std::string & o
     output.append(buffer, len);
 }
 
-size_t ggmlqnn_get_opcaps_size() {
+static size_t ggmlqnn_get_opcaps_size() {
     return std::size(ggmlqnn_k_op_caps);
 }
 
-size_t ggmlqnn_get_op_index(const ggml_tensor * tensor) {
+static size_t ggmlqnn_get_op_index(const ggml_tensor * tensor) {
     if (tensor->op == GGML_OP_UNARY) {
         return static_cast<size_t>(GGML_OP_COUNT) + static_cast<size_t>(ggml_get_unary_op(tensor));
     }
@@ -1788,7 +1807,7 @@ static size_t ggmlqnn_get_op_input_param_count(const ggml_tensor * op) {
     return ggmlqnn_k_op_caps[op_index].input_param_count;
 }
 
-void ggmlqnn_get_graphkey_from_op(const ggml_tensor * op, std::string & output) {
+static void ggmlqnn_get_graphkey_from_op(const ggml_tensor * op, std::string & output) {
     GGML_ASSERT(op->op != GGML_OP_NONE);
     output += ggml_op_desc(op);
     output += get_ggml_type_name(op->type);
@@ -2903,8 +2922,8 @@ static bool ggml_qnn_can_handle_op(const ggml_backend_qnn_context * ctx, const s
             return false;
         if (src0_rank < 2) // QNN's limitation, make QNN SDK happy
             return false;
-        if (4 == src0_rank) //TODO: 4D matrix mulmat in CT
-            return false;
+        if (4 == src0_rank)
+            return (src0->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32) && (tensor->type == GGML_TYPE_F32);
         if ((src1->ne[2] != src0->ne[2]) || (src1->ne[3] != src0->ne[3])) // make QNN SDK happy
             return false;
 
@@ -3227,7 +3246,7 @@ static void ggml_backend_qnn_free(ggml_backend_t backend) {
                 free_qnn_tensor(*tensor_it);
             }
             GGML_UNUSED(graph_handle);
-            GGMLQNN_LOG_DEBUG("graph type:%s", graph_it->first.c_str());
+            GGMLQNN_LOG_DEBUG("free graph:%s", graph_it->first.c_str());
         }
         instance->_qnn_graph_map.clear();
 

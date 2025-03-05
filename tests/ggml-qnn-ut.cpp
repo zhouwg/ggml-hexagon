@@ -366,6 +366,7 @@ int main(int argc, char * argv[]) {
         //src0 = ggml_new_tensor_3d(ctx, qtype, 128, 64, 8);
         //src1 = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, 2, 8);
         //verify 4D matrix
+#if 0
 #if 1   //ok
         src0 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 16, 3, 2);
         src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 6, 4);
@@ -373,6 +374,13 @@ int main(int argc, char * argv[]) {
         src0 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 16, 3, 2);
         src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 16, 3, 2);
 #endif
+#endif
+        //UT all ok
+        src0 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 16, 3, 2);
+        //src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 3, 2);
+        //src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 3, 4);
+        //src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 6, 2);
+        src1 = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 256, 1, 6, 4);
     }
 
     ggml_set_input(src0);
@@ -445,12 +453,13 @@ int main(int argc, char * argv[]) {
     }
 
     ggml_graph_compute_helper(backend, gf, work_buffer, num_threads, nullptr, nullptr);
-    if (get_tensor_data_size(dst) < (100 * 100)) {
+    if (get_tensor_data_size(dst) < (1000 * 1000)) {
         printf("dump result tensors:\n");
         TENSOR_DUMP(src0);
         TENSOR_DUMP(src1);
         TENSOR_DUMP(dst);
     } else {
+        printf("dump result tensors:\n");
         printf("%15s: type = %i (%5s) ne = %5" PRIi64 " x %5" PRIi64 " x %5" PRIi64 ", nb = (%5zi, %5zi, %5zi)\n",
               src0->name,
               src0->type, ggml_type_name(src0->type), src0->ne[0], src0->ne[1], src0->ne[2],

@@ -57,7 +57,8 @@ function(llama_target_and_test source)
 
     add_executable(${TEST_TARGET} ${source} get-model.cpp)
     install(TARGETS ${TEST_TARGET} RUNTIME)
-    target_link_libraries(${TEST_TARGET} PRIVATE common)
+
+    target_link_libraries(${TEST_TARGET} PRIVATE common log)
     add_test(
         NAME ${TEST_TARGET}
         WORKING_DIRECTORY ${LLAMA_TEST_WORKING_DIRECTORY}
@@ -138,6 +139,7 @@ llama_target_and_test(test-chat-template.cpp)
 llama_target_and_test(test-gguf.cpp)
 llama_target_and_test(test-backend-ops.cpp)
 llama_target_and_test(ggml-qnn-ut.cpp)
+llama_target_and_test(ggml-qnn-ut-4d.cpp)
 
 llama_target_and_test(test-model-load-cancel.cpp  LABEL "model")
 llama_target_and_test(test-autorelease.cpp        LABEL "model")
