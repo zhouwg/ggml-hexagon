@@ -4345,7 +4345,7 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     // Log dst for debugging
     float *dst_data = (float *)dst->data;
     GGMLQNN_LOG_DEBUG("dst shape: [%d, %d, %d, %d]\n", dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3]);
-    for (int i = 0; i < std::min(10, static_cast<int>(dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3])); i++) {
+    for (int i = 0; i < std::min(50, static_cast<int>(dst->ne[0] * dst->ne[1] * dst->ne[2] * dst->ne[3])); i++) {
         GGMLQNN_LOG_DEBUG("dst[%d] = %f\n", i, dst_data[i]);
     }
 #endif

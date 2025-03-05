@@ -564,6 +564,25 @@ struct test_case {
             std::vector<float> f1 = tensor_to_float(t1);
             std::vector<float> f2 = tensor_to_float(t2);
 
+            if (strcmp(ggml_op_desc(t1), "MUL_MAT") == 0) {
+                GGMLQNN_LOG_DEBUG("Default backend output shape: [%d, %d, %d, %d]\n", t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
+                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
+                    GGMLQNN_LOG_DEBUG("default_dst[%d] = %f\n", i, f1[i]);
+                }
+            }
+
+            double err2 = nmse(f1.data(), f2.data(), f1.size());
+            if (err2 > ud->max_err) {
+                GGMLQNN_LOG_INFO("[%s] NMSE = %.9f > %.9f ", ggml_op_desc(t1), err2, ud->max_err);
+                // Log first few mismatched elements
+                for (int i = 0; i < std::min(50, (int)f1.size()); i++) {
+                    if (f1[i] != f2[i]) {
+                        GGMLQNN_LOG_DEBUG("Mismatch at index %d: default=%f, qnn=%f, diff=%f\n", i, f1[i], f2[i], f1[i] - f2[i]);
+                    }
+                }
+                ud->ok = false;
+            }
+
             for (size_t i = 0; i < f1.size(); i++) {
                 // check for nans
                 if (std::isnan(f1[i]) || std::isnan(f2[i])) {
