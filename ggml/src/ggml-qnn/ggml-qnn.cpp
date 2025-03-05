@@ -4014,6 +4014,7 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
 
     std::string graph_name;
     ggmlqnn_get_graphkey_from_op(op, graph_name);
+
     GGMLQNN_LOG_DEBUG("graph name %s\n", graph_name.c_str());
     GGMLQNN_LOG_INFO("dst %p, dst->data %p", dst, dst->data);
 
@@ -4027,6 +4028,21 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     Qnn_Tensor_t *p_reshape1_out = nullptr; // Reshaped src1
     Qnn_Tensor_t *p_matmul_out = nullptr;   // MatMul output
     Qnn_Tensor_t *p_reshape2_out = nullptr; // Final output
+
+    GGMLQNN_LOG_DEBUG("a = %p, a->data = %p\n", src0, src0->data);
+    float *a_data = (float *)src0->data;
+    GGMLQNN_LOG_DEBUG("src0 data:\n ");
+    for (int i = 0; i < std::min(50, static_cast<int>(src0->ne[0] * src0->ne[1] * src0->ne[2] * src0->ne[3])); i++) {
+        GGMLQNN_LOG_DEBUG( "%f ", a_data[i]);
+    }
+    fprintf(stderr, "\n");
+    GGMLQNN_LOG_DEBUG("b = %p, b->data = %p\n", src1, src1->data);
+    float *b_data = (float *)src1->data;
+    GGMLQNN_LOG_DEBUG("src1 data:\n ");
+    for (int i = 0; i < std::min(50, static_cast<int>(src1->ne[0] * src1->ne[1] * src1->ne[2] * src1->ne[3])); i++) {
+        GGMLQNN_LOG_DEBUG( "%f ", b_data[i]);
+    }
+    fprintf(stderr, "\n");
 
     if (instance->_qnn_graph_map.find(graph_name) != instance->_qnn_graph_map.end()) {
         graph_initialized = true;
@@ -4157,6 +4173,22 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
     Qnn_Tensor_t output_tensors[] = {*p_reshape2_out};
     CHECK_QNN_API(error, qnn_raw_interface.graphExecute(graph_handle, input_tensors, 2,
                                                         output_tensors, 1, NULL, NULL));
+
+    // Log tile0_out data (assuming its buffer persists)
+    float *tile_data = (float *)p_tile0_out->v1.clientBuf.data;  // p_tile0_out from Tile node definition
+    if (tile_data) {
+        GGMLQNN_LOG_DEBUG("tile0_out shape: [%d, %d, %d, %d]\n", p_tile0_out->v1.dimensions[0],
+                          p_tile0_out->v1.dimensions[1], p_tile0_out->v1.dimensions[2], p_tile0_out->v1.dimensions[3]);
+        GGMLQNN_LOG_DEBUG("tile0_out data:\n ");
+        int total_elements = p_tile0_out->v1.dimensions[0] * p_tile0_out->v1.dimensions[1] *
+                             p_tile0_out->v1.dimensions[2] * p_tile0_out->v1.dimensions[3];
+        for (int i = 0; i < std::min(50, total_elements); i++) {
+            GGMLQNN_LOG_DEBUG( "%f ", tile_data[i]);
+        }
+        fprintf(stderr, "\n");
+    } else {
+        GGMLQNN_LOG_DEBUG("tile0_out data not accessible post-execution\n");
+    }
 #if 1
     // Log dst for debugging
     float *dst_data = (float *)dst->data;
@@ -4172,6 +4204,7 @@ static void ggml_qnn_mul_mat_4d(ggml_backend_qnn_context *ctx, ggml_tensor *op) 
 
     op_perf.info();
 }
+
 
 void ggml_qnn_repeat(ggml_backend_qnn_context * ctx, ggml_tensor * dst) {
     GGML_UNUSED(ctx);

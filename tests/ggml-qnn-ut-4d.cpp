@@ -1,4 +1,4 @@
-// This file defines tests for 4d mulmat with QNN backend, modified from test-backend-ops.cpp.
+// This file defines test for 4d mulmat with QNN backend, modified from test-backend-ops.cpp.
 
 // this file has three sections: Section 1 does general setup, section 2 defines the GGML ops to be tested,
 // and section 3 defines which tests to run.
@@ -561,6 +561,23 @@ struct test_case {
 
             if (strcmp(ggml_op_desc(t1), "MUL_MAT") == 0) {
                 GGMLQNN_LOG_DEBUG("t1 %p(data %p) output shape: [%d, %d, %d, %d]\n", t1, t1->data, t1->ne[0], t1->ne[1], t1->ne[2], t1->ne[3]);
+                const ggml_tensor *src0 = t1->src[0];
+                const ggml_tensor *src1 = t1->src[1];
+                GGMLQNN_LOG_DEBUG("src0 = %p, src0->data = %p\n", src0, src0->data);
+                float *src0_data = (float *)src0->data;
+                GGMLQNN_LOG_DEBUG("src0 data:\n ");
+                for (int i = 0; i < std::min(50, static_cast<int>(ggml_nbytes(src0))); i++) {
+                    GGMLQNN_LOG_DEBUG("%f ", src0_data[i]);
+                }
+                fprintf(stderr, "\n");
+                GGMLQNN_LOG_DEBUG("src1 = %p, src1->data = %p\n", src1, src1->data);
+                float *src1_data = (float *)src1->data;
+                GGMLQNN_LOG_DEBUG("src1 data:\n ");
+                for (int i = 0; i < std::min(50, static_cast<int>(ggml_nbytes(src1))); i++) {
+                    GGMLQNN_LOG_DEBUG("%f ", src1_data[i]);
+                }
+                fprintf(stderr, "\n");
+
                 std::ostringstream tmposs;
                 for (int i = 0; i < std::min(100, (int)f1.size()); i++) {
                     tmposs << std::setw(8) << std::fixed << std::setprecision(8) << f1[i] << " ";
