@@ -482,9 +482,9 @@ struct llama_mlock::impl {
         suggest = false;
 #else
         struct rlimit lock_limit;
-        if (suggest && getrlimit(RLIMIT_MEMLOCK, &lock_limit)) {
-            suggest = false;
-        }
+        //if (suggest && getrlimit(RLIMIT_MEMLOCK, &lock_limit)) {
+        //    suggest = false;
+        //}
         if (suggest && (lock_limit.rlim_max > lock_limit.rlim_cur + size)) {
             suggest = false;
         }
