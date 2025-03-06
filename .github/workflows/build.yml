@@ -467,6 +467,7 @@ jobs:
         run: |
           cmake -B build -S . \
             -DCMAKE_HIP_COMPILER="$(hipconfig -l)/clang" \
+            -DGGML_HIP_ROCWMMA_FATTN=ON \
             -DGGML_HIP=ON
           cmake --build build --config Release -j $(nproc)
 
@@ -476,6 +477,7 @@ jobs:
           cmake -B build2 -S . \
             -DCMAKE_C_COMPILER=hipcc \
             -DCMAKE_CXX_COMPILER=hipcc \
+            -DGGML_HIP_ROCWMMA_FATTN=ON \
             -DGGML_HIP=ON
           cmake --build build2 --config Release -j $(nproc)
 
@@ -1202,6 +1204,11 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
 
+      - name: Clone rocWMMA repository
+        id: clone_rocwmma
+        run: |
+          git clone https://github.com/rocm/rocwmma --branch rocm-6.2.4 --depth 1
+
       - name: Install
         id: depends
         run: |
@@ -1231,8 +1238,10 @@ jobs:
           cmake -G "Unix Makefiles" -B build -S . `
             -DCMAKE_C_COMPILER="${env:HIP_PATH}\bin\clang.exe" `
             -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\bin\clang++.exe" `
+            -DCMAKE_CXX_FLAGS="-Irocwmma/library/include/" `
             -DCMAKE_BUILD_TYPE=Release `
             -DGGML_HIP=ON `
+            -DGGML_HIP_ROCWMMA_FATTN=ON `
             -DGGML_RPC=ON
           cmake --build build -j ${env:NUMBER_OF_PROCESSORS}
 
@@ -1250,6 +1259,11 @@ jobs:
         uses: actions/checkout@v4
         with:
             fetch-depth: 0
+
+      - name: Clone rocWMMA repository
+        id: clone_rocwmma
+        run: |
+          git clone https://github.com/rocm/rocwmma --branch rocm-6.2.4 --depth 1
 
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2.16
@@ -1280,8 +1294,10 @@ jobs:
           cmake -G "Unix Makefiles" -B build -S . `
             -DCMAKE_C_COMPILER="${env:HIP_PATH}\bin\clang.exe" `
             -DCMAKE_CXX_COMPILER="${env:HIP_PATH}\bin\clang++.exe" `
+            -DCMAKE_CXX_FLAGS="-Irocwmma/library/include/" `
             -DCMAKE_BUILD_TYPE=Release `
             -DAMDGPU_TARGETS=${{ matrix.gpu_target }} `
+            -DGGML_HIP_ROCWMMA_FATTN=ON `
             -DGGML_HIP=ON `
             -DGGML_RPC=ON
           cmake --build build -j ${env:NUMBER_OF_PROCESSORS}
