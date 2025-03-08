@@ -246,21 +246,21 @@ Instructions for adding support for new models: [HOWTO-add-model.md](docs/develo
 | [OpenCL](docs/backend/OPENCL.md) | Adreno GPU |
 
 ## Software architecture
-
 ```mermaid
 block-beta
 columns 1
 
 block:llamacpp
-   llamacpp["llama_cpp"]
-   style llamacpp fill:#3c3,color:#000,stroke:#000
+  llamacpp["llama_cpp"]
+  style llamacpp        fill:#3c3,color:#000,stroke:#000
 end
 
-block:ggml
-   ggml["GGML"]
-   style ggml     fill:#3c3,color:#000,stroke:#000
+block:ggml_backend
+ggml_backend["GGML backend subsystem"]
+  style ggml_backend    fill:#3c3,color:#000,stroke:#000
 
-   ggml_cpu["ggml-cpu"]
+block:ggmlbackends
+ ggml_cpu["ggml-cpu"]
    ggml_metal["ggml-metal"]
    ggml_sycl["ggml-sycl"]
    ggml_cuda["ggml-cuda"]
@@ -284,13 +284,31 @@ block:ggml
    style ggml_qnn       fill:#cc3,color:#000,stroke:#000
    style ggml_ane       fill:#fff,color:#000,stroke:#f00,stroke-width:2,stroke-dasharray:5
    style ggml_nnpa      fill:#cc3,color:#000,stroke:#000
+  end
 end
 
 block:ggml_pal
-   ggml_pal["GGML Platform Abstraction Layer"]
-   style ggml_pal       fill:#c33,color:#000,stroke:#000
+  ggml_pal["Platform Abstraction Layer"]
+  style ggml_pal fill:#c33,color:#000,stroke:#000
 end
 
+block:ggml_backendsubsystem
+  ggml_backendsubsystem["GGML backend subsystem"]
+  style ggml_backendsubsystem fill:#3c3,color:#000,stroke:#000
+end
+
+block:group1：2
+  columns 2
+  block:ggml_tensor
+  ggml_tensor["GGML tensor"]
+  style ggml_tensor fill:#3c3,color:#000,stroke:#000
+  end
+
+  block:ggml_cgraph
+  ggml_cgraph["GGML cgraph"]
+  style ggml_cgraph  fill:#3c3,color:#000,stroke:#000
+  end
+end
 
 block:OS
     Windows
@@ -349,6 +367,7 @@ flowchart LR
       EXIST:::EXIST ~~~ TODO:::TODO ~~~ WIP:::WIP ~~~ DONE:::DONE ~~~ NEW:::NEW
     end
 ```
+
 
 ## Building the project
 
