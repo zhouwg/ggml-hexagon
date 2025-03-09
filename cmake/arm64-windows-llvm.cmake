@@ -1,7 +1,8 @@
 set( CMAKE_SYSTEM_NAME Windows )
 set( CMAKE_SYSTEM_PROCESSOR arm64 )
 
-set( target arm64-pc-windows-msvc )
+#set( target arm64-pc-windows-msvc )
+set( target aarch64-w64-mingw32 )
 
 set( CMAKE_C_COMPILER    clang )
 set( CMAKE_CXX_COMPILER  clang++ )
