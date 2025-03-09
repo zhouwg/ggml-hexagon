@@ -315,7 +315,6 @@ block:OS
     Linux
     Android
     QNX
-    IBM_z/OS
 end
 
 block:hardware_vendors
