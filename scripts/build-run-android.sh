@@ -75,7 +75,7 @@ function check_and_download_ndk()
 
 function build_arm64
 {
-    cmake -H. -B./out/android -DCMAKE_BUILD_TYPE=Release -DGGML_USE_QNN=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DCMAKE_C_FLAGS=-march=armv8.7-a -DGGML_QNN=ON -DGGML_QNN_SDK_PATH=${QNN_SDK_PATH}
+    cmake -H. -B./out/android -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DCMAKE_C_FLAGS=-march=armv8.7-a -DGGML_QNN=ON -DGGML_QNN_SDK_PATH=${QNN_SDK_PATH}
     cd out/android
     make -j16
     show_pwd
