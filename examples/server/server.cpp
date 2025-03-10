@@ -384,8 +384,9 @@ struct server_task {
                             SRV_DBG("Grammar trigger token: %d (`%s`)\n", token, word.c_str());
                             common_grammar_trigger trigger;
                             trigger.type = COMMON_GRAMMAR_TRIGGER_TYPE_TOKEN;
-                            trigger.value = (llama_token) token;
-                            params.sampling.grammar_triggers.push_back(trigger);
+                            trigger.value = word;
+                            trigger.token = token;
+                            params.sampling.grammar_triggers.push_back(std::move(trigger));
                         } else {
                             SRV_DBG("Grammar trigger word: `%s`\n", word.c_str());
                             params.sampling.grammar_triggers.push_back({COMMON_GRAMMAR_TRIGGER_TYPE_WORD, word});
