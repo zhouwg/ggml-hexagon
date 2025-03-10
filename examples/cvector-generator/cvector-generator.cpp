@@ -394,6 +394,8 @@ static int prepare_entries(common_params & params, train_context & ctx_train) {
 int main(int argc, char ** argv) {
     common_params params;
 
+    params.out_file = "control_vector.gguf";
+
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CVECTOR_GENERATOR, print_usage)) {
         return 1;
     }
@@ -498,7 +500,7 @@ int main(int argc, char ** argv) {
     }
 
     // write output vectors to gguf
-    export_gguf(ctx_train.v_final, params.cvector_outfile, model_hint);
+    export_gguf(ctx_train.v_final, params.out_file, model_hint);
 
     llama_backend_free();
 
