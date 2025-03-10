@@ -60,7 +60,9 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
             }
             msg.role = message.at("role");
 
-            if (message.contains("content")) {
+            auto has_content = message.contains("content");
+            auto has_tool_calls = message.contains("tool_calls");
+            if (has_content) {
                 const auto & content = message.at("content");
                 if (content.is_string()) {
                     msg.content = content;
@@ -81,19 +83,8 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
                 } else if (!content.is_null()) {
                     throw std::runtime_error("Invalid 'content' type: expected string or array, got " + content.dump() + " (ref: https://github.com/ggml-org/llama.cpp/issues/8367)");
                 }
-            } else {
-                throw std::runtime_error("Expected 'content' (ref: https://github.com/ggml-org/llama.cpp/issues/8367)");
             }
-            if (message.contains("reasoning_content")) {
-                msg.reasoning_content = message.at("reasoning_content");
-            }
-            if (message.contains("name")) {
-                msg.tool_name = message.at("name");
-            }
-            if (message.contains("tool_call_id")) {
-                msg.tool_call_id = message.at("tool_call_id");
-            }
-            if (message.contains("tool_calls")) {
+            if (has_tool_calls) {
                 for (const auto & tool_call : message.at("tool_calls")) {
                     common_chat_tool_call tc;
                     if (!tool_call.contains("type")) {
@@ -117,6 +108,18 @@ std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messa
                     }
                     msg.tool_calls.push_back(tc);
                 }
+            }
+            if (!has_content && !has_tool_calls) {
+                throw std::runtime_error("Expected 'content' or 'tool_calls' (ref: https://github.com/ggml-org/llama.cpp/issues/8367 & https://github.com/ggml-org/llama.cpp/issues/12279)");
+            }
+            if (message.contains("reasoning_content")) {
+                msg.reasoning_content = message.at("reasoning_content");
+            }
+            if (message.contains("name")) {
+                msg.tool_name = message.at("name");
+            }
+            if (message.contains("tool_call_id")) {
+                msg.tool_call_id = message.at("tool_call_id");
             }
 
             msgs.push_back(msg);

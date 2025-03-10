@@ -480,6 +480,21 @@ static void test_msgs_oaicompat_json_conversion() {
             "]"
         ),
         common_chat_msgs_to_json_oaicompat<json>({message_assist_call_python}).dump(2));
+
+    auto res = common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\", \"tool_calls\": []}]"));
+    assert_equals<size_t>(1, res.size());
+    assert_equals<std::string>(res[0].role, "assistant");
+    assert_equals(true, res[0].content.empty());
+    assert_equals(true, res[0].tool_calls.empty());
+
+    try {
+        common_chat_msgs_parse_oaicompat(json::parse("[{\"role\": \"assistant\"}]"));
+        throw std::runtime_error("Expected exception");
+    } catch (const std::exception & e) {
+        if (std::string(e.what()).find("'content'") == std::string::npos) {
+            throw std::runtime_error("Expected exception about missing 'content'");
+        }
+    }
 }
 
 static void test_tools_oaicompat_json_conversion() {
