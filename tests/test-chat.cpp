@@ -766,6 +766,19 @@ static void test_template_output_parsers() {
             "{\n  \"name\": \"special_function\", \"arguments\": {\"arg1\": 1}}",
             COMMON_CHAT_FORMAT_HERMES_2_PRO));
 
+        assert_msg_equals(message_assist_thoughts_unparsed_think,
+            common_chat_parse("<think>I'm thinking</think>Hello, world!\nWhat's up?",
+            COMMON_CHAT_FORMAT_HERMES_2_PRO));
+        assert_msg_equals(message_assist_thoughts_unparsed_think,
+            common_chat_parse("I'm thinking</think>Hello, world!\nWhat's up?",
+            COMMON_CHAT_FORMAT_HERMES_2_PRO));
+        assert_msg_equals(message_assist_thoughts,
+            common_chat_parse("<think>I'm thinking</think>Hello, world!\nWhat's up?",
+            COMMON_CHAT_FORMAT_HERMES_2_PRO_EXTRACT_REASONING));
+        assert_msg_equals(message_assist_thoughts,
+            common_chat_parse("I'm thinking</think>Hello, world!\nWhat's up?",
+            COMMON_CHAT_FORMAT_HERMES_2_PRO_EXTRACT_REASONING));
+
         test_templates(tmpls.get(), end_tokens, message_assist, tools, "Hello, world!\nWhat's up?", /* expect_grammar_triggered= */ false);
         test_templates(tmpls.get(), end_tokens, message_assist_call, tools,
                       "<tool_call>\n"
