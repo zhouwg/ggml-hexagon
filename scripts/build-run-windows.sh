@@ -1,6 +1,11 @@
 #!/bin/bash
-# build llama.cpp or llama.cpp + ggml-qnn for Windows with cygwin on Windows
-# build llama.cpp + ggml-qnn for Snapdragon desktop SoC equipped WoA(Windows on ARM) with cygwin on Windows
+# this script can be used with cygwin on x86-64 Windows
+#                           or llvm-mingw on x86-64 Linux
+#
+# case-1: build llama.cpp for x86-64 Windows with cygwin on x86-64 Windows
+# case-2: build llama.cpp + ggml-qnn for x86-64 Windows with cygwin on x86-64 Windows
+# case-3: build llama.cpp + ggml-qnn for Snapdragon desktop SoC equipped WoA(Windows on ARM) with cygwin on Windows
+# case-4: build llama.cpp + ggml-qnn for Snapdragon desktop SoC equipped WoA(Windows on ARM) with mingw on x86-64 Linux
 
 # items marked TODO has not verified yet
 
@@ -8,7 +13,11 @@ set -e
 
 
 PWD=`pwd`
+#for cygwin on x86-64 Windows
 PREFIX_PATH=/cygdrive/c
+#for mingw on x86-64 Linux
+#PREFIX_PATH=/opt/qcom/aistack/
+
 GGUF_MODEL_NAME=${PREFIX_PATH}/qwen1_5-1_8b-chat-q4_0.gguf
 PROJECT_HOME_PATH=`pwd`
 
@@ -17,6 +26,7 @@ PROJECT_HOME_PATH=`pwd`
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
 QNN_SDK_URL=https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
 QNN_SDK_PATH=${PREFIX_PATH}/qairt/2.31.0.250130/
+QNN_SDK_PATH=${PREFIX_PATH}/qairt/2.32.0.250228/
 
 #default is QNN NPU
 qnnbackend=2
@@ -41,6 +51,7 @@ function check_qnn_sdk()
     fi
 }
 
+#ok with cygwin on x86-64 Windows
 function build_windows_x86
 {
     echo "build_windows_x86-without-qnn"
@@ -52,6 +63,7 @@ function build_windows_x86
     cd -
 }
 
+#ok with cygwin on x86-64 Windows
 function build_windows_x86_qnn
 {
     echo "build_windows_x86-with-qnn"
@@ -66,7 +78,8 @@ function build_windows_x86_qnn
 #TODO
 function build_windows_arm64_qnn
 {
-    echo "build_windows_arm64 not supported now"
+    echo "build llama.cpp for WoA through cgwin on Windows or mingw on Linux not supported now, pls try mingw on Windows and it works"
+    return 0
     echo "cmake source dir:${PROJECT_HOME_PATH}"
     #cmake -H. -B./out/windows_arm64_qnn -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_QNN=ON -DCMAKE_TOOLCHAIN_FILE=${PROJECT_HOME_PATH}/cmake/arm64-windows-llvm.cmake -DCMAKE_C_FLAGS=-march=armv8.7-a -DGGML_QNN_SDK_PATH=${QNN_SDK_PATH}
     #cmake -H. -B./out/windows_arm64_qnn -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_QNN=ON -DCMAKE_TOOLCHAIN_FILE=${PROJECT_HOME_PATH}/cmake/arm64-windows-cygwin.cmake -DCMAKE_C_FLAGS=-march=armv8.7-a -DGGML_QNN_SDK_PATH=${QNN_SDK_PATH}

@@ -15,6 +15,7 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
 QNN_SDK_URL=https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
 QNN_SDK_PATH=/opt/qcom/aistack/qairt/2.31.0.250130/
+QNN_SDK_PATH=/opt/qcom/aistack/qairt/2.32.0.250228/
 
 #default is QNN NPU
 qnnbackend=2
