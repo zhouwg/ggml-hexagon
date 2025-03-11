@@ -4,30 +4,11 @@
 // Note: Even when using identical normalized image inputs (see normalize_image_u8_to_f32()) we have a significant difference in resulting embeddings compared to pytorch
 #include "clip.h"
 #include "ggml.h"
+#include "ggml-cpp.h"
 #include "ggml-cpu.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "gguf.h"
-
-//#ifdef GGML_USE_CUDA
-//#include "ggml-cuda.h"
-//#endif
-//
-//#ifdef GGML_USE_SYCL
-//#include "ggml-sycl.h"
-//#endif
-//
-//#ifdef GGML_USE_METAL
-//#include "ggml-metal.h"
-//#endif
-//
-//#ifdef GGML_USE_CANN
-//#include "ggml-cann.h"
-//#endif
-//
-//#ifdef GGML_USE_VULKAN
-//#include "ggml-vulkan.h"
-//#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -600,18 +581,54 @@ struct clip_ctx {
     bool has_post_norm = false;
     bool has_patch_bias = false;
 
-    struct gguf_context * ctx_gguf;
-    struct ggml_context * ctx_data;
+    struct gguf_context * ctx_gguf = nullptr;
+    struct ggml_context * ctx_data = nullptr;
 
     std::vector<uint8_t> buf_compute_meta;
 
-    // memory buffers to evaluate the model
-    ggml_backend_buffer_t params_buffer  = NULL;
+    std::vector<ggml_backend_t> backend_ptrs;
+    std::vector<ggml_backend_buffer_type_t> backend_buft;
 
-    ggml_backend_t backend       = NULL;
-    ggml_gallocr_t compute_alloc = NULL;
+    ggml_backend_t backend     = nullptr;
+    ggml_backend_t backend_cpu = nullptr;
+    ggml_backend_buffer_t buf  = nullptr;
+
+    ggml_backend_sched_ptr sched;
 
     struct clip_image_size * load_image_size;
+
+    clip_ctx(clip_context_params & ctx_params) {
+        backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+        backend     = ctx_params.use_gpu
+                        ? ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr)
+                        : nullptr;
+
+        if (backend) {
+            LOG_INF("%s: CLIP using %s backend\n", __func__, ggml_backend_name(backend));
+            backend_ptrs.push_back(backend);
+            backend_buft.push_back(ggml_backend_get_default_buffer_type(backend));
+        } else {
+            backend = backend_cpu;
+            LOG_INF("%s: CLIP using CPU backend\n", __func__);
+        }
+
+        backend_ptrs.push_back(backend_cpu);
+        backend_buft.push_back(ggml_backend_get_default_buffer_type(backend_cpu));
+
+        sched.reset(
+            ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), 8192, false)
+        );
+    }
+
+    ~clip_ctx() {
+        ggml_free(ctx_data);
+        gguf_free(ctx_gguf);
+        ggml_backend_buffer_free(buf);
+        ggml_backend_free(backend);
+        if (backend_cpu != backend) {
+            ggml_backend_free(backend_cpu);
+        }
+    }
 };
 
 static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32_batch * imgs, struct clip_image_size * load_image_size, bool is_inf = false) {
@@ -1184,6 +1201,14 @@ static ggml_cgraph * clip_image_build_graph(clip_ctx * ctx, const clip_image_f32
 
 // read and create ggml_context containing the tensors and their data
 struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
+    return clip_init(fname, clip_context_params{
+        /* use_gpu */   true,
+        /* verbosity */ verbosity,
+    });
+}
+
+struct clip_ctx * clip_init(const char * fname, struct clip_context_params ctx_params) {
+    int verbosity = ctx_params.verbosity;
     struct ggml_context * meta = NULL;
 
     struct gguf_init_params params = {
@@ -1277,7 +1302,7 @@ struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
         }
     }
 
-    clip_ctx * new_clip = new clip_ctx{};
+    clip_ctx * new_clip = new clip_ctx(ctx_params);
 
     // update projector type
     {
@@ -1294,36 +1319,6 @@ struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
                 new_clip->proj_type = PROJECTOR_TYPE_MLP_NORM;
             }
         }
-    }
-
-//#ifdef GGML_USE_CUDA
-//    new_clip->backend = ggml_backend_cuda_init(0);
-//    LOG_INF("%s: CLIP using CUDA backend\n", __func__);
-//#endif
-//
-//#ifdef GGML_USE_METAL
-//    new_clip->backend = ggml_backend_metal_init();
-//    LOG_INF("%s: CLIP using Metal backend\n", __func__);
-//#endif
-//
-//#ifdef GGML_USE_CANN
-//    new_clip->backend = ggml_backend_cann_init(0);
-//    LOG_INF("%s: CLIP using CANN backend\n", __func__);
-//#endif
-//
-//#ifdef GGML_USE_VULKAN
-//    new_clip->backend = ggml_backend_vk_init(0);
-//    LOG_INF("%s: CLIP using Vulkan backend\n", __func__);
-//#endif
-//
-//#ifdef GGML_USE_SYCL
-//    new_clip->backend = ggml_backend_sycl_init(0);
-//    LOG_INF("%s: CLIP using SYCL backend\n", __func__);
-//#endif
-
-    if (!new_clip->backend) {
-        new_clip->backend = ggml_backend_cpu_init();
-        LOG_INF("%s: CLIP using CPU backend\n", __func__);
     }
 
     // model size and capabilities
@@ -1421,7 +1416,9 @@ struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
         }
 
         // alloc memory and offload data
-        new_clip->params_buffer = ggml_backend_alloc_ctx_tensors(new_clip->ctx_data, new_clip->backend);
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(new_clip->backend);
+        new_clip->buf = ggml_backend_alloc_ctx_tensors_from_buft(new_clip->ctx_data, buft);
+        ggml_backend_buffer_set_usage(new_clip->buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
         for (int i = 0; i < n_tensors; ++i) {
             const char * name = gguf_get_tensor_name(ctx, i);
             struct ggml_tensor * cur = ggml_get_tensor(new_clip->ctx_data, name);
@@ -1434,7 +1431,7 @@ struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
                 return nullptr;
             }
             int num_bytes = ggml_nbytes(cur);
-            if (ggml_backend_buffer_is_host(new_clip->params_buffer)) {
+            if (ggml_backend_buft_is_host(buft)) {
                 // for the CPU and Metal backend, we can read directly into the tensor
                 fin.read(reinterpret_cast<char *>(cur->data), num_bytes);
             } else {
@@ -1720,14 +1717,21 @@ struct clip_ctx * clip_model_load(const char * fname, const int verbosity = 1) {
     // measure mem requirement and allocate
     {
         new_clip->buf_compute_meta.resize(GGML_DEFAULT_GRAPH_SIZE * ggml_tensor_overhead() + ggml_graph_overhead());
-        new_clip->compute_alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(new_clip->backend));
         clip_image_f32_batch batch;
         batch.size = 1;
         batch.data = nullptr;
         ggml_cgraph * gf = clip_image_build_graph(new_clip, &batch, nullptr, false);
-        ggml_gallocr_reserve(new_clip->compute_alloc, gf);
-        size_t compute_memory_buffer_size = ggml_gallocr_get_buffer_size(new_clip->compute_alloc, 0);
-        LOG_INF("%s: compute allocated memory: %.2f MB\n", __func__, compute_memory_buffer_size /1024.0/1024.0);
+        ggml_backend_sched_reserve(new_clip->sched.get(), gf);
+        for (size_t i = 0; i < new_clip->backend_ptrs.size(); ++i) {
+            ggml_backend_t backend = new_clip->backend_ptrs[i];
+            ggml_backend_buffer_type_t buft = new_clip->backend_buft[i];
+            size_t size = ggml_backend_sched_get_buffer_size(new_clip->sched.get(), backend);
+            if (size > 1) {
+                LOG_INF("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
+                        ggml_backend_buft_name(buft),
+                        size / 1024.0 / 1024.0);
+            }
+        }
     }
 
     return new_clip;
@@ -2408,12 +2412,6 @@ ggml_tensor * clip_get_newline_tensor(const struct clip_ctx * ctx) {
 }
 
 void clip_free(clip_ctx * ctx) {
-    ggml_free(ctx->ctx_data);
-    gguf_free(ctx->ctx_gguf);
-
-    ggml_backend_buffer_free(ctx->params_buffer);
-    ggml_backend_free(ctx->backend);
-    ggml_gallocr_free(ctx->compute_alloc);
     delete ctx;
 }
 
@@ -2609,8 +2607,9 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     }
 
     // build the inference graph
+    ggml_backend_sched_reset(ctx->sched.get());
     ggml_cgraph * gf = clip_image_build_graph(ctx, imgs, ctx->load_image_size, true);
-    ggml_gallocr_alloc_graph(ctx->compute_alloc, gf);
+    ggml_backend_sched_alloc_graph(ctx->sched.get(), gf);
 
     // set inputs
     const auto & model = ctx->vision_model;
@@ -2775,11 +2774,13 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
         }
     }
 
-    if (ggml_backend_is_cpu(ctx->backend)) {
-        ggml_backend_cpu_set_n_threads(ctx->backend, n_threads);
-    }
+    ggml_backend_cpu_set_n_threads(ctx->backend_cpu, n_threads);
 
-    ggml_backend_graph_compute(ctx->backend, gf);
+    auto status = ggml_backend_sched_graph_compute(ctx->sched.get(), gf);
+    if (status != GGML_STATUS_SUCCESS) {
+        LOG_ERR("%s: ggml_backend_sched_graph_compute failed with error %d\n", __func__, status);
+        return false;
+    }
 
     // the last node is the embedding tensor
     struct ggml_tensor * embeddings = ggml_graph_node(gf, -1);
