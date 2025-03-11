@@ -98,11 +98,14 @@ function check_qnn_libs()
 {
     #reuse the cached qnn libs on Android phone
     adb shell ls ${REMOTE_PATH}/libQnnCpu.so
+    adb shell ls ${REMOTE_PATH}/libQnnGpu.so
+    adb shell ls ${REMOTE_PATH}/libQnnHtp.so
     if [ $? -eq 0 ]; then
         printf "QNN libs already exist on Android phone\n"
     else
         update_qnn_libs
     fi
+    update_qnn_cfg
 }
 
 
@@ -117,6 +120,12 @@ function update_qnn_libs()
     adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtpPrepare.so          ${REMOTE_PATH}/
     adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtpV75Stub.so          ${REMOTE_PATH}/
     adb push ${QNN_SDK_PATH}/lib/hexagon-v75/unsigned/libQnnHtpV75Skel.so     ${REMOTE_PATH}/
+}
+
+
+function update_qnn_cfg()
+{
+    adb push ./scripts/ggml-qnn.cfg ${REMOTE_PATH}/
 }
 
 
