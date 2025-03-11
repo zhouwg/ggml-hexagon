@@ -167,7 +167,7 @@ static const char * g_qnn_cfgfilename       = "ggml-qnn.cfg";
 
 #if defined(__ANDROID__)
 //Android command line program
-static const char * g_qnn_runtimelib_path = "/data/local/tmp/";
+static const char * g_qnn_runtimelib_path   = "/data/local/tmp/";
 //Android KanTV standard APP
 //static const char * g_qnn_runtimelib_path = "/data/data/com.cdeos.kantv/qnnlib/";
 #elif defined(__linux__)
@@ -1613,7 +1613,7 @@ static void ggmlqnn_get_graphkey_from_cgraph(const ggml_cgraph * cgraph, std::st
 
     bool is_start = true;
     for (int i = 0; i < cgraph->n_nodes; ++i) {
-        auto *op = cgraph->nodes[i];
+        auto * op = cgraph->nodes[i];
         if (ggml_is_empty(op)) {
             GGMLQNN_LOG_WARN("empty op in graph, skipping");
             continue;
@@ -1634,7 +1634,7 @@ static void ggmlqnn_get_graphkey_from_cgraph(const ggml_cgraph * cgraph, std::st
     }
 
     if (cgraph->n_nodes > 1) {
-        auto *last_op = cgraph->nodes[cgraph->n_nodes - 1];
+        auto * last_op = cgraph->nodes[cgraph->n_nodes - 1];
         output += ggmlqnn_get_ggml_type_name(last_op->type);
         output += '_';
         ggmlqnn_append_tensor_dimensions(last_op, output);
@@ -4710,7 +4710,7 @@ void ggml_qnn_rope(ggml_backend_qnn_context * ctx, ggml_tensor * dst) {
 static enum ggml_status ggmlqnn_graph_compute(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     enum ggml_status ggml_result                = GGML_STATUS_SUCCESS;
     Qnn_ErrorHandle_t qnn_error                 = QNN_SUCCESS;
-    qnn_perf op_perf                            = qnn_perf("ggml_qnn_mul_mat");
+    qnn_perf op_perf                            = qnn_perf("ggmlqnn_graph_compute");
     qnn_instance * instance                     = nullptr;
     Qnn_GraphHandle_t graph_handle              = nullptr;
     ggml_backend_qnn_context * ctx              = (ggml_backend_qnn_context *) backend->context;
