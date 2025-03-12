@@ -3679,6 +3679,7 @@ static enum ggml_status ggml_backend_qnn_graph_compute(ggml_backend_t backend, s
             }
         }
     } else {
+        //offload entire cgraph to QNN CPU & GPU & NPU
         return ggmlqnn_graph_compute(backend, cgraph);
     }
 
@@ -3741,8 +3742,15 @@ static void ggml_backend_qnn_device_get_memory(ggml_backend_dev_t dev, size_t * 
 }
 
 static enum ggml_backend_dev_type ggml_backend_qnn_device_get_type(ggml_backend_dev_t dev) {
-    GGML_UNUSED(dev);
-    return GGML_BACKEND_DEVICE_TYPE_ACCEL;
+    struct ggml_backend_qnn_context * ctx = static_cast<ggml_backend_qnn_context *>(dev->context);
+    if (QNN_BACKEND_CPU == ctx->device)
+        return GGML_BACKEND_DEVICE_TYPE_ACCEL;
+    else if (QNN_BACKEND_GPU == ctx->device)
+        return GGML_BACKEND_DEVICE_TYPE_GPU;
+    else if (QNN_BACKEND_NPU == ctx->device)
+        return GGML_BACKEND_DEVICE_TYPE_ACCEL;
+    else
+        return GGML_BACKEND_DEVICE_TYPE_CPU;
 }
 
 static void ggml_backend_qnn_device_get_props(ggml_backend_dev_t dev,
@@ -4702,8 +4710,6 @@ void ggml_qnn_rope(ggml_backend_qnn_context * ctx, ggml_tensor * dst) {
 
 // =================================================================================================
 //  section-10: second approach: mapping ggml computational cgraph to QNN graph
-//  this approach is actually not appropriate or practical at the moment because of limitation in
-//  software architecture or inference architecture of llama.cpp
 // =================================================================================================
 // details: https://github.com/ggml-org/llama.cpp/pull/12326#issuecomment-2712838649
 // ref:     https://github.com/kantv-ai/kantv/blob/kantv-poc-with-qnn/core/ggml/jni/Inception_v3.cpp#L20634
@@ -4718,8 +4724,17 @@ static enum ggml_status ggmlqnn_graph_compute(ggml_backend_t backend, struct ggm
     QNN_INTERFACE_VER_TYPE qnn_raw_interface    = ctx->raw_interface;
     op_perf.start();
 
+    //now we got the entire ggml cgraph
     GGMLQNN_LOG_DEBUG("qnn device %d(%s)", ctx->device, ggml_backend_qnn_get_devname(ctx->device));
     GGMLQNN_LOG_DEBUG("cgraph->n_nodes %d", cgraph->n_nodes);
+    int num_nodes = std::min(5, cgraph->n_nodes);
+    //for (int i = 0; i < cgraph->n_nodes; i++) {
+    for (int i = 0; i < num_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
+        GGMLQNN_LOG_DEBUG("%s: op %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
+    }
+
+    //now we'll offload the entire ggml cgraph to a single opcfg QNN graph
     std::string graph_name;
     ggmlqnn_get_graphkey_from_cgraph(cgraph, graph_name);
     if (instance->_qnn_graph_map.find(graph_name) != instance->_qnn_graph_map.end()) {
@@ -4736,7 +4751,7 @@ static enum ggml_status ggmlqnn_graph_compute(ggml_backend_t backend, struct ggm
             return ggml_result;
         }
         graph_handle = instance->get_qnn_graph_handle();
-        //TODO: compose QNN graph
+        //TODO: compose a single opcfg QNN graph
 
         //TODO: finalize QNN graph
         //CHECK_QNN_API(qnn_error, qnn_raw_interface.graphFinalize(graph_handle, nullptr, nullptr));
@@ -4747,6 +4762,8 @@ static enum ggml_status ggmlqnn_graph_compute(ggml_backend_t backend, struct ggm
         auto  graph_item = std::make_tuple(graph_handle, ggml_op_mulmat_tensors);
         instance->_qnn_graph_map[graph_name] = graph_item;
     }
+    //exec QNN graph
+
     GGMLQNN_LOG_DEBUG("the second inference approach \"mapping cgraph to QNN graph\" is actually not supported now");
 
     return ggml_result;

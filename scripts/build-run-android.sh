@@ -14,8 +14,9 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
 QNN_SDK_URL=https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
-QNN_SDK_PATH=/opt/qcom/aistack/qairt/2.31.0.250130/
-QNN_SDK_PATH=/opt/qcom/aistack/qairt/2.32.0.250228/
+QNN_SDK_INSTALL_PATH=/opt/qcom/aistack/qairt/
+QNN_SDK_VERSION=2.32.0.250228
+QNN_SDK_PATH=${QNN_SDK_INSTALL_PATH}/${QNN_SDK_VERSION}
 
 #default is QNN NPU
 qnnbackend=2
@@ -33,11 +34,35 @@ function show_pwd()
 }
 
 
-function check_qnn_sdk()
+function check_and_download_qnn_sdk()
 {
+    is_qnn_sdk_exist=1
+
     if [ ! -d ${QNN_SDK_PATH} ]; then
-        echo -e "QNN_SDK_PATH ${QNN_SDK_PATH} not exist, pls check or download it from ${QNN_SDK_URL}...\n"
-        exit 1
+        echo -e "QNN_SDK_PATH ${QNN_SDK_PATH} not exist, download it from ${QNN_SDK_URL}...\n"
+        is_qnn_sdk_exist=0
+    fi
+
+    if [ ! -f ${QNN_SDK_PATH}/sdk.yaml ]; then
+        is_qnn_sdk_exist=0
+    fi
+
+    if [ ${is_qnn_sdk_exist} -eq 0 ]; then
+        echo "sudo mkdir -p ${QNN_SDK_INSTALL_PATH}"
+        sudo mkdir -p ${QNN_SDK_INSTALL_PATH}
+        if [ ! -f v${QNN_SDK_VERSION}.zip ]; then
+            wget --no-config --quiet --show-progress -O v${QNN_SDK_VERSION}.zip https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/${QNN_SDK_VERSION}/v${QNN_SDK_VERSION}.zip
+        fi
+        unzip v${QNN_SDK_VERSION}.zip
+        if [ $? -ne 0 ]; then
+            printf "failed to download Qualcomm QNN SDK to %s \n" "${QNN_SDK_PATH}"
+            exit 1
+        fi
+        sudo mv qairt/${QNN_SDK_VERSION} ${QNN_SDK_INSTALL_PATH}/
+        printf "Qualcomm QNN SDK saved to ${QNN_SDK_PATH} \n\n"
+        sudo rm -rf qairt
+    else
+        printf "Qualcomm QNN SDK already exist:${QNN_SDK_PATH} \n\n"
     fi
 }
 
@@ -133,7 +158,7 @@ function build_ggml_qnn()
 {
     show_pwd
     check_and_download_ndk
-    check_qnn_sdk
+    check_and_download_qnn_sdk
     dump_vars
     remove_temp_dir
     build_arm64
@@ -150,7 +175,7 @@ function prepare_run_on_phone()
 
     check_qnn_libs
 
-    if [ -f ./out/android/bin/libggml-qnn.so ]; then
+    if [ -f ./out/android/bin/libggml-cpu.so ]; then
         adb push ./out/android/bin/*.so ${REMOTE_PATH}/
     fi
     adb push ./out/android/bin/${program} ${REMOTE_PATH}/
@@ -163,7 +188,7 @@ function run_llamacli()
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-cli -mg ${qnnbackend} -no-cnv -m ${GGUF_MODEL_NAME} -p \"introduce the movie Once Upon a Time in America briefly.\n\""
+               && ${REMOTE_PATH}/llama-cli -mg ${qnnbackend} -ngl 99 -no-cnv -m ${GGUF_MODEL_NAME} -p \"introduce the movie Once Upon a Time in America briefly.\n\""
 
 }
 
@@ -353,7 +378,8 @@ function show_usage()
 
 show_pwd
 
-check_qnn_sdk
+check_and_download_ndk
+check_and_download_qnn_sdk
 
 if [ $# == 0 ]; then
     show_usage
