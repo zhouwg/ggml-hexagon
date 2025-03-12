@@ -114,6 +114,8 @@ extern "C" {
         void (*event_record)(ggml_backend_t backend, ggml_backend_event_t event);
         // wait for an event on on a different stream
         void (*event_wait)  (ggml_backend_t backend, ggml_backend_event_t event);
+
+        enum ggml_status          (*graph_compute_entire)     (ggml_backend_t backend, struct ggml_cgraph * cgraph);
     };
 
     struct ggml_backend {

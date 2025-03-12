@@ -1577,6 +1577,19 @@ enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, st
 }
 
 enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    ggml_backend_t prefer_backend = nullptr;
+    for (size_t idx = 0; idx < GGML_SCHED_MAX_BACKENDS; idx++) {
+        prefer_backend = sched->backends[idx];
+        if (nullptr != prefer_backend) {
+            if (ggml_backend_dev_type(prefer_backend->device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                continue;
+            } else {
+                if (nullptr != prefer_backend->iface.graph_compute_entire) {
+                    return prefer_backend->iface.graph_compute_entire(prefer_backend, graph);
+                }
+            }
+        }
+    }
     if (!sched->is_reset && !sched->is_alloc) {
         ggml_backend_sched_reset(sched);
     }
