@@ -2058,6 +2058,7 @@ static struct ggml_backend_i kompute_backend_i = {
     /* .graph_compute           = */ ggml_backend_kompute_graph_compute,
     /* .event_record            = */ NULL,
     /* .event_wait              = */ NULL,
+    /* .graph_compute_entire    = */ NULL,
 };
 
 static ggml_guid_t ggml_backend_kompute_guid() {
