@@ -537,16 +537,12 @@ llm_graph_result_ptr llama_context::build_kv_self_shift(
         const int64_t n_head_kv    = hparams.n_head_kv(il);
         const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
 
-        float freq_base_l  = cparams.rope_freq_base;
-        float freq_scale_l = cparams.rope_freq_scale;
+        const bool is_swa = hparams.is_swa(il);
 
-        // TODO: improve
-        if (model.arch == LLM_ARCH_GEMMA3) {
-            const bool is_sliding = hparams.is_sliding(il);
-
-            freq_base_l  = is_sliding ? 10000.0f : cparams.rope_freq_base;
-            freq_scale_l = is_sliding ? 1.0f     : cparams.rope_freq_scale;
-        }
+        // note: the swa rope params could become part of the cparams in the future
+        //       if we decide to make them configurable, like the non-sliding ones
+        const float freq_base_l  = is_swa ? hparams.rope_freq_base_train_swa  : cparams.rope_freq_base;
+        const float freq_scale_l = is_swa ? hparams.rope_freq_scale_train_swa : cparams.rope_freq_scale;
 
         ggml_tensor * rope_factors = kv_self->cbs.get_rope_factors(n_ctx_per_seq(), il);
 

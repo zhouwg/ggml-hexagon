@@ -475,6 +475,10 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     }
     hparams.rope_freq_scale_train = ropescale == 0.0f ? 1.0f : 1.0f/ropescale;
 
+    // by default assume that the sliding-window layers use the same scaling type as the non-sliding-window layers
+    hparams.rope_freq_base_train_swa  = hparams.rope_freq_base_train;
+    hparams.rope_freq_scale_train_swa = hparams.rope_freq_scale_train;
+
     ml.get_key(LLM_KV_ROPE_SCALING_ATTN_FACTOR, hparams.rope_attn_factor, false);
 
     // non-transformer models do not have attention heads
@@ -876,6 +880,9 @@ void llama_model::load_hparams(llama_model_loader & ml) {
         case LLM_ARCH_GEMMA3:
             {
                 hparams.n_swa_pattern = 6;
+
+                hparams.rope_freq_base_train_swa  = 10000.0f;
+                hparams.rope_freq_scale_train_swa = 1.0f;
 
                 ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,    hparams.n_swa);
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -1346,13 +1353,14 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
     const int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, (int)n_layer + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
+        const bool is_swa = il < (int) hparams.n_layer && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
-            LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s\n", il, ggml_backend_dev_name(cpu_dev));
+            LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
         }
         const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(il - i_gpu_start)/act_gpu_layers) - splits.begin();
         auto * dev = devices.at(layer_gpu);
-        LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s\n", il, ggml_backend_dev_name(dev));
+        LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
         return {dev, &pimpl->gpu_buft_list.at(dev)};
     };
 
@@ -7381,10 +7389,10 @@ struct llm_build_gemma3 : public llm_graph_context {
         auto * inp_attn = build_attn_inp_kv_unified(true, true);
 
         for (int il = 0; il < n_layer; ++il) {
-            const bool is_sliding = hparams.is_sliding(il);
+            const bool is_swa = hparams.is_swa(il);
 
-            const float freq_base_l  = is_sliding ? 10000.0f : freq_base;
-            const float freq_scale_l = is_sliding ? 1.0f     : freq_scale;
+            const float freq_base_l  = is_swa ? hparams.rope_freq_base_train_swa  : cparams.rope_freq_base;
+            const float freq_scale_l = is_swa ? hparams.rope_freq_scale_train_swa : cparams.rope_freq_scale;
 
             // norm
             cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
@@ -7973,7 +7981,7 @@ struct llm_build_cohere2 : public llm_graph_context {
         auto * inp_attn = build_attn_inp_kv_unified(true, true);
 
         for (int il = 0; il < n_layer; ++il) {
-            const bool is_sliding = hparams.is_sliding(il);
+            const bool is_swa = hparams.is_swa(il);
 
             // norm
             cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM, il);
@@ -8007,7 +8015,7 @@ struct llm_build_cohere2 : public llm_graph_context {
                     cb(Vcur, "Vcur", il);
                 }
 
-                if (is_sliding) {
+                if (is_swa) {
                     Qcur = ggml_rope_ext(ctx0, ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens), inp_pos, rope_factors,
                             n_rot, rope_type, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor,
                             beta_fast, beta_slow);

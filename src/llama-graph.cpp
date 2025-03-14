@@ -1403,9 +1403,9 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, v_cur, v_cache_view));
     }
 
-    const bool is_sliding = hparams.is_sliding(il);
+    const bool is_swa = hparams.is_swa(il);
 
-    const auto & kq_mask = is_sliding ? inp->get_kq_mask_swa() : inp->get_kq_mask();
+    const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
 
     const auto n_kv = kv_self->n;
 
