@@ -1747,6 +1747,25 @@ class LlamaModel(Model):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
+@Model.register("Mistral3ForConditionalGeneration")
+class Mistral3Model(LlamaModel):
+    model_arch = gguf.MODEL_ARCH.LLAMA
+
+    # we need to merge the text_config into the root level of hparams
+    def __init__(self, *args, **kwargs):
+        hparams = Model.load_hparams(kwargs["dir_model"])
+        if "text_config" in hparams:
+            hparams = {**hparams, **hparams["text_config"]}
+            kwargs["hparams"] = hparams
+        super().__init__(*args, **kwargs)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+        name = name.replace("language_model.", "")
+        if "multi_modal_projector" in name or "vision_tower" in name:
+            return []
+        return super().modify_tensors(data_torch, name, bid)
+
+
 @Model.register("DeciLMForCausalLM")
 class DeciModel(Model):
     model_arch = gguf.MODEL_ARCH.DECI
