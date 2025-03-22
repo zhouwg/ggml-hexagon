@@ -268,7 +268,7 @@ block:ggmlbackends
    ggml_vulkan["ggml-vulkan"]
    ggml_cann["ggml-cann"]
    ggml_opencl["ggml-opencl"]
-   ggml_qnn["ggml-qnn"]
+   ggml_hexagon["ggml-hexagon"]
    ggml_nnpa["ggml-nnpa"]
    ggml_ane["ggml-ane"]
 
@@ -281,7 +281,7 @@ block:ggmlbackends
    style ggml_cann      fill:#888,color:#000,stroke:#000
 
    style ggml_opencl    fill:#cc3,color:#000,stroke:#000
-   style ggml_qnn       fill:#cc3,color:#000,stroke:#000
+   style ggml_hexagon       fill:#cc3,color:#000,stroke:#000
    style ggml_ane       fill:#fff,color:#000,stroke:#f00,stroke-width:2,stroke-dasharray:5
    style ggml_nnpa      fill:#cc3,color:#000,stroke:#000
   end
@@ -333,7 +333,7 @@ block:hardware_vendors
     ggml_cann   --> Huawei
     ggml_sycl   --> Intel
     ggml_opencl --> Qualcomm
-    ggml_qnn    --> Qualcomm
+    ggml_hexagon    --> Qualcomm
     ggml_ane    --> Apple
     ggml_nnpa   --> IBM
 end
