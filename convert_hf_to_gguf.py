@@ -3803,8 +3803,6 @@ class MambaModel(Model):
     _tok_embd = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        del bid  # unused
-
         output_name = self.format_tensor_name(gguf.MODEL_TENSOR.OUTPUT)
         tok_embd_name = self.format_tensor_name(gguf.MODEL_TENSOR.TOKEN_EMBD)
 
@@ -3813,6 +3811,10 @@ class MambaModel(Model):
         if name.endswith(".A_log"):
             logger.debug("A_log --> A ==> " + new_name)
             data_torch = -torch.exp(data_torch)
+
+        # [4 1 8192 1] -> [4 8192 1 1]
+        if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.SSM_CONV1D, bid):
+            data_torch = data_torch.squeeze()
 
         # assuming token_embd.weight is seen before output.weight
         if self._tok_embd is not None and new_name == output_name:
