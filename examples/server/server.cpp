@@ -1876,7 +1876,7 @@ struct server_context {
     }
 
     bool load_model(const common_params & params) {
-        SRV_INF("loading model '%s'\n", params.model.c_str());
+        SRV_INF("loading model '%s'\n", params.model.path.c_str());
 
         params_base = params;
 
@@ -1886,7 +1886,7 @@ struct server_context {
         ctx   = llama_init.context.get();
 
         if (model == nullptr) {
-            SRV_ERR("failed to load model, '%s'\n", params_base.model.c_str());
+            SRV_ERR("failed to load model, '%s'\n", params_base.model.path.c_str());
             return false;
         }
 
@@ -1897,16 +1897,13 @@ struct server_context {
         add_bos_token = llama_vocab_get_add_bos(vocab);
         has_eos_token = llama_vocab_eos(vocab) != LLAMA_TOKEN_NULL;
 
-        if (!params_base.speculative.model.empty() || !params_base.speculative.hf_repo.empty()) {
-            SRV_INF("loading draft model '%s'\n", params_base.speculative.model.c_str());
+        if (!params_base.speculative.model.path.empty() || !params_base.speculative.model.hf_repo.empty()) {
+            SRV_INF("loading draft model '%s'\n", params_base.speculative.model.path.c_str());
 
             auto params_dft = params_base;
 
             params_dft.devices      = params_base.speculative.devices;
-            params_dft.hf_file      = params_base.speculative.hf_file;
-            params_dft.hf_repo      = params_base.speculative.hf_repo;
             params_dft.model        = params_base.speculative.model;
-            params_dft.model_url    = params_base.speculative.model_url;
             params_dft.n_ctx        = params_base.speculative.n_ctx == 0 ? params_base.n_ctx / params_base.n_parallel : params_base.speculative.n_ctx;
             params_dft.n_gpu_layers = params_base.speculative.n_gpu_layers;
             params_dft.n_parallel   = 1;
@@ -1920,12 +1917,12 @@ struct server_context {
             model_dft = llama_init_dft.model.get();
 
             if (model_dft == nullptr) {
-                SRV_ERR("failed to load draft model, '%s'\n", params_base.speculative.model.c_str());
+                SRV_ERR("failed to load draft model, '%s'\n", params_base.speculative.model.path.c_str());
                 return false;
             }
 
             if (!common_speculative_are_compatible(ctx, llama_init_dft.context.get())) {
-                SRV_ERR("the draft model '%s' is not compatible with the target model '%s'\n", params_base.speculative.model.c_str(), params_base.model.c_str());
+                SRV_ERR("the draft model '%s' is not compatible with the target model '%s'\n", params_base.speculative.model.path.c_str(), params_base.model.path.c_str());
 
                 return false;
             }
@@ -3865,7 +3862,7 @@ int main(int argc, char ** argv) {
         json data = {
             { "default_generation_settings", ctx_server.default_generation_settings_for_props },
             { "total_slots",                 ctx_server.params_base.n_parallel },
-            { "model_path",                  ctx_server.params_base.model },
+            { "model_path",                  ctx_server.params_base.model.path },
             { "chat_template",               common_chat_templates_source(ctx_server.chat_templates.get()) },
             { "bos_token",                   common_token_to_piece(ctx_server.ctx, llama_vocab_bos(ctx_server.vocab), /* special= */ true)},
             { "eos_token",                   common_token_to_piece(ctx_server.ctx, llama_vocab_eos(ctx_server.vocab), /* special= */ true)},
@@ -4131,7 +4128,7 @@ int main(int argc, char ** argv) {
             {"object", "list"},
             {"data", {
                 {
-                    {"id",       params.model_alias.empty() ? params.model : params.model_alias},
+                    {"id",       params.model_alias.empty() ? params.model.path : params.model_alias},
                     {"object",   "model"},
                     {"created",  std::time(0)},
                     {"owned_by", "llamacpp"},

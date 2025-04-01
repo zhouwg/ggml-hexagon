@@ -184,6 +184,13 @@ struct common_params_sampling {
     std::string print() const;
 };
 
+struct common_params_model {
+    std::string path    = ""; // model local path                                           // NOLINT
+    std::string url     = ""; // model url to download                                      // NOLINT
+    std::string hf_repo = ""; // HF repo                                                    // NOLINT
+    std::string hf_file = ""; // HF file                                                    // NOLINT
+};
+
 struct common_params_speculative {
     std::vector<ggml_backend_dev_t> devices; // devices to use for offloading
 
@@ -197,19 +204,11 @@ struct common_params_speculative {
     struct cpu_params cpuparams;
     struct cpu_params cpuparams_batch;
 
-    std::string hf_repo = ""; // HF repo                                                     // NOLINT
-    std::string hf_file = ""; // HF file                                                     // NOLINT
-
-    std::string model = "";     // draft model for speculative decoding                      // NOLINT
-    std::string model_url = ""; // model url to download                                     // NOLINT
+    struct common_params_model model;
 };
 
 struct common_params_vocoder {
-    std::string hf_repo = ""; // HF repo                                                     // NOLINT
-    std::string hf_file = ""; // HF file                                                     // NOLINT
-
-    std::string model     = ""; // model path                                                // NOLINT
-    std::string model_url = ""; // model url to download                                     // NOLINT
+    struct common_params_model model;
 
     std::string speaker_file = ""; // speaker file path                                      // NOLINT
 
@@ -267,12 +266,10 @@ struct common_params {
     struct common_params_speculative speculative;
     struct common_params_vocoder     vocoder;
 
-    std::string model                = ""; // model path                                                    // NOLINT
+    struct common_params_model model;
+
     std::string model_alias          = ""; // model alias                                                   // NOLINT
-    std::string model_url            = ""; // model url to download                                         // NOLINT
     std::string hf_token             = ""; // HF token                                                      // NOLINT
-    std::string hf_repo              = ""; // HF repo                                                       // NOLINT
-    std::string hf_file              = ""; // HF file                                                       // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT
     std::string prompt_file          = ""; // store the external prompt file name                           // NOLINT
@@ -347,7 +344,7 @@ struct common_params {
     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
 
     // multimodal models (see examples/llava)
-    std::string mmproj = "";        // path to multimodal projector                                         // NOLINT
+    struct common_params_model mmproj;
     std::vector<std::string> image; // path to image file(s)
 
     // embedding
@@ -545,23 +542,6 @@ struct common_init_result     common_init_from_params(common_params & params);
 struct llama_model_params     common_model_params_to_llama  (      common_params & params);
 struct llama_context_params   common_context_params_to_llama(const common_params & params);
 struct ggml_threadpool_params ggml_threadpool_params_from_cpu_params(const cpu_params & params);
-
-struct llama_model * common_load_model_from_url(
-    const std::string & model_url,
-    const std::string & local_path,
-    const std::string & hf_token,
-    const struct llama_model_params & params);
-
-struct llama_model * common_load_model_from_hf(
-    const std::string & repo,
-    const std::string & remote_path,
-    const std::string & local_path,
-    const std::string & hf_token,
-    const struct llama_model_params & params);
-
-std::pair<std::string, std::string> common_get_hf_file(
-    const std::string & hf_repo_with_tag,
-    const std::string & hf_token);
 
 // clear LoRA adapters from context, then apply new list of adapters
 void common_set_adapter_lora(struct llama_context * ctx, std::vector<common_adapter_lora_info> & lora);
