@@ -121,10 +121,6 @@ struct common_grammar_trigger {
     common_grammar_trigger_type type;
     std::string value;
     llama_token token = LLAMA_TOKEN_NULL;
-
-    // T can only be nlohmann::ordered_json
-    template <class T> T to_json() const;
-    template <class T> static common_grammar_trigger from_json(const T & in);
 };
 
 // sampling parameters
