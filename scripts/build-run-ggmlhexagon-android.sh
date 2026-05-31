@@ -428,7 +428,7 @@ function check_prebuilt_models()
     #6.9 GiB
     #check_and_download_model gemma-3n-E4B-it-Q8_0.gguf https://huggingface.co/ggml-org/gemma-3n-E4B-it-GGUF/resolve/main/gemma-3n-E4B-it-Q8_0.gguf
     #4.5 GiB
-    check_and_download_model gemma-3n-E2B-it-Q8_0.gguf https://huggingface.co/ggml-org/gemma-3n-E2B-it-GGUF/resolve/main/gemma-3n-E2B-it-Q8_0.gguf
+    #check_and_download_model gemma-3n-E2B-it-Q8_0.gguf https://huggingface.co/ggml-org/gemma-3n-E2B-it-GGUF/resolve/main/gemma-3n-E2B-it-Q8_0.gguf
 
     set -e
 }
@@ -700,7 +700,7 @@ function show_usage()
 show_pwd
 
 check_commands_in_host
-check_android_phone
+#check_android_phone
 check_and_download_ndk
 check_and_download_qnn_sdk
 check_and_download_hexagon_sdk
