@@ -604,4 +604,8 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 
 ```
 $ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_llamabench
+
 ```
+<img width="1652" height="356" alt="Screenshot from 2026-06-01 18-47-45" src="https://github.com/user-attachments/assets/0f440941-bf49-4b48-a96c-1d6bf05fb849" />
+
