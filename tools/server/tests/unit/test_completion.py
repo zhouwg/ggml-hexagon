@@ -1,20 +1,24 @@
 import pytest
 import requests
 import time
+import random
+
 from openai import OpenAI
 from utils import *
 
 server = ServerPreset.tinyllama2()
 
+JSON_MULTIMODAL_KEY = "multimodal_data"
+JSON_PROMPT_STRING_KEY = "prompt_string"
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(autouse=True)
 def create_server():
     global server
     server = ServerPreset.tinyllama2()
 
 @pytest.mark.parametrize("prompt,n_predict,re_content,n_prompt,n_predicted,truncated,return_tokens", [
     ("I believe the meaning of life is", 8, "(going|bed)+", 18, 8, False, False),
-    ("Write a joke about AI from a very long prompt which will not be truncated", 256, "(princesses|everyone|kids|Anna|forest)+", 46, 64, False, True),
+    ("Write a joke about AI from a very long prompt which will not be truncated", 64, "(princesses|everyone|kids|Anna|forest)+", 46, 64, False, True),
 ])
 def test_completion(prompt: str, n_predict: int, re_content: str, n_prompt: int, n_predicted: int, truncated: bool, return_tokens: bool):
     global server
@@ -39,7 +43,7 @@ def test_completion(prompt: str, n_predict: int, re_content: str, n_prompt: int,
 
 @pytest.mark.parametrize("prompt,n_predict,re_content,n_prompt,n_predicted,truncated", [
     ("I believe the meaning of life is", 8, "(going|bed)+", 18, 8, False),
-    ("Write a joke about AI from a very long prompt which will not be truncated", 256, "(princesses|everyone|kids|Anna|forest)+", 46, 64, False),
+    ("Write a joke about AI from a very long prompt which will not be truncated", 64, "(princesses|everyone|kids|Anna|forest)+", 46, 64, False),
 ])
 def test_completion_stream(prompt: str, n_predict: int, re_content: str, n_prompt: int, n_predicted: int, truncated: bool):
     global server
@@ -131,7 +135,7 @@ def test_completion_stream_with_openai_library_stops():
     client = OpenAI(api_key="dummy", base_url=f"http://{server.server_host}:{server.server_port}/v1")
     res = client.completions.create(
         model="davinci-002",
-        prompt="System: You are helpfull assistant.\nAssistant:\nHey! How could I help?\nUser:\nTell me a joke.\nAssistant:\n",
+        prompt="System: You are helpful assistant.\nAssistant:\nHey! How could I help?\nUser:\nTell me a joke.\nAssistant:\n",
         stop=["User:\n", "Assistant:\n"],
         max_tokens=200,
         stream=True,
@@ -229,8 +233,30 @@ def test_nocache_long_input_prompt():
         "temperature": 1.0,
         "cache_prompt": False,
     })
+    assert res.status_code == 400
+
+def test_json_prompt_no_mtmd():
+    global server
+    server.start()
+    res = server.make_request("POST", "/completion", data={
+        "prompt": { JSON_PROMPT_STRING_KEY: "I believe the meaning of life is" },
+        "seed": 42,
+        "temperature": 1.0,
+        "cache_prompt": False,
+    })
     assert res.status_code == 200
 
+def test_json_prompt_mtm_error_when_not_supported():
+    global server
+    server.start()
+    res = server.make_request("POST", "/completion", data={
+        "prompt": { JSON_PROMPT_STRING_KEY: "I believe the meaning of life is <__media__>", JSON_MULTIMODAL_KEY: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" },
+        "seed": 42,
+        "temperature": 1.0,
+        "cache_prompt": False,
+    })
+    # MTMD is disabled on this model, so this should fail.
+    assert res.status_code != 200
 
 def test_completion_with_tokens_input():
     global server
@@ -263,6 +289,20 @@ def test_completion_with_tokens_input():
     # mixed string and tokens
     res = server.make_request("POST", "/completion", data={
         "prompt": [tokens, prompt_str],
+    })
+    assert res.status_code == 200
+    assert type(res.body) == list
+    assert len(res.body) == 2
+    assert res.body[0]["content"] == res.body[1]["content"]
+
+    # mixed JSON and tokens
+    res = server.make_request("POST", "/completion", data={
+        "prompt": [
+            tokens,
+            {
+                JSON_PROMPT_STRING_KEY: "I believe the meaning of life is",
+            },
+        ],
     })
     assert res.status_code == 200
     assert type(res.body) == list
@@ -328,6 +368,37 @@ def test_completion_parallel_slots(n_slots: int, n_requests: int):
         assert len(res.body["content"]) > 10
         # FIXME: the result is not deterministic when using other slot than slot 0
         # assert match_regex(re_content, res.body["content"])
+
+
+@pytest.mark.parametrize(
+    "n_ctx,n_slots,n_predict_vals,expected_success",
+    [
+        (256, 4, [80, 40, 80, 80], [True,  True,  True,  True]),
+        (256, 4, [70, 70, 70, 70], [False, False, False, False]),
+        (256, 4, [90, 90, 40, 90], [False, False, True,  False]),
+        (256, 4, [90, 90, 40, 75], [True,  True,  True,  True]),
+    ],
+)
+def test_completion_unified(n_ctx, n_slots, n_predict_vals, expected_success):
+    global server
+    server.n_slots = n_slots
+    server.kv_unified = True
+    server.n_ctx = n_ctx
+    server.start()
+    prompt = "A"
+    tasks = []
+    for n_predict in n_predict_vals:
+        tasks.append((server.make_request, ("POST", "/completion", {"prompt": prompt, "n_predict": n_predict})))
+    results = parallel_function_calls(tasks)
+    for res, n_predict, expect_ok in zip(results, n_predict_vals, expected_success):
+        if expect_ok:
+            assert res.status_code == 200
+
+        # note: https://github.com/ggml-org/llama.cpp/pull/18700#issuecomment-3728695581
+        if res.status_code == 200:
+            assert "content" in res.body
+            if "timings" in res.body:
+                assert res.body["timings"]["predicted_n"] == n_predict
 
 
 @pytest.mark.parametrize(
@@ -420,28 +491,114 @@ def test_n_probs_post_sampling():
     global server
     server.start()
     res = server.make_request("POST", "/completion", data={
-        "prompt": "I believe the meaning of life is",
+        "prompt": "Today was the day. Today I would finally become a",
         "n_probs": 10,
-        "temperature": 0.0,
+        "temperature": 1.0,
         "n_predict": 5,
         "post_sampling_probs": True,
     })
     assert res.status_code == 200
     assert "completion_probabilities" in res.body
     assert len(res.body["completion_probabilities"]) == 5
-    for tok in res.body["completion_probabilities"]:
+    for (i, tok) in enumerate(res.body["completion_probabilities"]):
         assert "id" in tok and tok["id"] > 0
         assert "token" in tok and type(tok["token"]) == str
         assert "prob" in tok and 0.0 < tok["prob"] <= 1.0
         assert "bytes" in tok and type(tok["bytes"]) == list
-        assert len(tok["top_probs"]) == 10
+        assert "top_probs" in tok and type(tok["top_probs"]) == list
+
         for prob in tok["top_probs"]:
             assert "id" in prob and prob["id"] > 0
             assert "token" in prob and type(prob["token"]) == str
-            assert "prob" in prob and 0.0 <= prob["prob"] <= 1.0
+            # 0.0 probability tokens should never be returned by the server
+            assert "prob" in prob and 0.0 < prob["prob"] <= 1.0
             assert "bytes" in prob and type(prob["bytes"]) == list
-        # because the test model usually output token with either 100% or 0% probability, we need to check all the top_probs
-        assert any(prob["prob"] == 1.0 for prob in tok["top_probs"])
+
+        if i == 0:
+            # The prompt is vague enough that we should get at least 10 possibilities
+            # for the first token.
+            assert len(tok["top_probs"]) == 10
+
+        if len(tok["top_probs"]) < 10:
+            # Getting less than the requested number of probabilities should only happen
+            # if the ones we did get already sum to 1.0.
+            assert sum(p["prob"] for p in tok["top_probs"]) == pytest.approx(1.0)
+
+def test_n_probs_post_backend_sampling():
+    """Verify that the same probabilities are returned with and without backend sampling."""
+    global server
+    server.backend_sampling = True
+    server.start()
+
+    def make_request(backend_sampling):
+        n_predict = 20
+
+        res = server.make_request("POST", "/completion", data={
+            "prompt": "The countries of Europe, in random order, are:",
+            "n_probs": 10,
+            "n_predict": n_predict,
+            "post_sampling_probs": True,
+            "seed": 4242,
+            "backend_sampling": backend_sampling,
+        })
+        assert res.status_code == 200
+
+        total_probs = 0
+        completions = res.body["completion_probabilities"]
+        assert len(completions) == n_predict
+        for tok in completions:
+            # Handling of 0.0 probabilities differs between samplers and backend sampling. Filter them to normalize the
+            # data.
+            tok["top_probs"] = [x for x in tok["top_probs"] if x["prob"] > 0.0]
+            total_probs += len(tok["top_probs"])
+        # Verify that we got at least two top probs on average, to ensure the effectiveness of the test.
+        assert total_probs >= 2 * n_predict
+        return completions
+
+    def verify_token(a, b):
+        assert a["id"] == b["id"]
+        assert a["token"] == b["token"]
+        assert a["bytes"] == b["bytes"]
+        assert a["prob"] == pytest.approx(b["prob"], abs=0.01)
+
+    for (a, b) in zip(make_request(True), make_request(False)):
+        verify_token(a, b)
+        assert len(a["top_probs"]) == len(b["top_probs"])
+
+        for (aa, bb) in zip(a["top_probs"], b["top_probs"]):
+            verify_token(aa, bb)
+
+@pytest.mark.parametrize("tokenize,openai_style", [(False, False), (False, True), (True, False), (True, True)])
+def test_logit_bias(tokenize, openai_style):
+    global server
+    server.start()
+
+    exclude = ["i", "I", "the", "The", "to", "a", "an", "be", "is", "was", "but", "But", "and", "And", "so", "So", "you", "You", "he", "He", "she", "She", "we", "We", "they", "They", "it", "It", "his", "His", "her", "Her", "book", "Book"]
+
+    logit_bias = []
+    if tokenize:
+        res = server.make_request("POST", "/tokenize", data={
+            "content": " " + " ".join(exclude) + " ",
+        })
+        assert res.status_code == 200
+        tokens = res.body["tokens"]
+        logit_bias = [[tok, -100] for tok in tokens]
+
+    else:
+        logit_bias = [[" " + tok + " ", -100] for tok in exclude]
+
+    if openai_style:
+        logit_bias = {el[0]: -100 for el in logit_bias}
+
+    res = server.make_request("POST", "/completion", data={
+        "n_predict": 64,
+        "prompt": "What is the best book",
+        "logit_bias": logit_bias,
+        "temperature": 0.0
+    })
+    assert res.status_code == 200
+    output_text = res.body["content"]
+    assert all(output_text.find(" " + tok + " ") == -1 for tok in exclude)
 
 
 def test_cancel_request():
@@ -459,6 +616,46 @@ def test_cancel_request():
     except requests.exceptions.ReadTimeout:
         pass # expected
     # make sure the slot is free
-    time.sleep(1) # wait for HTTP_POLLING_SECONDS
+    time.sleep(2)
     res = server.make_request("GET", "/slots")
     assert res.body[0]["is_processing"] == False
+
+
+# this test exercises the host-memory prompt cache
+# ref: https://github.com/ggml-org/llama.cpp/pull/16391
+# ref: https://github.com/ggml-org/llama.cpp/pull/17078
+def test_completion_prompt_cache():
+    global server
+    server.n_slots = 2
+    server.kv_unified = True
+    server.start()
+
+    for _ in range(16):
+        # generate alternating random prompts with variable lengths in order to get them in and out of the cache
+        r = random.randint(0, 4)
+        prompt = (" Hello " +  str(r)) * (40 + r)
+        n_prompt = (40 + r)*5 + 2
+        n_predict = random.randint(1, 8)
+
+        res = server.make_request(
+            "POST",
+            "/completion",
+            data={
+                "prompt": prompt,
+                "n_predict": n_predict,
+            },
+        )
+
+        assert res.status_code == 200
+        assert "content" in res.body
+        content = res.body["content"]
+        assert isinstance(content, str)
+        assert len(content) > 0
+
+        assert type(res.body["has_new_line"]) == bool
+        assert "timings" in res.body
+        timings = res.body["timings"]
+
+        assert "prompt_n" in timings and timings["prompt_n"] + timings["cache_n"] == n_prompt
+        assert "predicted_n" in timings and timings["predicted_n"] == n_predict
+        assert "tokens" in res.body and isinstance(res.body["tokens"], list)

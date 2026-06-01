@@ -21,6 +21,8 @@ Function calling is supported for all models (see https://github.com/ggml-org/ll
   - Use `--chat-template-file` to override the template when appropriate (see examples below)
   - Generic support may consume more tokens and be less efficient than a model's native format.
 
+- Multiple/parallel tool calling is supported on some models but disabled by default, enable it by passing `"parallel_tool_calls": true` in the completion endpoint payload.
+
 <details>
 <summary>Show some common templates and which format handler they use</summary>
 
@@ -269,6 +271,8 @@ Function calling is supported for all models (see https://github.com/ggml-org/ll
 
 This table can be generated with:
 
+<!-- TODO @ngxson : we should update this, since minja dependency has been removed -->
+
 ```bash
 ./build/bin/test-chat ../minja/build/tests/*.jinja 2>/dev/null
 ```
@@ -287,6 +291,7 @@ Here are some models known to work (w/ chat template override when needed):
 llama-server --jinja -fa -hf bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M
 llama-server --jinja -fa -hf bartowski/Mistral-Nemo-Instruct-2407-GGUF:Q6_K_L
 llama-server --jinja -fa -hf bartowski/Llama-3.3-70B-Instruct-GGUF:Q4_K_M
+llama-server --jinja -fa -hf ibm-granite/granite-4.1-3b-GGUF:Q4_K_M
 
 # Native support for DeepSeek R1 works best w/ our template override (official template is buggy, although we do work around it)
 

@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
 #
-# Copyright (c) 2024-2025 Jeff Zhou(https://github.com/jeffzhou2000)
-#
-# 1. build llama.cpp + ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
-#    this script will setup local dev envs automatically
-#
-# 2. verify prebuilt libggmldsp-skel.so on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
-#
-# 3. performance comparison of QNN-CPU,QNN-GPU,QNN-NPU,Hexagon-cDSP,ggml on Android phone equipped with Qualcomm Snapdragon mobile SoC
+# build llama.cpp + ggml-hexagon backend(Qualcomm's official version) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
 #
 #
 set -e
 
-######## part-1: don't modify contents in this part ########
+######## part-1: public macros & vars ########
 
 PWD=`pwd`
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
 HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)}'`
+VERBOSE=OFF
+VERBOSE=ON
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
@@ -30,6 +25,16 @@ ANDROID_NDK_NAME=android-ndk-${ANDROID_NDK_VERSION}
 ANDROID_NDK_FULLNAME=${ANDROID_NDK_NAME}-linux.zip
 ANDROID_NDK=${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_NAME}
 
+# --- Define NDK paths based on the absolute SDK path ---
+NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+
+#OpenCL Headers can be found at:
+#https://https://github.com/KhronosGroup/OpenCL-Headers
+OPENCL_SDK_URL=https://github.com/KhronosGroup/OpenCL-Headers
+OPENCL_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
+
 #Qualcomm QNN SDK can be found at:
 #https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
 QNN_SDK_URL=https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
@@ -38,19 +43,31 @@ QNN_SDK_VERSION=2.33.0.250327
 QNN_SDK_VERSION=2.34.0.250424
 QNN_SDK_VERSION=2.35.0.250530
 QNN_SDK_VERSION=2.36.0.250627
+QNN_SDK_VERSION=2.46.0.260424
 #fully official QNN SDK, will be downloaded automatically via this script
 QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.34.0.250424/
 QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.35.0.250530/
 QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.36.0.250627/
+QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
-#fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account):
+#fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA)
+#only for purpose of test/development
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
-HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/6.2.0.1
+#HEXAGON_SDK_VERSION=6.2.0.1
+#HEXAGON SDK 6.3.0.0 is required for htp v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
+#HEXAGON_SDK_VERSION=6.3.0.0
+#HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
+
+
 #the official Qualcomm Hexagon SDK tech docs can be found at:
 #https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
 #customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
 #this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
+#actually used in this project
 HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
+
+HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
+HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 
 
 #running_params=" -ngl 99 -t 4 -n 256 --no-warmup -fa 1 "
@@ -96,7 +113,10 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #v69 --- Snapdragon 8 Gen1
 #v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
-#v79 --- Snapdragon 8 Elite
+#v79 --- Snapdragon 8 Elite(aka 8 Gen4)
+#v81 --- Snapdragon 8 Elite Gen5(aka 8 Gen5)
+
+
 
 #Qualcomm Snapdragon 8Elite based Android phone is strongly recommended because:
 #1. sometimes the same dsp codes can got the best performance on Snapdragon 8Elite based phone.
@@ -232,6 +252,69 @@ function check_and_download_qnn_sdk()
 }
 
 
+function check_and_download_opencl_sdk()
+{
+    is_opencl_sdk_exist=1
+
+    if [ ! -d ${OPENCL_SDK_PATH} ]; then
+        echo -e "OPENCL_SDK_PATH ${OPENCL_SDK_PATH} not exist, download it from ${OPENCL_SDK_URL}...\n"
+        is_opencl_sdk_exist=0
+    fi
+    if [ ! -f ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so ]; then
+        echo -e "${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so not exist...\n"
+        is_opencl_sdk_exist=0
+    fi
+
+    if [ ${is_opencl_sdk_exist} -eq 0 ]; then
+        mkdir -p ${OPENCL_SDK_PATH}
+        cd ${OPENCL_SDK_PATH}
+
+        if [ ! -d OpenCL-Headers ]; then
+            echo "Cloning OpenCL-Headers..."
+            git clone https://github.com/KhronosGroup/OpenCL-Headers
+            if [ $? -ne 0 ]; then
+                printf "failed to download OpenCL-Headers to %s \n" "${OPENCL_SDK_PATH}"
+                exit 1
+            fi
+        fi
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-Headers
+        printf "Copying OpenCL Headers to Android NDK sysroot include: ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}"
+        mkdir -p ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+        /bin/cp -r -fv CL ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+        if [ ! -d OpenCL-ICD-Loader ]; then
+            echo "Cloning OpenCL-ICD-Loader..."
+            git clone https://github.com/KhronosGroup/OpenCL-ICD-Loader
+            if [ $? -ne 0 ]; then
+                printf "failed to download OpenCL-ICD-Loader to %s \n" "${OPENCL_SDK_PATH}"
+                exit 1
+            fi
+        fi
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-ICD-Loader
+        mkdir -p build
+        cd build
+        cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DANDROID_STL=c++_shared -DOPENCL_ICD_LOADER_HEADERS_DIR=${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+        echo "Building OpenCL-ICD-Loader with ninjia..."
+        ninja
+        if [ $? -ne 0 ]; then
+            printf "failed to build OpenCL-ICD-Loader\n"
+            exit 1
+        fi
+        mkdir -p ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}
+        /bin/cp -fv libOpenCL.so ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}
+
+        echo "OpenCL components setup complete"
+        echo "OpenCL Headers are in: ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}/CL"
+        echo "libOpenCL.so is in:    ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so"
+
+        cd ${PROJECT_ROOT_PATH}
+    else
+        printf "OpenCL SDK already exist:    ${OPENCL_SDK_PATH} \n\n"
+    fi
+}
+
+
 function check_and_download_ndk()
 {
     is_android_ndk_exist=1
@@ -273,23 +356,20 @@ function build_arm64
     #    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
     #fi
 
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
-    cd out/ggmlhexagon-android
-    make -j${HOST_CPU_COUNTS}
+    /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
+    cmake -H. -B./out/ggmlhexagon-android-release -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ./out/ggmlhexagon-android-release
     show_pwd
-
-    cd -
+    /bin/rm -f CMakeUserPresets.json
 }
 
 
 function build_arm64_debug
 {
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
-    cd out/ggmlhexagon-android
-    make -j${HOST_CPU_COUNTS}
+    cmake -H. -B./out/ggmlhexagon-android-debug -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ./out/ggmlhexagon-android-debug
     show_pwd
-
-    cd -
+    /bin/rm -f CMakeUserPresets.json
 }
 
 
@@ -346,6 +426,7 @@ function build_ggml_hexagon()
 {
     show_pwd
     check_and_download_ndk
+    check_and_download_opencl_sdk
     check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
@@ -358,6 +439,7 @@ function build_ggml_hexagon_debug()
 {
     show_pwd
     check_and_download_ndk
+    check_and_download_opencl_sdk
     check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
@@ -702,6 +784,7 @@ show_pwd
 check_commands_in_host
 #check_android_phone
 check_and_download_ndk
+check_and_download_opencl_sdk
 check_and_download_qnn_sdk
 check_and_download_hexagon_sdk
 check_prebuilt_models

@@ -8,7 +8,7 @@ server = ServerPreset.bert_bge_small()
 
 EPSILON = 1e-3
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(autouse=True)
 def create_server():
     global server
     server = ServerPreset.bert_bge_small()
@@ -99,6 +99,40 @@ def test_embedding_mixed_input(input, is_multi_prompt: bool):
     else:
         assert 'embedding' in data[0]
         assert len(data[0]['embedding']) > 1
+
+
+def test_embedding_pooling_mean():
+    global server
+    server.pooling = 'mean'
+    server.start()
+    res = server.make_request("POST", "/v1/embeddings", data={
+        "input": "I believe the meaning of life is",
+    })
+    assert res.status_code == 200
+    assert len(res.body['data']) == 1
+    assert 'embedding' in res.body['data'][0]
+    assert len(res.body['data'][0]['embedding']) > 1
+
+    # make sure embedding vector is normalized
+    assert abs(sum([x ** 2 for x in res.body['data'][0]['embedding']]) - 1) < EPSILON
+
+
+def test_embedding_pooling_mean_multiple():
+    global server
+    server.pooling = 'mean'
+    server.start()
+    res = server.make_request("POST", "/v1/embeddings", data={
+        "input": [
+            "I believe the meaning of life is",
+            "Write a joke about AI",
+            "This is a test",
+        ],
+    })
+    assert res.status_code == 200
+    assert len(res.body['data']) == 3
+    for d in res.body['data']:
+        assert 'embedding' in d
+        assert len(d['embedding']) > 1
 
 
 def test_embedding_pooling_none():
