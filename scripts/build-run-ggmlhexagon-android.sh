@@ -38,10 +38,9 @@ QNN_SDK_VERSION=2.33.0.250327
 QNN_SDK_VERSION=2.34.0.250424
 QNN_SDK_VERSION=2.35.0.250530
 QNN_SDK_VERSION=2.36.0.250627
+QNN_SDK_VERSION=2.46.0.260424
 #fully official QNN SDK, will be downloaded automatically via this script
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.34.0.250424/
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.35.0.250530/
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.36.0.250627/
+QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
 #fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account):
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
