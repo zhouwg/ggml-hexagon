@@ -45,24 +45,18 @@ QNN_SDK_VERSION=2.35.0.250530
 QNN_SDK_VERSION=2.36.0.250627
 QNN_SDK_VERSION=2.46.0.260424
 #fully official QNN SDK, will be downloaded automatically via this script
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.34.0.250424/
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.35.0.250530/
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/2.36.0.250627/
 QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
-#fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA)
+#fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
+#fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
 #only for purpose of test/development
-#https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
 #HEXAGON_SDK_VERSION=6.2.0.1
 #HEXAGON SDK 6.3.0.0 is required for htp v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
 #HEXAGON_SDK_VERSION=6.3.0.0
 #HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
 
-
-#the official Qualcomm Hexagon SDK tech docs can be found at:
-#https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
-#customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
-#this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
+#the official Qualcomm Hexagon SDK tech docs can be found at https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422.
+#customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script.this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
 #actually used in this project
 HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
 
@@ -73,6 +67,7 @@ HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 #running_params=" -ngl 99 -t 4 -n 256 --no-warmup -fa 1 "
 running_params=" -ngl 99 -t 4 -n 256 --no-warmup "
 
+#for jz's ggml-hexagon backend
 #available prebuilt libs can be found at prebuilts/ggml-dsp
 GGMLDSP_RELEASE_DATE=20250531
 GGMLDSP_RELEASE_DATE=20250609
@@ -115,8 +110,6 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #v75 --- Snapdragon 8 Gen3
 #v79 --- Snapdragon 8 Elite(aka 8 Gen4)
 #v81 --- Snapdragon 8 Elite Gen5(aka 8 Gen5)
-
-
 
 #Qualcomm Snapdragon 8Elite based Android phone is strongly recommended because:
 #1. sometimes the same dsp codes can got the best performance on Snapdragon 8Elite based phone.
@@ -357,8 +350,8 @@ function build_arm64
     #fi
 
     /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
-    cmake -H. -B./out/ggmlhexagon-android-release -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
-    cmake --build ./out/ggmlhexagon-android-release
+    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ./out/ggmlhexagon-android
     show_pwd
     /bin/rm -f CMakeUserPresets.json
 }
@@ -366,8 +359,10 @@ function build_arm64
 
 function build_arm64_debug
 {
-    cmake -H. -B./out/ggmlhexagon-android-debug -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
-    cmake --build ./out/ggmlhexagon-android-debug
+    /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
+
+    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ./out/ggmlhexagon-android
     show_pwd
     /bin/rm -f CMakeUserPresets.json
 }
@@ -448,6 +443,28 @@ function build_ggml_hexagon_debug()
 }
 
 
+#for Qualcomm's ggml-hexagon backend
+function prepare_ggmlhtp()
+{
+    echo "adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
+case "$HTP_ARCH_VERSION" in
+    v75)
+        adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+    ;;
+
+    v79)
+        adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+    ;;
+
+    *)
+        show_usage
+        exit 1
+    ;;
+esac
+}
+
+
+#for jz's ggml-hexagon backend
 function prepare_ggmldsp()
 {
     adb push ./scripts/ggml-hexagon-for-binary-lib.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
@@ -531,29 +548,32 @@ function prepare_run_on_phone()
     if [ -f ./out/ggmlhexagon-android/bin/libggml-cpu.so ]; then
         adb push ./out/ggmlhexagon-android/bin/*.so ${REMOTE_PATH}/
     fi
-    adb push ./out/ggmlhexagon-android/bin/${program} ${REMOTE_PATH}/
 
-    #for troubleshooting issues in upstream llama.cpp project
-    adb shell ls -l ${REMOTE_PATH}/libggml-*.so
+    #for Qualcomm's ggml-hexagon backend
+    prepare_ggmlhtp
 
-    #for verify prebuilt binary library(after 06/2025) on Hexagon cDSP
+    #for jz's ggml-hexagon backend
     #comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
-    prepare_ggmldsp
-
+    #prepare_ggmldsp
     #un-comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
     #adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
 
+    adb push ./out/ggmlhexagon-android/bin/${program} ${REMOTE_PATH}/
+
+    adb shell ls -l ${REMOTE_PATH}/libggml-*.so
+
     adb shell chmod +x ${REMOTE_PATH}/${program}
 }
+
 
 function run_llamacli()
 {
     prepare_run_on_phone llama-cli
 
-    echo "${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-cli ${running_params} -st --show-timings -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-cli ${running_params} -st --show-timings -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -564,12 +584,12 @@ function run_llamabench()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}\""
-    echo "${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench ${running_params}  -m ${GGUF_MODEL_NAME}\""
+    echo "${REMOTE_PATH}/llama-bench ${running_params} -m ${GGUF_MODEL_NAME}"
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench ${running_params} -m ${GGUF_MODEL_NAME}"
 
 }
 
@@ -578,21 +598,21 @@ function run_threadsafety()
 {
     prepare_run_on_phone test-thread-safety
 
-    echo "${REMOTE_PATH}/test-thread-safety -np 2 -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
+    echo "${REMOTE_PATH}/test-thread-safety -np 2 -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/test-thread-safety -np 1 -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
+               && ${REMOTE_PATH}/test-thread-safety -np 1  -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
 
 }
 
 
 function run_test-ops()
 {
-    prepare_run_on_phone ggmlhexagon-testops
+    prepare_run_on_phone test-backend-ops
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test"
+               && ${REMOTE_PATH}/test-backend-ops test"
 
 }
 
@@ -620,36 +640,32 @@ function check_mulmat_algotype
 
 function run_test-op()
 {
-    prepare_run_on_phone ggmlhexagon-testops
-
-    check_mulmat_algotype
+    prepare_run_on_phone test-backend-ops
 
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/test-backend-ops test -o ${opname}"
 
     echo "\n"
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/test-backend-ops test -o ${opname}"
 
 }
 
 
 function run_perf-op()
 {
-    prepare_run_on_phone ggmlhexagon-testops
-
-    check_mulmat_algotype
+    prepare_run_on_phone test-backend-ops
 
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops perf -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/test-backend-ops perf -o ${opname}"
 
     echo "\n"
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops perf -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/test-backend-ops perf -o ${opname}"
 
 }
 
@@ -758,20 +774,14 @@ function show_usage()
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
     echo "  $0 updateqnnlib"
+    echo -e "\n"
+
     echo "  $0 run_testops"
+    echo "  $0 run_llamacli "
+    echo "  $0 run_llamabench"
+    echo "  $0 run_threadsafety"
     echo "  $0 run_testop     ADD/MUL_MAT                                                    (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT                                                    (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli                 0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_llamabench               0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_threadsafety             0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_perfop     MUL_MAT       0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify performance of MUL_MAT)"
-    echo "  $0 run_testop     MUL_MAT       0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify accuracy    of MUL_MAT)"
-    echo "  $0 run_benchmark  ADD/MUL_MAT   0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_benchmark  ADD/MUL_MAT   0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) 256/512/1024/2048/4096 256/512/1024/2048/4096"
-    echo "  $0 run_benchmark  MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_perfop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     ADD                                                            (verify accuracy    of ADD     on cDSP)"
 
     echo -e "\n\n\n"
 }
@@ -811,6 +821,15 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_testops" ]; then
         run_test-ops
         exit 0
+    elif [ "$1" == "run_llamacli" ]; then
+        run_llamacli
+        exit 0
+    elif [ "$1" == "run_llamabench" ]; then
+        run_llamabench
+        exit 0
+    elif [ "$1" == "run_threadsafety" ]; then
+        run_threadsafety
+        exit 0
     elif [ "$1" == "updateqnnlib" ]; then
         update_qnn_libs
         exit 0
@@ -834,91 +853,6 @@ elif [ $# == 2 ]; then
         hexagon_backend=3
         check_hexagon_backend
         run_perf-op
-        exit 0
-    elif [ "$1" == "run_llamacli" ]; then
-        hexagon_backend=$2
-        check_hexagon_backend
-        run_llamacli
-        exit 0
-    elif [ "$1" == "run_llamabench" ]; then
-        hexagon_backend=$2
-        check_hexagon_backend
-        run_llamabench
-        exit 0
-    elif [ "$1" == "run_threadsafety" ]; then
-        hexagon_backend=$2
-        check_hexagon_backend
-        run_threadsafety
-        exit 0
-    else
-        show_usage
-        exit 1
-    fi
-elif [ $# == 3 ]; then
-    if [ "$1" == "run_benchmark" ]; then
-        opname=$2
-        hexagon_backend=$3
-        row=4096
-        col=4096
-        mulmat_algotype=32
-        check_hexagon_backend
-        run_benchmark
-        exit 0
-    elif [ "$1" == "run_testop" ]; then
-        opname=MUL_MAT
-        mulmat_algotype=32
-        hexagon_backend=$3
-        check_hexagon_backend
-        run_test-op
-        exit 0
-    elif [ "$1" == "run_perfop" ]; then
-        opname=MUL_MAT
-        mulmat_algotype=32
-        hexagon_backend=$3
-        run_perf-op
-        exit 0
-    else
-        show_usage
-        exit 1
-    fi
-elif [ $# == 4 ]; then
-    if [ "$1" == "run_benchmark" ]; then
-        opname=MUL_MAT
-        #cDSP
-        hexagon_backend=3
-        row=4096
-        col=4096
-        mulmat_algotype=$4
-        check_mulmat_algotype
-        run_benchmark
-        exit 0
-    elif [ "$1" == "run_perfop" ]; then
-        opname=MUL_MAT
-        hexagon_backend=3
-        mulmat_algotype=$4
-        check_mulmat_algotype
-        run_perf-op
-        exit 0
-    elif [ "$1" == "run_testop" ]; then
-        opname=MUL_MAT
-        hexagon_backend=3
-        mulmat_algotype=$4
-        check_mulmat_algotype
-        run_test-op
-        exit 0
-    else
-        show_usage
-        exit 1
-    fi
-elif [ $# == 5 ]; then
-    if [ "$1" == "run_benchmark" ]; then
-        opname=$2
-        hexagon_backend=$3
-        row=$4
-        col=$5
-        mulmat_algotype=32
-        check_hexagon_backend
-        run_benchmark
         exit 0
     else
         show_usage
