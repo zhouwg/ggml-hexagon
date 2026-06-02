@@ -84,11 +84,11 @@ PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
-#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
-
 #1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+
+#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 #supported htp arch version:
 #v68 --- Snapdragon 888
