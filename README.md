@@ -607,5 +607,5 @@ $ ./scripts/build-run-android.sh build
 $ ./scripts/build-run-android.sh run_llamabench
 
 ```
-<img width="1652" height="356" alt="Screenshot from 2026-06-01 18-47-45" src="https://github.com/user-attachments/assets/0f440941-bf49-4b48-a96c-1d6bf05fb849" />
 
+<img width="1854" height="595" alt="Screenshot from 2026-06-02 19-38-20" src="https://github.com/user-attachments/assets/8838622e-885a-4fd9-921a-879673fc416d" />
