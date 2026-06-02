@@ -598,11 +598,35 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
 
-## How to build ggml-hexagon for Snapdragon-based Android device
 
-[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/jeffzhou2000/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I think it's not a straight way, the simple way in this llama.cpp-derived project:
+## Branches
+
+- master
+  https://github.com/jeffzhou2000/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
+- self-build
+  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
+- self-build-jz
+  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
+
+
+## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
 
 ```
+$ git checkout self-build-jz
+$ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_llamabench
+
+```
+
+<img width="1880" height="240" alt="Screenshot from 2026-06-02 21-22-10" src="https://github.com/user-attachments/assets/6a5a2a01-bf57-4e4b-ace8-6d2668b05558" />
+
+
+## How to build the official ggml-hexagon backend for Snapdragon-based Android device
+
+[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/jeffzhou2000/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I don't think it's a straight way, the simple way in this llama.cpp-derived project:
+
+```
+$ git checkout self-build
 $ ./scripts/build-run-android.sh build
 $ ./scripts/build-run-android.sh run_llamabench
 
