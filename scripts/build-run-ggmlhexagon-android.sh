@@ -67,27 +67,16 @@ GGMLDSP_RELEASE_DATE=20250710
 
 PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
 
-#the following LLM models has verified(works fine) with Hexagon-cDSP backend on a Snapdragon 8Elite based Android phone although inference performance is not good at the moment
-#for llama-cli, 6.9 GiB, can be downloadded via this script in function check_prebuilt_models()
-TEST_MODEL_NAME=/sdcard/gemma-3n-E4B-it-Q8_0.gguf
-#for llama-cli, 8.2 GiB
-#TEST_MODEL_NAME=/sdcard/Qwen3-8B-Q8_0.gguf
-#for llama-cli, 4.0 GiB
-#TEST_MODEL_NAME=/sdcard/Qwen3-4B-Q8_0.gguf
-#for llama-cli, 3.9 GiB
-#TEST_MODEL_NAME=/sdcard/gemma-3-4b-it-Q8_0.gguf
-#for llama-cli, 1.6 GiB, can be downloadded via this script in function check_prebuilt_models()
-#TEST_MODEL_NAME=/sdcard/MiniCPM4-0.5B-F32.gguf
-#for llama-cli, 4.5 GiB, will be downloadded automatically via this script when running this script at the first time
-#TEST_MODEL_NAME=/sdcard/gemma-3n-E2B-it-Q8_0.gguf
-#for llama-cli, 1.1 GiB, will be downloaded automatically via this script when running this script at the first time
-#this model will be used for compare performance/stability between ggml-opencl, ggml-vulkan, ggml-hexagon on Snapdragon 8Elite
-#because the weights of this model is suitable for ggml-opencl,ggml-vulkan,ggml-hexagon on Android phone
-TEST_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
+#not supported at the moment
+GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
-#for llama-bench, 4.5 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/gemma-3n-E2B-it-Q8_0.gguf
-#for llama-bench, 1.12 GiB, will be downloadded automatically via this script when running this script at the first time
+#1.2 GiB, will be downloadded automatically via this script when running this script at the first time
+#not supported at the moment
+GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
+
+#the following LLM models has verified(works fine) with Hexagon-cDSP backend(aka jz's ggml-hexagon backend) on a Snapdragon 8Elite based Android phone although inference performance is not good enough at the moment
+#1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 
 #supported htp arch version:
@@ -423,11 +412,13 @@ function check_prebuilt_models()
     fi
 
     #1.12 GiB
-    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
-    #6.9 GiB
-    #check_and_download_model gemma-3n-E4B-it-Q8_0.gguf https://huggingface.co/ggml-org/gemma-3n-E4B-it-GGUF/resolve/main/gemma-3n-E4B-it-Q8_0.gguf
-    #4.5 GiB
-    #check_and_download_model gemma-3n-E2B-it-Q8_0.gguf https://huggingface.co/ggml-org/gemma-3n-E2B-it-GGUF/resolve/main/gemma-3n-E2B-it-Q8_0.gguf
+    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
+
+    #1.2 GiB
+    check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+
+    #2.9 GiB
+    check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
 
     set -e
 }
@@ -467,10 +458,10 @@ function run_llamacli()
 {
     prepare_run_on_phone llama-cli
 
-    echo "${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${TEST_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -481,13 +472,11 @@ function run_llamabench()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}\""
-    echo "${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench ${running_params} -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME}"
-
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
 }
 
 
