@@ -606,7 +606,7 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - self-build
   https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
 - self-build-jz
-  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
+  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends.
 
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
