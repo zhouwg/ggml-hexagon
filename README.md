@@ -614,11 +614,11 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
 $ git checkout self-build-jz
 $ ./scripts/build-run-android.sh build
-$ ./scripts/build-run-android.sh run_llamabench
+$ ./scripts/build-run-android.sh run_llamabench 3
 
 ```
 
-<img width="1880" height="240" alt="Screenshot from 2026-06-02 21-22-10" src="https://github.com/user-attachments/assets/6a5a2a01-bf57-4e4b-ace8-6d2668b05558" />
+<img width="1879" height="285" alt="Screenshot from 2026-06-02 22-07-53" src="https://github.com/user-attachments/assets/a65ba531-b740-4348-af51-ab91b7cef1a2" />
 
 
 ## How to build the official ggml-hexagon backend for Snapdragon-based Android device
@@ -632,4 +632,4 @@ $ ./scripts/build-run-android.sh run_llamabench
 
 ```
 
-<img width="1854" height="595" alt="Screenshot from 2026-06-02 19-38-20" src="https://github.com/user-attachments/assets/8838622e-885a-4fd9-921a-879673fc416d" />
+<img width="1879" height="593" alt="Screenshot from 2026-06-02 22-25-57" src="https://github.com/user-attachments/assets/3c6550c1-3d3a-448a-912b-dd399d7c2808" />
