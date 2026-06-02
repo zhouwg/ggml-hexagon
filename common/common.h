@@ -277,6 +277,7 @@ struct common_params_sampling {
     std::vector<llama_token> reasoning_budget_end;             // end tag token sequence
     std::vector<llama_token> reasoning_budget_forced;          // forced sequence (message + end tag)
     std::string              reasoning_budget_message;         // message injected before end tag when budget exhausted
+    bool                     reasoning_control = false;        // create the budget sampler on demand so reasoning can be ended at runtime
 
     bool backend_sampling = false;
 
@@ -431,6 +432,7 @@ struct common_params {
     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
     int32_t n_parallel            =     1; // number of parallel sequences to decode
     int32_t n_sequences           =     1; // number of sequences to decode
+    int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
     int32_t grp_attn_n            =     1; // group-attention factor
     int32_t grp_attn_w            =   512; // group-attention width
     int32_t n_print               =    -1; // print token count every n tokens (-1 = disabled)

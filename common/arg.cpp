@@ -1041,11 +1041,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     // we define here to make sure it's included in llama-gen-docs
     if (ex == LLAMA_EXAMPLE_COMPLETION) {
         params.use_jinja = false;   // disable jinja by default
-
     } else if (ex == LLAMA_EXAMPLE_MTMD) {
         params.use_jinja = false;   // disable jinja by default
         params.sampling.temp = 0.2; // lower temp by default for better quality
-
     } else if (ex == LLAMA_EXAMPLE_SERVER) {
         params.n_parallel = -1;     // auto by default
     }
@@ -1066,7 +1064,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         sampler_type_names.pop_back(); // remove last semicolon
     }
 
-
     /**
      * filter options by example
      * rules:
@@ -1079,7 +1076,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             ctx_arg.options.push_back(std::move(arg));
         }
     };
-
 
     add_opt(common_arg(
         {"-h", "--help", "--usage"},
@@ -4081,7 +4077,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.top_k = 0;
             params.sampling.min_p = 0.01f;
             params.use_jinja = true;
-            //params.default_template_kwargs["reasoning_effort"] = "\"high\"";
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
@@ -4100,7 +4095,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.top_k = 0;
             params.sampling.min_p = 0.01f;
             params.use_jinja = true;
-            //params.default_template_kwargs["reasoning_effort"] = "\"high\"";
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
