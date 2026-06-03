@@ -602,11 +602,11 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ## Branches
 
 - master
-  https://github.com/jeffzhou2000/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
+  https://github.com/zhouwg/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
 - self-build
-  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
 - self-build-jz
-  https://github.com/jeffzhou2000/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends.
 
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
@@ -623,7 +623,7 @@ $ ./scripts/build-run-android.sh run_llamabench 3
 
 ## How to build the official ggml-hexagon backend for Snapdragon-based Android device
 
-[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/jeffzhou2000/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I don't think it's a straight way, the simple way in this llama.cpp-derived project:
+[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/zhouwg/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I don't think it's a straight way, the simple way in this llama.cpp-derived project:
 
 ```
 $ git checkout self-build
