@@ -128,9 +128,8 @@ function check_command_in_host()
 {
     set +e
     cmd=$1
-    ls /usr/bin/${cmd}
-    if [ $? -eq 0 ]; then
-        #printf "${cmd} already exist on host machine\n"
+    if command -v ${cmd} > /dev/null 2>&1; then
+        printf "${cmd} is available on host machine\n"
         echo ""
     else
         printf "${cmd} not exist on host machine, pls install command line utility ${cmd} firstly and accordingly\n"
@@ -144,16 +143,55 @@ function check_commands_in_host()
 {
     check_command_in_host wget
     check_command_in_host xzcat
+    check_command_in_host adb
+    check_command_in_host md5sum
 }
 
 
 function check_android_phone()
 {
-    adb shell ls /bin/ls
-    if [ ! $? -eq 0 ]; then
-        printf "pls check Android phone is connected properly\n"
+    local device_raw
+    device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
+
+    if [[ -z "$device_raw" ]]; then
+        adb kill-server >/dev/null 2>&1
+        sleep 0.1
+        adb start-server >/dev/null 2>&1
+        device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
+        if [[ -z "$device_raw" ]]; then
+            echo "No Android device detected."
+            echo "Please check if phone is connected properly.Exiting"
+            exit 1
+        fi
+    fi
+
+    if echo "$device_raw" | grep -q "no permissions"; then
+        echo "Device detected but has NO PERMISSIONS."
+        echo "Please check if phone is connected properly.Exiting"
         exit 1
     fi
+
+    if echo "$device_raw" | grep -q "unauthorized"; then
+        echo "Device detected but UNAUTHORIZED."
+        echo "Please check if phone is connected properly.Exiting"
+        exit 1
+    fi
+
+    if echo "$device_raw" | grep -q "offline"; then
+        echo "Device is OFFLINE."
+        echo "Please check if phone is connected properly.Exiting"
+        exit 1
+    fi
+
+    if echo "$device_raw" | awk '{print $2}' | grep -qx "device"; then
+        local sn=$(echo "$device_raw" | awk '{print $1}')
+        echo "Android device connected successfully: $sn"
+        return 0
+    fi
+
+    echo "Unknown device error."
+    echo "Please check if phone is connected properly.Exiting"
+    exit 1
 }
 
 
@@ -522,6 +560,49 @@ function check_prebuilt_models()
 }
 
 
+# ==============================================================================
+# Return codes:
+#    0 = NO changes
+#    1 = FILE CHANGED
+# ==============================================================================
+function is_so_file_changed() {
+    set +e
+    local so_file="$1"
+    local md5_file="${so_file}.md5"
+
+    # check if .so exists
+    if [ ! -f "$so_file" ]; then
+        echo "ERROR: File not found: $so_file"
+        return 1
+    fi
+
+    # get current MD5
+    local current_md5
+    current_md5=$(md5sum "$so_file" | awk '{print $1}')
+
+    # FIRST RUN: no MD5 file → save it, return CHANGED
+    if [ ! -f "$md5_file" ]; then
+        echo "$current_md5" > "$md5_file"
+        echo "Initialized MD5 for $so_file"
+        return 1
+    fi
+
+    # read previous MD5
+    local last_md5
+    last_md5=$(cat "$md5_file")
+
+    # compare
+    if [ "$current_md5" = "$last_md5" ]; then
+        # NO CHANGE
+        return 0
+    else
+        # CHANGED → update MD5
+        echo "$current_md5" > "$md5_file"
+        return 1
+    fi
+}
+
+
 function prepare_run_on_phone()
 {
     if [ $# != 1 ]; then
@@ -534,7 +615,13 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    if [ -f ./out/ggmlhexagon-android/bin/libggml-cpu.so ]; then
+    is_so_file_changed ./out/ggmlhexagon-android/bin/libggml-cpu.so
+    if [ $? -eq 0 ]; then
+        printf "./out/ggmlhexagon-android/bin/libggml-cpu.so not changed\n\n"
+        #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
+    else
+        printf "./out/ggmlhexagon-android/bin/libggml-cpu.so has changed or first check\n\n"
+        #upload ggml runtime libs to Android phone
         adb push ./out/ggmlhexagon-android/bin/*.so ${REMOTE_PATH}/
     fi
 
@@ -779,7 +866,7 @@ function show_usage()
 show_pwd
 
 check_commands_in_host
-#check_android_phone
+check_android_phone
 check_and_download_ndk
 check_and_download_opencl_sdk
 check_and_download_qnn_sdk
