@@ -259,9 +259,9 @@ struct server_slot {
         return task->need_embd() || (spec && common_speculative_need_embd(spec));
     }
 
-    bool need_embd_pre_norm() const {
+    bool need_embd_nextn() const {
         GGML_ASSERT(task);
-        return spec && common_speculative_need_embd_pre_norm(spec);
+        return spec && common_speculative_need_embd_nextn(spec);
     }
 
     // if the context does not have a memory module then all embeddings have to be computed within a single ubatch
@@ -2512,7 +2512,7 @@ private:
                                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
 
                         if (use_ckpt_dft) {
-                            slot.spec_ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                            slot.spec_ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                         }
 
                         slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
@@ -2551,7 +2551,7 @@ private:
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
-                    ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                    ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
 
                 common_context_seq_rm(ctx_dft.get(), slot.id, ckpt.pos_max + 1, -1);
@@ -2568,7 +2568,7 @@ private:
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
 
-                    ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                    ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
                     //const int64_t t_total = ggml_time_us() - t_start;
                     //printf("checkpoint total: %f ms\n", t_total / 1000.0);
@@ -2580,7 +2580,7 @@ private:
                 }
 
                 if (use_ckpt_dft) {
-                    ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                    ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
                 }
             }
         }
@@ -2782,8 +2782,11 @@ private:
 
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
+                            // ref: https://github.com/ggml-org/llama.cpp/pull/24110
+                            const bool has_new_tokens = (n_past < slot.task->n_tokens());
+
                             // the largest pos_min required for a checkpoint to be useful
-                            const auto pos_min_thold = std::max(0, pos_next - n_swa - 1);
+                            const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
                             if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
@@ -3013,7 +3016,7 @@ private:
 
                         // embedding requires all tokens in the batch to be output;
                         // MTP also wants logits at every prompt position so the
-                        // streaming hook can mirror t_h_pre_norm into ctx_dft.
+                        // streaming hook can mirror t_h_nextn into ctx_dft.
                         common_batch_add(batch,
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
@@ -3444,13 +3447,13 @@ private:
                             SLT_DBG(slot, "restoring speculative checkpoint (pos_min = %d, pos_max = %d, size = %zu)\n", ckpt.pos_min, ckpt.pos_max, ckpt.size());
 
                             {
-                                ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                                ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
                                 common_context_seq_rm(slot.ctx_tgt, slot.id, ckpt.pos_max + 1, -1);
                             }
 
                             if (slot.ctx_dft) {
-                                ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
+                                ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
                                 common_context_seq_rm(slot.ctx_dft, slot.id, ckpt.pos_max + 1, -1);
                             }
@@ -4330,6 +4333,10 @@ void server_routes::init_routes() {
             TASK_RESPONSE_TYPE_OAI_CHAT);
     };
 
+    this->post_chat_completions_tok = [this](const server_http_req & req) {
+        return handle_count_tokens(ctx_server.vocab, ctx_server.mctx, req, TASK_RESPONSE_TYPE_OAI_CHAT);
+    };
+
     this->post_control = [this](const server_http_req & req) {
         auto res = create_response();
         const json body = json::parse(req.body);
@@ -4385,6 +4392,10 @@ void server_routes::init_routes() {
             TASK_RESPONSE_TYPE_OAI_RESP);
     };
 
+    this->post_responses_tok_oai = [this](const server_http_req & req) {
+        return handle_count_tokens(ctx_server.vocab, ctx_server.mctx, req, TASK_RESPONSE_TYPE_OAI_RESP);
+    };
+
     this->post_transcriptions_oai = [this](const server_http_req & req) {
         auto res = create_response();
 
@@ -4432,20 +4443,7 @@ void server_routes::init_routes() {
     };
 
     this->post_anthropic_count_tokens = [this](const server_http_req & req) {
-        auto res = create_response();
-        std::vector<raw_buffer> files;
-        json body = server_chat_convert_anthropic_to_oai(json::parse(req.body));
-        SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
-        SRV_DBG("converted request: %s\n", body.dump().c_str());
-        json body_parsed = oaicompat_chat_params_parse(
-            body,
-            meta->chat_params,
-            files);
-
-        json prompt = body_parsed.at("prompt");
-        llama_tokens tokens = tokenize_mixed(ctx_server.vocab, prompt, true, true);
-        res->ok({{"input_tokens", static_cast<int>(tokens.size())}});
-        return res;
+        return handle_count_tokens(ctx_server.vocab, ctx_server.mctx, req, TASK_RESPONSE_TYPE_ANTHROPIC);
     };
 
     // same with handle_chat_completions, but without inference part
@@ -4923,5 +4921,56 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
         ? format_embeddings_response_oaicompat(body, meta->model_name, responses, use_base64)
         : json(responses);
     res->ok(root);
+    return res;
+}
+
+std::unique_ptr<server_res_generator> server_routes::handle_count_tokens(const llama_vocab * vocab, mtmd_context * mctx, const server_http_req & req, task_response_type res_type) {
+    auto res = create_response();
+    std::vector<raw_buffer> files;
+    json body = json::parse(req.body);
+    bool is_oai = false;
+
+    switch (res_type) {
+        case TASK_RESPONSE_TYPE_OAI_CHAT:
+            {
+                is_oai = true;
+            } break;
+        case TASK_RESPONSE_TYPE_OAI_RESP:
+            {
+                is_oai = true;
+                body = server_chat_convert_responses_to_chatcmpl(body);
+            } break;
+        case TASK_RESPONSE_TYPE_ANTHROPIC:
+            {
+                body = server_chat_convert_anthropic_to_oai(body);
+            } break;
+        default:
+            res->error(format_error_response("invalid res_type", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+    }
+
+    json body_parsed = oaicompat_chat_params_parse(
+            body,
+            meta->chat_params,
+            files);
+    json prompt = body_parsed.at("prompt");
+    // SRV_DBG("prompt = %s\n", prompt.dump().c_str());
+
+    // TODO @ngxson : refactor this code block, move this to server-common and reuse it in other places
+    size_t n_tokens;
+    if (mctx != nullptr) {
+        if (!prompt.is_string()) {
+            throw std::runtime_error("for mtmd, input prompt must be a string.");
+        }
+        n_tokens = process_mtmd_prompt(mctx, prompt.get<std::string>(), files, true).size();
+    } else {
+        n_tokens = tokenize_mixed(vocab, prompt, true, true).size();
+    }
+
+    json response = {{"input_tokens", static_cast<int>(n_tokens)}};
+    if (is_oai) {
+        response["object"] = "response.input_tokens";
+    }
+    res->ok(response);
     return res;
 }
