@@ -9,6 +9,10 @@
 #include "server-context.h"
 #include "server-task.h"
 
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
+
 #include <array>
 #include <atomic>
 #include <algorithm>
@@ -355,6 +359,18 @@ int llama_cli(int argc, char ** argv) {
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {
         return 1;
     }
+
+#ifdef GGML_USE_HEXAGON
+    {
+        int backend = params.main_gpu;
+        if (backend >= HEXAGON_BACKEND_CDSP) {
+            ggml_backend_hexagon_set_cfg(backend, HWACCEL_CDSP);
+        }
+        if (backend < HEXAGON_BACKEND_CDSP) {
+            ggml_backend_hexagon_set_cfg(backend, HWACCEL_QNN);
+        }
+    }
+#endif
 
     // TODO: maybe support it later?
     if (params.conversation_mode == COMMON_CONVERSATION_MODE_DISABLED) {

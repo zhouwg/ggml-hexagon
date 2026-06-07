@@ -12,6 +12,10 @@
 #include "llama-ext.h"
 #include "llama.h"
 
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
+
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -245,7 +249,14 @@ llama_context::llama_context(
     if (!hparams.vocab_only) {
         // GPU backends
         for (const auto & dev : model.devices) {
+#ifdef GGML_USE_HEXAGON
+            if (model.main_gpu() == HEXAGON_BACKEND_GGML) {
+                break;
+            }
+            ggml_backend_t backend = ggml_backend_dev_init(dev.dev, reinterpret_cast<const char *>(model.main_gpu()));
+#else
             ggml_backend_t backend = ggml_backend_dev_init(dev.dev, nullptr);
+#endif
             if (backend == nullptr) {
                 throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev.dev)));
             }
@@ -254,9 +265,18 @@ llama_context::llama_context(
 
         // add ACCEL backends (such as BLAS)
         for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+#ifdef GGML_USE_HEXAGON
+            if (model.main_gpu() == HEXAGON_BACKEND_GGML) {
+                break;
+            }
+#endif
             ggml_backend_dev_t dev = ggml_backend_dev_get(i);
             if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_ACCEL) {
+#ifdef GGML_USE_HEXAGON
+                ggml_backend_t backend = ggml_backend_dev_init(dev, reinterpret_cast<const char *>(model.main_gpu()));
+#else
                 ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+#endif
                 if (backend == nullptr) {
                     throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
                 }

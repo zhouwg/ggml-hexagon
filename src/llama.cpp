@@ -15,6 +15,10 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
+
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
@@ -195,6 +199,11 @@ static bool llama_prepare_model_devices(const llama_model_params & params, llama
                         break;
 
                     case GGML_BACKEND_DEVICE_TYPE_GPU: {
+#ifdef GGML_USE_HEXAGON
+                        if (params.main_gpu == HEXAGON_BACKEND_GGML) {
+                            break;
+                        }
+#endif
                         ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
                         if (ggml_backend_reg_name(reg) == std::string("RPC")) {
                             rpc_servers.push_back({false, dev});

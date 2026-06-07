@@ -1655,6 +1655,10 @@ llama_split_mode llama_model::split_mode() const {
     return params.split_mode;
 }
 
+int32_t llama_model::main_gpu() const {
+    return params.main_gpu;
+}
+
 std::map<ggml_backend_buffer_type_t, size_t> llama_model::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> ret;
     for (const auto & [ctx, bufs] : pimpl->ctxs_bufs) {
