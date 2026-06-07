@@ -6273,18 +6273,24 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         GGMLHEXAGON_LOG_DEBUG("size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
                               size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
                               ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
-        if (size + ctx->rpc_mempool_usage >= ctx->rpc_mempool_len) {
-            GGMLHEXAGON_LOG_WARN("device memory allocation of size %ld failed", size);
+
+        size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
+        if (aligned_offset + size_aligned <= ctx->rpc_mempool_len) {
+            buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
+            buffer_ctx->buffer_size = size_aligned;
+            ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
+            GGMLHEXAGON_LOG_DEBUG("allocated %ld MiB from ion pool at offset %ld",
+                                 size_aligned / SIZE_IN_MB, aligned_offset);
+        } else {
+            GGMLHEXAGON_LOG_WARN("ion pool exhausted: needed %ld MiB, remaining %ld MiB",
+                                 size_aligned / SIZE_IN_MB,
+                                 (ctx->rpc_mempool_len - ctx->rpc_mempool_usage) / SIZE_IN_MB);
             return nullptr;
         }
-        buffer_ctx->buffer = (static_cast<char*>(ctx->rpc_mempool)) + ctx->rpc_mempool_usage;
-        GGMLHEXAGON_LOG_DEBUG("buffer_ctx->buffer %p", buffer_ctx->buffer);
-        GGML_ASSERT(nullptr != buffer_ctx->buffer);
-        ctx->rpc_mempool_usage += size_aligned;
     } else {
         buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+        buffer_ctx->buffer_size = size_aligned;
     }
-    buffer_ctx->buffer_size = size_aligned;
     if (nullptr == buffer_ctx->buffer) {
         GGMLHEXAGON_LOG_WARN("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
         return nullptr;

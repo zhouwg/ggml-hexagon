@@ -212,7 +212,7 @@ function(hf_download version out_var out_resolved)
     list(APPEND candidates "latest")
 
     foreach(resolved ${candidates})
-        set(base "https://huggingface.co/buckets/ggml-org/${HF_BUCKET}/resolve/${resolved}")
+        set(base "https://hf-mirror.com/buckets/ggml-org/${HF_BUCKET}/resolve/${resolved}")
 
         message(STATUS "UI: downloading from ${resolved}: ${base}")
 
