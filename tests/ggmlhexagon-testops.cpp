@@ -580,7 +580,10 @@ struct test_case {
             GGML_UNUSED(index);
         };
 
-        const bool cmp_ok = ggml_backend_compare_graph_backend(backend1, backend2, gf, callback, &ud, run_whole_graph() ? out : nullptr);
+        ggml_tensor * test_nodes[] = { out };
+        const bool cmp_ok = ggml_backend_compare_graph_backend(backend1, backend2, gf, callback, &ud,
+                                                               run_whole_graph() ? test_nodes : nullptr,
+                                                               run_whole_graph() ? 1 : 0);
 
         if (!cmp_ok) {
             printf("compare failed ");
@@ -1816,7 +1819,7 @@ struct test_add1 : public test_case {
         // ggml_set_param(b); // TODO: implement
         ggml_set_name(b, "b");
 
-        ggml_tensor * out = ggml_add1(ctx, a, b);
+        ggml_tensor * out = ggml_add(ctx, a, b);
         ggml_set_name(out, "out");
 
         return out;
@@ -3638,7 +3641,7 @@ struct test_flash_attn_ext : public test_case {
 
         ggml_tensor * m = nullptr;
         if (mask) {
-            m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, GGML_PAD(nb, GGML_KQ_MASK_PAD), 1, 1);
+            m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, 1);
             ggml_set_name(m, "m");
         }
 

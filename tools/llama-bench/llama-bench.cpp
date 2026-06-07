@@ -25,6 +25,9 @@
 #include "download.h"
 #include "fit.h"
 #include "ggml.h"
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
 #include "llama.h"
 
 #ifdef _WIN32
@@ -2162,6 +2165,21 @@ static std::unique_ptr<printer> create_printer(output_formats format) {
 int llama_bench(int argc, char ** argv);
 
 int llama_bench(int argc, char ** argv) {
+#ifdef GGML_USE_HEXAGON
+    int backend = HEXAGON_BACKEND_CDSP;
+    for (int i = 1; i < argc; i++) {
+        if (0 == strcmp(argv[i], "-mg")) {
+            backend = atoi(argv[i+1]);
+        }
+    }
+    printf("backend %d\n", backend);
+    if (backend >= HEXAGON_BACKEND_CDSP) {
+        ggml_backend_hexagon_set_cfg(backend, HWACCEL_CDSP);
+    }
+    if (backend < HEXAGON_BACKEND_CDSP) {
+        ggml_backend_hexagon_set_cfg(backend, HWACCEL_QNN);
+    }
+#endif
     std::setlocale(LC_NUMERIC, "C");
     // try to set locale for unicode characters in markdown
     std::setlocale(LC_CTYPE, ".UTF-8");

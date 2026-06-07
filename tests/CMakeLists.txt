@@ -308,3 +308,7 @@ if (TARGET gguf-model-data)
     target_link_libraries(export-graph-ops PRIVATE gguf-model-data)
     target_compile_definitions(export-graph-ops PRIVATE LLAMA_HF_FETCH)
 endif()
+
+#dedicated for ggml-hexagon
+llama_build_and_test(ggmlhexagon-benchmark.cpp)
+llama_build_and_test(ggmlhexagon-testops.cpp)

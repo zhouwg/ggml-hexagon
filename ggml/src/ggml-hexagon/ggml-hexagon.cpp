@@ -84,6 +84,7 @@
 #include "remote.h"
 #include "os_defines.h"
 #include "AEEStdErr.h"
+#include "htp-drv.h"
 #include "HAP_power.h"
 #include "HAP_farf.h"
 #endif
@@ -6851,6 +6852,14 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
         static std::mutex mutex;
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
+            {
+                int ret = htpdrv_init();
+                if (AEE_SUCCESS != ret) {
+                    GGMLHEXAGON_LOG_ERROR("htpdrv_init failed with error %d", ret);
+                    return nullptr;
+                }
+            }
+
             ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
 
             for (int i = 0; i < ggml_backend_hexagon_get_device_count(); i++) {
