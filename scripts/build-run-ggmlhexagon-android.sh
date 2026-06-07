@@ -17,6 +17,10 @@ VERBOSE=ON
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
 
+#path of built artifacts
+LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
+LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
+
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
 ANDROID_PLATFORM=android-34
@@ -145,6 +149,7 @@ function check_commands_in_host()
     check_command_in_host xzcat
     check_command_in_host adb
     check_command_in_host md5sum
+    check_command_in_host ninja
 }
 
 
@@ -375,8 +380,8 @@ function build_arm64
     #fi
 
     /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
-    cmake --build ./out/ggmlhexagon-android
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ${LOCAL_BUILD_DIR}
     show_pwd
     /bin/rm -f CMakeUserPresets.json
 }
@@ -386,8 +391,8 @@ function build_arm64_debug
 {
     /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
 
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
-    cmake --build ./out/ggmlhexagon-android
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ${LOCAL_BUILD_DIR}
     show_pwd
     /bin/rm -f CMakeUserPresets.json
 }
@@ -395,9 +400,9 @@ function build_arm64_debug
 
 function remove_temp_dir()
 {
-    if [ -d out/ggmlhexagon-android ]; then
-        echo "remove out/ggmlhexagon-android directory in `pwd`"
-        rm -rf out/ggmlhexagon-android
+    if [ -d ${LOCAL_BUILD_DIR} ]; then
+        echo "remove ${LOCAL_BUILD_DIR} directory"
+        rm -rf ${LOCAL_BUILD_DIR}
     fi
 }
 
@@ -471,14 +476,14 @@ function build_ggml_hexagon_debug()
 #for Qualcomm's ggml-hexagon backend
 function prepare_ggmlhtp()
 {
-    echo "adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
+    echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
 case "$HTP_ARCH_VERSION" in
     v75)
-        adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
     ;;
 
     v79)
-        adb push ${PROJECT_ROOT_PATH}/out/ggmlhexagon-android/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
     ;;
 
     *)
@@ -615,14 +620,14 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    is_so_file_changed ./out/ggmlhexagon-android/bin/libggml-cpu.so
+    is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
     if [ $? -eq 0 ]; then
-        printf "./out/ggmlhexagon-android/bin/libggml-cpu.so not changed\n\n"
+        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n\n"
         #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
     else
-        printf "./out/ggmlhexagon-android/bin/libggml-cpu.so has changed or first check\n\n"
+        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
         #upload ggml runtime libs to Android phone
-        adb push ./out/ggmlhexagon-android/bin/*.so ${REMOTE_PATH}/
+        adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
     fi
 
     #for Qualcomm's ggml-hexagon backend
@@ -634,7 +639,7 @@ function prepare_run_on_phone()
     #un-comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
     #adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
 
-    adb push ./out/ggmlhexagon-android/bin/${program} ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
 
     adb shell ls -l ${REMOTE_PATH}/libggml-*.so
 

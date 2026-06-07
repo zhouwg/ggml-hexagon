@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "watcher": {
+    "ignore": [
+      "/Makefile",
+      "/CMakeLists.txt",
+      "**/cmake/**",
+      "**/build/**"
+    ]
+  },
+  "command": {
+    "build": {
+      "description": "Build according to docs/how-to-build.md, ignore all top-level build files",
+      "template": "Strictly follow the build steps in docs/how-to-build.md. DO NOT use make, cmake, or any top-level build tools. Only run the official script: ./scripts/build-run-android.sh build"
+    }
+  }
+}
