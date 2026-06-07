@@ -26,11 +26,14 @@ OBJS = $(patsubst %.c, %.o, $(SRCS))
 OBJS += dot.o
 OBJS += worker_pool.o
 
+BIN_DIR ?= ../../../../out/ggmlhexagon-android/bin
+
 ALL:$(OBJS)
 		${HEXAGON_CC} ${LDFLAGS} -o ${TARGET} -Wl,--start-group ${OBJS} -Wl,--end-group
 		@ls -l ${TARGET}
-		/bin/cp -fv ${TARGET} ../../../../out/ggmlhexagon-android/bin/
-		/bin/cp -fv ${TARGET} ../../../../out/ggmlhexagon-android/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
+		mkdir -p ${BIN_DIR}
+		/bin/cp -fv ${TARGET} ${BIN_DIR}/
+		/bin/cp -fv ${TARGET} ${BIN_DIR}/libggmldsp-skel${HTP_ARCH_VERSION}.so
 		/bin/rm -f *.so
 
 %.o:%.c

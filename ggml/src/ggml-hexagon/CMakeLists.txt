@@ -111,7 +111,7 @@ function(ggml_hexagon_build_kernel KNAME)
         COMMAND echo "current working path:`pwd`\n"
         COMMAND echo "${CMAKE_CURRENT_LIST_DIR}/kernels"
         COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ clean
-        COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HTP_ARCH_VERSION=${HTP_ARCH_VERSION} DEBUG_FLAG=${DEBUG_FLAG}
+        COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HTP_ARCH_VERSION=${HTP_ARCH_VERSION} DEBUG_FLAG=${DEBUG_FLAG} BIN_DIR=${CMAKE_BINARY_DIR}/bin
         COMMAND echo "current working path:`pwd`\n"
         COMMAND ls -l  ../../../bin/libggmldsp-skel.so
         COMMENT "build hexagon-kernel"
@@ -124,7 +124,7 @@ function(ggml_hexagon_setup_cfg KNAME)
         TARGET ${PROJECT_NAME}
         POST_BUILD
         COMMAND echo "current working path:`pwd`\n"
-        COMMAND /bin/cp -fv ../../../../../scripts/${KNAME}  ../../../bin/
+        COMMAND /bin/cp -fv ${CMAKE_SOURCE_DIR}/scripts/${KNAME}  ${CMAKE_BINARY_DIR}/bin/
         COMMENT "setup runtime configuration file"
     )
 endfunction()

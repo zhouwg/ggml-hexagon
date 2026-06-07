@@ -12,7 +12,7 @@
 #
 set -e
 
-######## part-1: don't modify contents in this part ########
+######## part-1: public macros & vars  ########
 
 PWD=`pwd`
 PROJECT_HOME_PATH=`pwd`
@@ -22,6 +22,10 @@ HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
 
+#path of built artifacts
+LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
+LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
+
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
 ANDROID_PLATFORM=android-34
@@ -29,6 +33,16 @@ ANDROID_NDK_VERSION=r28
 ANDROID_NDK_NAME=android-ndk-${ANDROID_NDK_VERSION}
 ANDROID_NDK_FULLNAME=${ANDROID_NDK_NAME}-linux.zip
 ANDROID_NDK=${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_NAME}
+
+# --- Define NDK paths based on the absolute SDK path ---
+NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
+NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+
+#OpenCL Headers can be found at:
+#https://https://github.com/KhronosGroup/OpenCL-Headers
+OPENCL_SDK_URL=https://github.com/KhronosGroup/OpenCL-Headers
+OPENCL_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
 
 #Qualcomm QNN SDK can be found at:
 #https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
@@ -44,7 +58,9 @@ QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
 #fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account):
 #https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
-HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/6.2.0.1
+#HEXAGON_SDK_VERSION=6.2.0.1
+#HEXAGON_SDK_VERSION=6.3.0.0
+#HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
 #the official Qualcomm Hexagon SDK tech docs can be found at:
 #https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
 #customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
@@ -116,9 +132,8 @@ function check_command_in_host()
 {
     set +e
     cmd=$1
-    ls /usr/bin/${cmd}
-    if [ $? -eq 0 ]; then
-        #printf "${cmd} already exist on host machine\n"
+    if command -v ${cmd} > /dev/null 2>&1; then
+        printf "${cmd} is available on host machine\n"
         echo ""
     else
         printf "${cmd} not exist on host machine, pls install command line utility ${cmd} firstly and accordingly\n"
@@ -132,16 +147,56 @@ function check_commands_in_host()
 {
     check_command_in_host wget
     check_command_in_host xzcat
+    check_command_in_host adb
+    check_command_in_host md5sum
+    check_command_in_host ninja
 }
 
 
 function check_android_phone()
 {
-    adb shell ls /bin/ls
-    if [ ! $? -eq 0 ]; then
-        printf "pls check Android phone is connected properly\n"
+    local device_raw
+    device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
+
+    if [[ -z "$device_raw" ]]; then
+        adb kill-server >/dev/null 2>&1
+        sleep 0.1
+        adb start-server >/dev/null 2>&1
+        device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
+        if [[ -z "$device_raw" ]]; then
+            echo "No Android device detected."
+            echo "Please check if phone is connected properly.Exiting"
+            exit 1
+        fi
+    fi
+
+    if echo "$device_raw" | grep -q "no permissions"; then
+        echo "Device detected but has NO PERMISSIONS."
+        echo "Please check if phone is connected properly.Exiting"
         exit 1
     fi
+
+    if echo "$device_raw" | grep -q "unauthorized"; then
+        echo "Device detected but UNAUTHORIZED."
+        echo "Please check if phone is connected properly.Exiting"
+        exit 1
+    fi
+
+    if echo "$device_raw" | grep -q "offline"; then
+        echo "Device is OFFLINE."
+        echo "Please check if phone is connected properly.Exiting"
+        exit 1
+    fi
+
+    if echo "$device_raw" | awk '{print $2}' | grep -qx "device"; then
+        local sn=$(echo "$device_raw" | awk '{print $1}')
+        echo "Android device connected successfully: $sn"
+        return 0
+    fi
+
+    echo "Unknown device error."
+    echo "Please check if phone is connected properly.Exiting"
+    exit 1
 }
 
 
@@ -220,6 +275,69 @@ function check_and_download_qnn_sdk()
 }
 
 
+function check_and_download_opencl_sdk()
+{
+    is_opencl_sdk_exist=1
+
+    if [ ! -d ${OPENCL_SDK_PATH} ]; then
+        echo -e "OPENCL_SDK_PATH ${OPENCL_SDK_PATH} not exist, download it from ${OPENCL_SDK_URL}...\n"
+        is_opencl_sdk_exist=0
+    fi
+    if [ ! -f ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so ]; then
+        echo -e "${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so not exist...\n"
+        is_opencl_sdk_exist=0
+    fi
+
+    if [ ${is_opencl_sdk_exist} -eq 0 ]; then
+        mkdir -p ${OPENCL_SDK_PATH}
+        cd ${OPENCL_SDK_PATH}
+
+        if [ ! -d OpenCL-Headers ]; then
+            echo "Cloning OpenCL-Headers..."
+            git clone https://github.com/KhronosGroup/OpenCL-Headers
+            if [ $? -ne 0 ]; then
+                printf "failed to download OpenCL-Headers to %s \n" "${OPENCL_SDK_PATH}"
+                exit 1
+            fi
+        fi
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-Headers
+        printf "Copying OpenCL Headers to Android NDK sysroot include: ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}"
+        mkdir -p ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+        /bin/cp -r -fv CL ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+        if [ ! -d OpenCL-ICD-Loader ]; then
+            echo "Cloning OpenCL-ICD-Loader..."
+            git clone https://github.com/KhronosGroup/OpenCL-ICD-Loader
+            if [ $? -ne 0 ]; then
+                printf "failed to download OpenCL-ICD-Loader to %s \n" "${OPENCL_SDK_PATH}"
+                exit 1
+            fi
+        fi
+        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-ICD-Loader
+        mkdir -p build
+        cd build
+        cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DANDROID_STL=c++_shared -DOPENCL_ICD_LOADER_HEADERS_DIR=${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
+        echo "Building OpenCL-ICD-Loader with ninjia..."
+        ninja
+        if [ $? -ne 0 ]; then
+            printf "failed to build OpenCL-ICD-Loader\n"
+            exit 1
+        fi
+        mkdir -p ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}
+        /bin/cp -fv libOpenCL.so ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}
+
+        echo "OpenCL components setup complete"
+        echo "OpenCL Headers are in: ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}/CL"
+        echo "libOpenCL.so is in:    ${NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH}/libOpenCL.so"
+
+        cd ${PROJECT_ROOT_PATH}
+    else
+        printf "OpenCL SDK already exist:    ${OPENCL_SDK_PATH} \n\n"
+    fi
+}
+
+
 function check_and_download_ndk()
 {
     is_android_ndk_exist=1
@@ -254,6 +372,8 @@ function check_and_download_ndk()
 }
 
 
+
+
 function build_arm64
 {
     #not acutually used at the moment, just for AI experts add other AI operators in the future
@@ -261,8 +381,8 @@ function build_arm64
     #    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
     #fi
 
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
-    cd out/ggmlhexagon-android
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
+    cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     show_pwd
 
@@ -272,8 +392,8 @@ function build_arm64
 
 function build_arm64_debug
 {
-    cmake -H. -B./out/ggmlhexagon-android -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
-    cd out/ggmlhexagon-android
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
+    cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     show_pwd
 
@@ -283,9 +403,9 @@ function build_arm64_debug
 
 function remove_temp_dir()
 {
-    if [ -d out/ggmlhexagon-android ]; then
-        echo "remove out/ggmlhexagon-android directory in `pwd`"
-        rm -rf out/ggmlhexagon-android
+    if [ -d ${LOCAL_BUILD_DIR} ]; then
+        echo "remove ${LOCAL_BUILD_DIR} directory"
+        rm -rf ${LOCAL_BUILD_DIR}
     fi
 }
 
@@ -334,6 +454,7 @@ function build_ggml_hexagon()
 {
     show_pwd
     check_and_download_ndk
+    check_and_download_opencl_sdk
     check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
@@ -346,6 +467,7 @@ function build_ggml_hexagon_debug()
 {
     show_pwd
     check_and_download_ndk
+    check_and_download_opencl_sdk
     check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
@@ -424,6 +546,49 @@ function check_prebuilt_models()
 }
 
 
+# ==============================================================================
+# Return codes:
+#    0 = NO changes
+#    1 = FILE CHANGED
+# ==============================================================================
+function is_so_file_changed() {
+    set +e
+    local so_file="$1"
+    local md5_file="${so_file}.md5"
+
+    # check if .so exists
+    if [ ! -f "$so_file" ]; then
+        echo "ERROR: File not found: $so_file"
+        return 1
+    fi
+
+    # get current MD5
+    local current_md5
+    current_md5=$(md5sum "$so_file" | awk '{print $1}')
+
+    # FIRST RUN: no MD5 file → save it, return CHANGED
+    if [ ! -f "$md5_file" ]; then
+        echo "$current_md5" > "$md5_file"
+        echo "Initialized MD5 for $so_file"
+        return 1
+    fi
+
+    # read previous MD5
+    local last_md5
+    last_md5=$(cat "$md5_file")
+
+    # compare
+    if [ "$current_md5" = "$last_md5" ]; then
+        # NO CHANGE
+        return 0
+    else
+        # CHANGED → update MD5
+        echo "$current_md5" > "$md5_file"
+        return 1
+    fi
+}
+
+
 function prepare_run_on_phone()
 {
     if [ $# != 1 ]; then
@@ -436,13 +601,16 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    if [ -f ./out/ggmlhexagon-android/bin/libggml-cpu.so ]; then
-        adb push ./out/ggmlhexagon-android/bin/*.so ${REMOTE_PATH}/
+    is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+    if [ $? -eq 0 ]; then
+        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n\n"
+        #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
+    else
+        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
+        #upload ggml runtime libs to Android phone
+        adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
     fi
-    adb push ./out/ggmlhexagon-android/bin/${program} ${REMOTE_PATH}/
 
-    #for troubleshooting issues in upstream llama.cpp project
-    adb shell ls -l ${REMOTE_PATH}/libggml-*.so
 
     #for verify prebuilt binary library(after 06/2025) on Hexagon cDSP
     #comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
@@ -451,8 +619,13 @@ function prepare_run_on_phone()
     #un-comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
     #adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
 
+    adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
+
+    adb shell ls -l ${REMOTE_PATH}/libggml-*.so
+
     adb shell chmod +x ${REMOTE_PATH}/${program}
 }
+
 
 function run_llamacli()
 {
@@ -688,8 +861,9 @@ function show_usage()
 show_pwd
 
 check_commands_in_host
-#check_android_phone
+check_android_phone
 check_and_download_ndk
+check_and_download_opencl_sdk
 check_and_download_qnn_sdk
 check_and_download_hexagon_sdk
 check_prebuilt_models
