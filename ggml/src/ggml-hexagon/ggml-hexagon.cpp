@@ -587,6 +587,7 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {true,  GGML_OP_NONE, 0, nullptr},
         {false, GGML_OP_DUP, 0, nullptr},
         {true,  GGML_OP_ADD, 2, QNN_OP_ELEMENT_WISE_ADD},
+        {false, GGML_OP_ADD_ID, 0, nullptr},
         {false, GGML_OP_ADD1, 0, nullptr},
         {false, GGML_OP_ACC, 0, nullptr},
         {true,  GGML_OP_SUB, 2, QNN_OP_ELEMENT_WISE_SUBTRACT},
@@ -599,6 +600,7 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {false, GGML_OP_COS, 0, nullptr},
         {false, GGML_OP_SUM, 0, nullptr},
         {false, GGML_OP_SUM_ROWS, 0, nullptr},
+        {false, GGML_OP_CUMSUM, 0, nullptr},
         {false, GGML_OP_MEAN, 0, nullptr},
         {false, GGML_OP_ARGMAX, 0, nullptr},
         {false, GGML_OP_COUNT_EQUAL, 0, nullptr},
@@ -636,7 +638,9 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr},
         {false, GGML_OP_IM2COL, 0, nullptr},
         {false, GGML_OP_IM2COL_BACK, 0, nullptr},
+        {false, GGML_OP_IM2COL_3D, 0, nullptr},
         {false, GGML_OP_CONV_2D, 0, nullptr},
+        {false, GGML_OP_CONV_3D, 0, nullptr},
         {false, GGML_OP_CONV_2D_DW, 0, nullptr},
         {false, GGML_OP_CONV_TRANSPOSE_2D, 0, nullptr},
         {false, GGML_OP_POOL_1D, 0, nullptr},
@@ -649,7 +653,10 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {false, GGML_OP_ARANGE, 0, nullptr},
         {false, GGML_OP_TIMESTEP_EMBEDDING, 0, nullptr},
         {false, GGML_OP_ARGSORT, 0, nullptr},
+        {false, GGML_OP_TOP_K, 0, nullptr},
         {false, GGML_OP_LEAKY_RELU, 0, nullptr},
+        {false, GGML_OP_TRI, 0, nullptr},
+        {false, GGML_OP_FILL, 0, nullptr},
         {false, GGML_OP_FLASH_ATTN_EXT, 0, nullptr},
         {false, GGML_OP_FLASH_ATTN_BACK, 0, nullptr},
         {false, GGML_OP_SSM_CONV, 0, nullptr},
@@ -661,6 +668,8 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV6, 0, nullptr},
         {false, GGML_OP_GATED_LINEAR_ATTN, 0, nullptr},
         {false, GGML_OP_RWKV_WKV7, 0, nullptr},
+        {false, GGML_OP_SOLVE_TRI, 0, nullptr},
+        {false, GGML_OP_GATED_DELTA_NET, 0, nullptr},
         {false, GGML_OP_UNARY, 0, nullptr},
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr},
@@ -669,6 +678,7 @@ static constexpr const qnn_op_caps ggmlqnn_k_op_caps[] = {
         {false, GGML_OP_CROSS_ENTROPY_LOSS, 0, nullptr},
         {false, GGML_OP_CROSS_ENTROPY_LOSS_BACK, 0, nullptr},
         {false, GGML_OP_OPT_STEP_ADAMW, 0, nullptr},
+        {false, GGML_OP_OPT_STEP_SGD, 0, nullptr},
         {false, GGML_OP_GLU, 0, nullptr},
 };
 
@@ -684,6 +694,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {true,  GGML_OP_NONE, 0, nullptr, nullptr},
         {false, GGML_OP_DUP, 0, nullptr, nullptr},
         {true,  GGML_OP_ADD, 2, "ggmlop_dsp_add", ggmlop_dsp_add},
+        {false, GGML_OP_ADD_ID, 0, nullptr, nullptr},
         {false, GGML_OP_ADD1, 0, nullptr, nullptr},
         {false, GGML_OP_ACC, 0, nullptr, nullptr},
         {false, GGML_OP_SUB, 2, nullptr, nullptr},
@@ -696,6 +707,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_COS, 0, nullptr, nullptr},
         {false, GGML_OP_SUM, 0, nullptr, nullptr},
         {false, GGML_OP_SUM_ROWS, 0, nullptr, nullptr},
+        {false, GGML_OP_CUMSUM, 0, nullptr, nullptr},
         {false, GGML_OP_MEAN, 0, nullptr, nullptr},
         {false, GGML_OP_ARGMAX, 0, nullptr, nullptr},
         {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
@@ -733,7 +745,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
         {false, GGML_OP_IM2COL, 0, nullptr, nullptr},
         {false, GGML_OP_IM2COL_BACK, 0, nullptr, nullptr},
+        {false, GGML_OP_IM2COL_3D, 0, nullptr, nullptr},
         {false, GGML_OP_CONV_2D, 0, nullptr, nullptr},
+        {false, GGML_OP_CONV_3D, 0, nullptr, nullptr},
         {false, GGML_OP_CONV_2D_DW, 0, nullptr, nullptr},
         {false, GGML_OP_CONV_TRANSPOSE_2D, 0, nullptr, nullptr},
         {false, GGML_OP_POOL_1D, 0, nullptr, nullptr},
@@ -746,7 +760,10 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_ARANGE, 0, nullptr, nullptr},
         {false, GGML_OP_TIMESTEP_EMBEDDING, 0, nullptr, nullptr},
         {false, GGML_OP_ARGSORT, 0, nullptr, nullptr},
+        {false, GGML_OP_TOP_K, 0, nullptr, nullptr},
         {false, GGML_OP_LEAKY_RELU, 0, nullptr, nullptr},
+        {false, GGML_OP_TRI, 0, nullptr, nullptr},
+        {false, GGML_OP_FILL, 0, nullptr, nullptr},
         {false, GGML_OP_FLASH_ATTN_EXT, 0, nullptr, nullptr},
         {false, GGML_OP_FLASH_ATTN_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_SSM_CONV, 0, nullptr, nullptr},
@@ -758,6 +775,8 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV6, 0, nullptr, nullptr},
         {false, GGML_OP_GATED_LINEAR_ATTN, 0, nullptr, nullptr},
         {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
+        {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
+        {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
         {false, GGML_OP_UNARY, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
@@ -766,6 +785,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_CROSS_ENTROPY_LOSS, 0, nullptr, nullptr},
         {false, GGML_OP_CROSS_ENTROPY_LOSS_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_OPT_STEP_ADAMW, 0, nullptr, nullptr},
+        {false, GGML_OP_OPT_STEP_SGD, 0, nullptr, nullptr},
         {false, GGML_OP_GLU, 0, nullptr, nullptr},
 };
 
@@ -6189,6 +6209,20 @@ static void ggml_backend_hexagon_buffer_clear(ggml_backend_buffer_t buffer, uint
     memset(ctx->buffer, value, ctx->buffer_size);
 }
 
+static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
+    GGML_UNUSED(buffer);
+    for (size_t copy = 0; copy < n_copies; copy++) {
+        memcpy((char *)tensor->data + offset + copy * stride_tensor, (const char *)data + copy * stride_data, size);
+    }
+}
+
+static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
+    GGML_UNUSED(buffer);
+    for (size_t copy = 0; copy < n_copies; copy++) {
+        memcpy((char *)data + copy * stride_data, (const char *)tensor->data + offset + copy * stride_tensor, size);
+    }
+}
+
 static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .free_buffer     = */ ggml_backend_hexagon_buffer_free_buffer,
         /* .get_base        = */ ggml_backend_hexagon_buffer_get_base,
@@ -6196,6 +6230,8 @@ static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .memset_tensor   = */ ggml_backend_hexagon_buffer_memset_tensor,
         /* .set_tensor      = */ ggml_backend_hexagon_buffer_set_tensor,
         /* .get_tensor      = */ ggml_backend_hexagon_buffer_get_tensor,
+        /* .set_tensor_2d   = */ ggml_backend_hexagon_buffer_set_tensor_2d,
+        /* .get_tensor_2d   = */ ggml_backend_hexagon_buffer_get_tensor_2d,
         /* .cpy_tensor      = */ ggml_backend_hexagon_buffer_cpy_tensor,
         /* .clear           = */ ggml_backend_hexagon_buffer_clear,
         /* .reset           = */ nullptr,
@@ -6675,6 +6711,8 @@ static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .free                    = */ ggml_backend_hexagon_free,
         /* .set_tensor_async        = */ nullptr,
         /* .get_tensor_async        = */ nullptr,
+        /* .set_tensor_2d_async     = */ nullptr,
+        /* .get_tensor_2d_async     = */ nullptr,
         /* .cpy_tensor_async        = */ nullptr,
         /* .synchronize             = */ nullptr,
         /* .graph_plan_create       = */ nullptr,
@@ -6684,6 +6722,7 @@ static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .graph_compute           = */ nullptr,
         /* .event_record            = */ nullptr,
         /* .event_wait              = */ nullptr,
+        /* .graph_optimize          = */ nullptr,
 };
 
 //FIXME: this guid is not make sense

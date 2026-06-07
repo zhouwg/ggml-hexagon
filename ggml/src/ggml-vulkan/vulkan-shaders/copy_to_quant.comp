@@ -1,11 +1,6 @@
 #version 450
 
-#if RTE16
-#extension GL_EXT_spirv_intrinsics : enable
-spirv_execution_mode(capabilities = [4467], 4462, 16); // RoundingModeRTE, 16 bits
-#endif // RTE16
-
-#include "types.comp"
+#include "types.glsl"
 
 #if defined(SET_ROWS) && QUANT_K == 1
 layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
@@ -18,11 +13,18 @@ const uint BLOCK_SIZE = 32;
 layout (binding = 0) readonly buffer S {float data_s[];};
 
 #if defined(SET_ROWS)
-#include "generic_binary_head.comp"
-layout (binding = 1) readonly buffer C {uvec2 data_i[];};
+#include "generic_binary_head.glsl"
+layout (binding = 1) readonly buffer C {B_TYPE data_i[];};
 layout (binding = 2) writeonly buffer Q {A_TYPE data_q[];};
+
+#if B_SIZE == 64
+#define DATA_I_SWIZZLE .x
 #else
-#include "generic_unary_head.comp"
+#define DATA_I_SWIZZLE
+#endif
+
+#else
+#include "generic_unary_head.glsl"
 layout (binding = 1) writeonly buffer Q {A_TYPE data_q[];};
 #endif
 
@@ -181,6 +183,31 @@ void quantize(uint dst_idx, uint src_idx)
 }
 #endif
 
+#if defined(DATA_A_Q1_0)
+void quantize(uint dst_idx, uint src_idx)
+{
+    float sum_abs = 0.0;
+
+    [[unroll]] for (int j = 0; j < QUANT_K_Q1_0; j++) {
+        sum_abs += abs(data_s[src_idx + j]);
+    }
+
+    const float d = sum_abs / QUANT_K_Q1_0;
+
+    data_q[dst_idx].d = float16_t(d);
+
+    [[unroll]] for (int j = 0; j < QUANT_K_Q1_0 / 8; ++j) {
+        data_q[dst_idx].qs[j] = uint8_t(0);
+    }
+
+    [[unroll]] for (int j = 0; j < QUANT_K_Q1_0; ++j) {
+        if (data_s[src_idx + j] >= 0.0) {
+            data_q[dst_idx].qs[j / 8] |= uint8_t(1 << (j % 8));
+        }
+    }
+}
+#endif
+
 #if defined(DATA_A_IQ4_NL)
 uint best_index(float x) {
     if (x <= kvalues_iq4nl[0]) return 0;
@@ -263,7 +290,7 @@ void main() {
     uint i11 = fastmod(i02, p.ne11);
     uint i10 = i01;
 
-    uint i1 = data_i[src1_idx(i10, i11, i12, 0) + get_boffset()].x;
+    uint i1 = data_i[src1_idx(i10, i11, i12, 0) + get_boffset()] DATA_I_SWIZZLE;
 
     uint src0_idx = src0_idx(i00, i01, i02, i03) + get_aoffset();
     uint dst_idx = dst_idx(i00 / QUANT_K, i1, i02, i03) + get_doffset();

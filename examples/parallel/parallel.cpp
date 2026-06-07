@@ -7,12 +7,13 @@
 #include "log.h"
 #include "llama.h"
 
+#include <algorithm>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
 #include <ctime>
-#include <algorithm>
 
 // trim whitespace from the beginning and end of a string
 static std::string trim(const std::string & str) {
@@ -153,6 +154,8 @@ static std::vector<std::string> split_string(const std::string& input, char deli
 }
 
 int main(int argc, char ** argv) {
+    std::setlocale(LC_NUMERIC, "C");
+
     srand(1234);
 
     common_params params;
@@ -160,11 +163,11 @@ int main(int argc, char ** argv) {
     params.n_predict = 128;
     params.n_junk = 1;
 
+    common_init();
+
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_PARALLEL)) {
         return 1;
     }
-
-    common_init();
 
     // number of simultaneous "clients" to simulate
     const int32_t n_clients = params.n_parallel;
@@ -184,15 +187,18 @@ int main(int argc, char ** argv) {
     // extra text to insert in each client's prompt in order to make it larger
     const int32_t n_junk = std::max(1, params.n_junk);
 
+    // signed seed, use negative values to indicate different seeds for the different clients
+    const int32_t & sseed = params.sampling.seed;
+
     // init llama.cpp
     llama_backend_init();
     llama_numa_init(params.numa);
 
     // load the target model
-    common_init_result llama_init = common_init_from_params(params);
+    auto llama_init = common_init_from_params(params);
 
-    llama_model * model = llama_init.model.get();
-    llama_context * ctx = llama_init.context.get();
+    auto * model = llama_init->model();
+    auto * ctx   = llama_init->context();
 
     auto * mem = llama_get_memory(ctx);
 
@@ -219,11 +225,21 @@ int main(int argc, char ** argv) {
 
     const int n_ctx = llama_n_ctx(ctx);
 
+    if (sseed >= 0) {
+        LOG_INF("%s: initializing all samplers with the same RNG seed: %d (use a negative seed to have different seeds)\n", __func__, sseed);
+    } else {
+        LOG_INF("%s: initializing samplers with different RNG seeds, starting from %d\n", __func__, sseed);
+    }
+
     std::vector<client> clients(n_clients);
     for (size_t i = 0; i < clients.size(); ++i) {
         auto & client = clients[i];
         client.id = i;
         client.smpl = common_sampler_init(model, params.sampling);
+
+        if (sseed < 0) {
+            params.sampling.seed--;
+        }
     }
 
     std::vector<llama_token> tokens_system;
@@ -345,7 +361,7 @@ int main(int argc, char ** argv) {
                     client.n_decoded = 0;
                     client.i_batch   = batch.n_tokens - 1;
 
-                    LOG_INF("\033[31mClient %3d, seq %4d, junk = %4d, started decoding ...\033[0m\n", client.id, client.seq_id, n_junk_cur);
+                    LOG_INF("\033[31mClient %3d, seq %4d, junk = %4d, prompt = %d, started decoding ...\033[0m\n", client.id, client.seq_id, n_junk_cur, client.n_prompt);
 
                     g_seq_id += 1;
 
