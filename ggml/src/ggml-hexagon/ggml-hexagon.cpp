@@ -354,7 +354,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .enable_profiler        = 0,
         .print_tensors_info     = 0,
         .dump_op_info           = 0,
-        .enable_q_mulmat        = 0,
+        .enable_q_mulmat        = 1,
         .enable_pinned_memory   = 0,
         .precision_mode         = 0,
         .hvx_threads            = 4,
@@ -362,8 +362,8 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .enable_dlbc            = 1,
         .hwaccel_approach       = HWACCEL_CDSP,
         .hexagon_backend        = HEXAGON_BACKEND_CDSP,
-        .enable_rpc_ion_mempool = 0,
-        .enable_all_q_mulmat    = 0,
+        .enable_rpc_ion_mempool = 1,
+        .enable_all_q_mulmat    = 1,
         .profiler_duration      = 5,    //seconds
         .profiler_counts        = 100,
         .thread_counts          = 4,
@@ -6282,10 +6282,11 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
             GGMLHEXAGON_LOG_DEBUG("allocated %ld MiB from ion pool at offset %ld",
                                  size_aligned / SIZE_IN_MB, aligned_offset);
         } else {
-            GGMLHEXAGON_LOG_WARN("ion pool exhausted: needed %ld MiB, remaining %ld MiB",
+            GGMLHEXAGON_LOG_WARN("ion pool exhausted: needed %ld MiB, remaining %ld MiB — falling back to system memory",
                                  size_aligned / SIZE_IN_MB,
                                  (ctx->rpc_mempool_len - ctx->rpc_mempool_usage) / SIZE_IN_MB);
-            return nullptr;
+            buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+            buffer_ctx->buffer_size = size_aligned;
         }
     } else {
         buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);

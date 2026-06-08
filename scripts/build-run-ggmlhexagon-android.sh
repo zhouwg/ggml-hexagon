@@ -12,12 +12,14 @@
 #
 set -e
 
-######## part-1: public macros & vars  ########
+######## part-1: public macros & vars ########
 
 PWD=`pwd`
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
 HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)}'`
+VERBOSE=OFF
+VERBOSE=ON
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
@@ -56,51 +58,31 @@ QNN_SDK_VERSION=2.46.0.260424
 #fully official QNN SDK, will be downloaded automatically via this script
 QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
-#fully Qualcomm Hexagon SDK can be found at(fully Hexagon SDK must be obtained with Qualcomm Developer Account):
-#https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
+#fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
+#fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
+#only for purpose of test/development
 #HEXAGON_SDK_VERSION=6.2.0.1
+#HEXAGON SDK 6.3.0.0 is required for htp v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
 #HEXAGON_SDK_VERSION=6.3.0.0
 #HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
+
 #the official Qualcomm Hexagon SDK tech docs can be found at:
 #https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
 #customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
 #this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
+#actually used in this project
 HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
 
-
-#running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
-running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
-
-#available prebuilt libs can be found at prebuilts/ggml-dsp
-GGMLDSP_RELEASE_DATE=20250531
-GGMLDSP_RELEASE_DATE=20250609
-GGMLDSP_RELEASE_DATE=20250625
-GGMLDSP_RELEASE_DATE=20250627
-GGMLDSP_RELEASE_DATE=20250710
-
-
-######## part-2: contents in this part can be modified ########
-
-PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
-
-#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-#not supported at the moment
-GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
-
-#1.2 GiB, will be downloadded automatically via this script when running this script at the first time
-#not supported at the moment
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
-
-#the following LLM models has verified(works fine) with Hexagon-cDSP backend(aka jz's ggml-hexagon backend) on a Snapdragon 8Elite based Android phone although inference performance is not good enough at the moment
-#1.12 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
+HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 
 #supported htp arch version:
 #v68 --- Snapdragon 888
 #v69 --- Snapdragon 8 Gen1
 #v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
-#v79 --- Snapdragon 8 Elite
+#v79 --- Snapdragon 8 Elite(aka 8 Gen4)
+#v81 --- Snapdragon 8 Elite Gen5(aka 8 Gen5)
 
 #Qualcomm Snapdragon 8Elite based Android phone is strongly recommended because:
 #1. sometimes the same dsp codes can got the best performance on Snapdragon 8Elite based phone.
@@ -111,6 +93,30 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 HTP_ARCH_VERSION=v79
 HTP_ARCH_VERSION_a=V79
 
+#for jz's ggml-hexagon backend
+#available prebuilt libs can be found at prebuilts/ggml-dsp
+GGMLDSP_RELEASE_DATE=20250531
+GGMLDSP_RELEASE_DATE=20250609
+GGMLDSP_RELEASE_DATE=20250625
+GGMLDSP_RELEASE_DATE=20250627
+GGMLDSP_RELEASE_DATE=20250710
+
+######## part-2: prompt and LLM models ########
+
+#the following LLM models has verified(works fine) with the jz's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
+#1.12 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+
+#1.2 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
+
+#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+
+PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
+
+#running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
+running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
 
 ######## part-3: utilities and functions ########
 
@@ -372,8 +378,6 @@ function check_and_download_ndk()
 }
 
 
-
-
 function build_arm64
 {
     #not acutually used at the moment, just for AI experts add other AI operators in the future
@@ -629,12 +633,12 @@ function prepare_run_on_phone()
 
 function run_llamacli()
 {
-    prepare_run_on_phone llama-cli
+    prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} -mg ${hexagon_backend} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-cli ${running_params} -mg ${hexagon_backend} -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} -mg ${hexagon_backend} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
 
 }
 

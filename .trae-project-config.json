@@ -1,0 +1,63 @@
+{
+  "project": "ggml-hexagon",
+  "local_workdir": "/home/zhouwg/develop/ggml-hexagon",
+  "remote_build_host": "zhouwg@192.168.0.200",
+  "remote_workdir": "/home/zhouwg/develop/ggml-hexagon",
+  "scripts": {
+    "build": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build",
+    "ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3"
+  },
+  "commands": {
+    "verify_build": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build\"",
+    "run_ut": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3\""
+  },
+  "hexagon_backend_cdsp_index": 3,
+  "build_rules": {
+    "documentation": "docs/how-to-build-ggmlhexagon.md",
+    "build_command": "./scripts/build-run-android.sh build",
+    "build_forbidden": {
+      "do_not_read": ["Makefile", "CMakeLists.txt", "cmake", "cmake/**/*"],
+      "do_not_run": ["make", "cmake", "ninja", "check_android_phone", "check_prebuilt_models"],
+      "reason": "Follow ONLY docs/how-to-build-ggmlhexagon.md. Ignore all toplevel build files."
+    },
+    "script_rules": {
+      "allowed_function": "build (from build-run-android.sh)",
+      "forbidden_functions": ["check_android_phone", "check_prebuilt_models"],
+      "reason": "These functions are forbidden. Only run the main build flow."
+    },
+    "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-android.sh accordingly",
+    "if_unsure": "STOP. Do NOT use make/cmake. ONLY follow: docs/how-to-build-ggmlhexagon.md"
+  },
+  "do_not_modify": {
+    "symlinks": [
+      "scripts/build-run-androi.sh"
+    ],
+    "reason": "These files are symbolic links. Modify the target file instead."
+  },
+  "notes": {
+    "build_on": "remote server 192.168.0.200",
+    "user": "zhouwg",
+    "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
+    "workdir_remote": "/home/zhouwg/develop/ggml-hexagon"
+  },
+  "hexagon_implementations": {
+    "description": "Two ggml-hexagon implementations exist in this project",
+    "qualcomm_official": {
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "description": "Qualcomm's official ggml-hexagon implementation"
+    },
+    "jz_implementation": {
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/kernels/",
+      "description": "JZ's custom ggml-hexagon implementation (primary development target)"
+    }
+  },
+  "development_rules": {
+    "primary_target": "jz_implementation",
+    "active_development": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+    "active_kernels": "ggml/src/ggml-hexagon/kernels/",
+    "testing_focus": "jz_implementation",
+    "description": "All development and testing tasks should focus on JZ's implementation"
+  }
+}
