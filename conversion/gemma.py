@@ -785,6 +785,16 @@ class Gemma4UnifiedModel(Gemma4Model):
             self.gguf_writer.add_suppress_tokens(suppress_tokens)
 
 
+@ModelBase.register("Gemma4AssistantForCausalLM", "Gemma4UnifiedAssistantForCausalLM")
+class Gemma4AssistantModel(Gemma4Model):
+    model_arch = gguf.MODEL_ARCH.GEMMA4_ASSISTANT
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        self.gguf_writer.add_embedding_length_out(self.hparams["backbone_hidden_size"])
+        self.gguf_writer.add_nextn_predict_layers(self.block_count)
+
+
 @ModelBase.register("Gemma4ForConditionalGeneration")
 class Gemma4VisionAudioModel(MmprojModel):
     has_audio_encoder = True
@@ -812,10 +822,11 @@ class Gemma4VisionAudioModel(MmprojModel):
         self.gguf_writer.add_vision_attention_layernorm_eps(self.hparams_vision.get("layer_norm_eps", 1e-6))
 
         # audio params
-        assert self.hparams_audio is not None
-        self.gguf_writer.add_clip_audio_projector_type(gguf.VisionProjectorType.GEMMA4A)
-        self.gguf_writer.add_audio_num_mel_bins(self.hparams_audio["feat_in"])
-        self.gguf_writer.add_audio_attention_layernorm_eps(self.hparams_audio.get("layer_norm_eps", 1e-6))
+        if self.has_audio_encoder:
+            assert self.hparams_audio is not None
+            self.gguf_writer.add_clip_audio_projector_type(gguf.VisionProjectorType.GEMMA4A)
+            self.gguf_writer.add_audio_num_mel_bins(self.hparams_audio["feat_in"])
+            self.gguf_writer.add_audio_attention_layernorm_eps(self.hparams_audio.get("layer_norm_eps", 1e-6))
 
     def is_audio_tensor(self, name: str) -> bool:
         return "audio_tower" in name or "embed_audio" in name
