@@ -1,7 +1,7 @@
 #include "AEEStdDef.idl"
 #include "remote.idl"
 
-//not acutually used at the moment, just for AI experts add other AI operators in the future
+//not acutually used at the moment
 
 const string IDL_VERSION = "0.0.1";
 

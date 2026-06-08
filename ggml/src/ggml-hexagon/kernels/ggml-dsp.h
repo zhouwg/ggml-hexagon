@@ -91,6 +91,9 @@ extern "C" {
 #define GGMLHEXAGON_DEBUG                                   1
 #endif
 
+#define GGMLDSP_LOG_DEBUG(...)                             ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_WARN(...)                              ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+
 #define GGMLHEXAGON_LOGBUF_LEN                              4096
 #define GGMLHEXAGON_TMPBUF_LEN                              256
 #if GGMLHEXAGON_DEBUG

@@ -52,6 +52,7 @@ static void ggml_compute_forward_add_f32(
 
     memcpy(dst->ne, src1->ne, 16);
     memcpy(dst->nb, src1->nb, 16);
+    dst->type = src1->type;
     ggmlhexagon_dump_tensor(src0, 1);
     ggmlhexagon_dump_tensor(src1, 1);
     ggmlhexagon_dump_tensor(dst, 1);

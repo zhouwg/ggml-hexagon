@@ -378,12 +378,18 @@ function check_and_download_ndk()
 }
 
 
-function build_arm64
+function build_idl()
 {
-    #not acutually used at the moment, just for AI experts add other AI operators in the future
+    echo "build idl"
     #if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
     #    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
     #fi
+}
+
+
+function build_arm64
+{
+    build_idl
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
@@ -396,6 +402,8 @@ function build_arm64
 
 function build_arm64_debug
 {
+    build_idl
+
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
@@ -479,8 +487,32 @@ function build_ggml_hexagon_debug()
     build_arm64_debug
 }
 
-
+#for jz's ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
+{
+    adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so"
+case "$HTP_ARCH_VERSION" in
+    v75)
+        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so
+        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
+    ;;
+
+    v79)
+        echo "v79"
+        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so
+        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
+    ;;
+
+    *)
+        show_usage
+        exit 1
+    ;;
+esac
+}
+
+
+function prepare_ggmldsp_prebuilt()
 {
     adb push ./scripts/ggml-hexagon-for-binary-lib.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
     echo "adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so"
@@ -616,18 +648,22 @@ function prepare_run_on_phone()
     fi
 
 
-    #for verify prebuilt binary library(after 06/2025) on Hexagon cDSP
+    #for verify prebuilt libggmldsp-skel.so on Hexagon cDSP
     #comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
-    prepare_ggmldsp
+    prepare_ggmldsp_prebuilt
 
-    #un-comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
-    #adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    #for verify libggmldsp-skel.so which generated from source codes in this branch
+    #prepare_ggmldsp
 
     adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
 
     adb shell ls -l ${REMOTE_PATH}/libggml-*.so
 
     adb shell chmod +x ${REMOTE_PATH}/${program}
+
+    adb shell "rm /data/local/tmp/${program}.farf"
+    adb shell "touch /data/local/tmp/${program}.farf"
+    adb shell "echo 0x1f > /data/local/tmp/${program}.farf"
 }
 
 
