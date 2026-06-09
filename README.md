@@ -609,7 +609,7 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - self-build
   https://github.com/zhouwg/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
 - self-build-jz
-  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends. the implementation of the prebuilt libggmldsp-skel.so is complicated&dirty, so the open-source code of libggmldsp-skel.so can be found in this branch.
 
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
@@ -620,6 +620,7 @@ $ ./scripts/build-run-android.sh build
 $ ./scripts/build-run-android.sh run_llamabench 3
 
 ```
+the following screenshot is created on 2026-06-02 in branch self-build-jz and <b>can be reproduced</b> in branch self-build-jz-backup-20260607-before-merge-master.the following screenshot can't be reproduced in branch self-build-jz because branch self-build-jz is under active development.
 
 <img width="1879" height="285" alt="Screenshot from 2026-06-02 22-07-53" src="https://github.com/user-attachments/assets/a65ba531-b740-4348-af51-ab91b7cef1a2" />
 
