@@ -50,26 +50,7 @@ static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
     return fp32_from_bits(result);
 }
 
-static inline uint16_t ggml_compute_fp32_to_fp16(float f) {
-    const float scale_to_inf = fp32_from_bits(0x77800000U);
-    const float scale_to_zero = fp32_from_bits(0x08800000U);
-    float base = (fabsf(f) * scale_to_inf) * scale_to_zero;
 
-    const uint32_t w = fp32_to_bits(f);
-    const uint32_t shl1_w = w + w;
-    const uint32_t sign = w & 0x80000000U;
-    uint32_t bias = shl1_w & 0xFF000000U;
-    if (bias < 0x71000000U) {
-        bias = 0x71000000U;
-    }
-
-    base = fp32_from_bits((bias >> 1) + 0x07800000U) + base;
-    const uint32_t bits = fp32_to_bits(base);
-    const uint32_t exp_bits = (bits >> 13) & 0x00007C00U;
-    const uint32_t mantissa_bits = bits & 0x00000FFFU;
-    const uint32_t nonsign = exp_bits + mantissa_bits;
-    return (sign >> 16) | (shl1_w > 0xFF000000U ? 0x7E00U : nonsign);
-}
 
 static void ggml_compute_forward_add_f32(
         const struct ggml_tensor * src0,

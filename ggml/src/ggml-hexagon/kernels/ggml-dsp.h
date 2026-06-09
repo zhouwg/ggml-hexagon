@@ -33,6 +33,9 @@ extern "C" {
 
 #define VLEN                128
 
+#define QK4_0               32
+#define QK8_0               32
+
 #define GGML_UNUSED(x)      (void)(x)
 
 #define UNUSED              GGML_UNUSED
@@ -146,6 +149,23 @@ enum ggmlhexagon_log_level {
 enum ggml_type {
     GGML_TYPE_F32     = 0,
     GGML_TYPE_F16     = 1,
+    GGML_TYPE_Q4_0    = 2,
+    GGML_TYPE_Q4_1    = 3,
+    GGML_TYPE_Q5_0    = 6,
+    GGML_TYPE_Q5_1    = 7,
+    GGML_TYPE_Q8_0    = 8,
+    GGML_TYPE_Q8_1    = 9,
+    GGML_TYPE_Q2_K    = 10,
+    GGML_TYPE_Q3_K    = 11,
+    GGML_TYPE_Q4_K    = 12,
+    GGML_TYPE_Q5_K    = 13,
+    GGML_TYPE_Q6_K    = 14,
+    GGML_TYPE_Q8_K    = 15,
+    GGML_TYPE_I8      = 24,
+    GGML_TYPE_BF16    = 30,
+    GGML_TYPE_MXFP4   = 39,
+    GGML_TYPE_NVFP4   = 40,
+    GGML_TYPE_Q1_0    = 41,
 };
 
 typedef double      ggml_float;
@@ -166,6 +186,62 @@ GGML_API void ggmlhexagon_dump_tensor(const ggml_tensor * tensor, int dump_tenso
 GGML_API void ggmlhexagon_log_internal(int level, const char *file, const char *func, int line, const char *format, ...);
 
 GGML_API int ggmlop_get_thread_counts(void);
+GGML_API void * ggmlop_get_work_data(size_t size);
+GGML_API uint16_t ggml_compute_fp32_to_fp16(float f);
+
+static inline int ggml_blck_size(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q5_0:
+        case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_1:
+            return 32;
+        case GGML_TYPE_Q2_K:
+            return 256;
+        case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_Q6_K:
+        case GGML_TYPE_Q8_K:
+            return 256;
+        case GGML_TYPE_I8:
+            return 1;
+        case GGML_TYPE_BF16:
+        case GGML_TYPE_F16:
+        case GGML_TYPE_F32:
+        default:
+            return 1;
+    }
+}
+
+static inline size_t ggml_type_size(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_F32:
+            return sizeof(float);
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
+            return sizeof(uint16_t);
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+            return sizeof(__fp16) + QK4_0/2;
+        case GGML_TYPE_Q5_0:
+        case GGML_TYPE_Q5_1:
+            return sizeof(__fp16) + QK4_0/2 + QK4_0/2;
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q8_1:
+            return sizeof(__fp16) + QK8_0;
+        case GGML_TYPE_I8:
+            return sizeof(int8_t);
+        default:
+            return sizeof(float);
+    }
+}
+
+static inline size_t ggml_row_size(enum ggml_type type, int64_t ne) {
+    return ggml_type_size(type) * ne / ggml_blck_size(type);
+}
 
 #ifdef  __cplusplus
 }

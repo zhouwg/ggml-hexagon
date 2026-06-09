@@ -5891,9 +5891,8 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                     return (src0->type == GGML_TYPE_F32  || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && (src1->type == GGML_TYPE_F32);
                 }
 
-                return (src0->type == GGML_TYPE_F32
+                return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
                         || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q8_0
-                        || src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q8_K
                        ) && (src1->type == GGML_TYPE_F32) && (op_tensor->type == GGML_TYPE_F32);
             } else {
                 return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&

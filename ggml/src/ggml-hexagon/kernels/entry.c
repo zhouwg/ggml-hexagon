@@ -1,6 +1,10 @@
 #include "ggml-dsp.h"
 
 static int32 g_thread_counts = 1;
+static void * g_work_data = NULL;
+static size_t g_work_size = 0;
+
+#define MAX_WORK_SIZE (1024 * 1024 * 64)
 
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     void * tptr = NULL;
@@ -40,4 +44,18 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 
 
 int ggmlop_get_thread_counts(void) {
     return g_thread_counts;
+}
+
+void * ggmlop_get_work_data(size_t size) {
+    if (g_work_data == NULL || g_work_size < size) {
+        if (g_work_data != NULL) {
+            free(g_work_data);
+        }
+        size = (size > MAX_WORK_SIZE) ? MAX_WORK_SIZE : size;
+        g_work_data = malloc(size);
+        if (g_work_data != NULL) {
+            g_work_size = size;
+        }
+    }
+    return g_work_data;
 }

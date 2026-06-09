@@ -58,6 +58,8 @@ static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
     return fp32_from_bits(result);
 }
 
+
+
 static inline float hvx_vec_get_f32(HVX_Vector v) {
     HVX_VectorAlias va;
     va.v = v;
@@ -160,6 +162,117 @@ static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint
     *s = sumf;
 }
 
+#define QK4_0 32
+#define QK8_0 32
+
+#define GGML_Q4_0_BLCK_SZ (sizeof(__fp16) + QK4_0/2)
+#define GGML_Q8_0_BLCK_SZ (sizeof(__fp16) + QK8_0)
+
+typedef struct {
+    __fp16 d;
+    uint8_t qs[QK4_0 / 2];
+} block_q4_0;
+
+typedef struct {
+    __fp16 d;
+    int8_t qs[QK8_0];
+} block_q8_0;
+
+static void vec_dot_q4_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
+                    size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    ggml_float sumf = 0.0;
+    const int nb = n / QK4_0;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = ggml_compute_fp16_to_fp32(x[i].d);
+        for (int j = 0; j < QK4_0 / 2; ++j) {
+            const int8_t q0 = (x[i].qs[j] & 0x0F) - 8;
+            const int8_t q1 = (x[i].qs[j] >> 4) - 8;
+            sumf += (ggml_float)(q0 * d * y[i * QK4_0 + 2 * j]);
+            sumf += (ggml_float)(q1 * d * y[i * QK4_0 + 2 * j + 1]);
+        }
+    }
+    *s = sumf;
+}
+
+static void vec_dot_q8_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
+                    size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    ggml_float sumf = 0.0;
+    const int nb = n / QK8_0;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = ggml_compute_fp16_to_fp32(x[i].d);
+        for (int j = 0; j < QK8_0; ++j) {
+            sumf += (ggml_float)(x[i].qs[j] * d * y[i * QK8_0 + j]);
+        }
+    }
+    *s = sumf;
+}
+
+static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
+                    size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int qk = QK8_0;
+    const int nb = n / qk;
+
+    float sumf = 0;
+    for (int ib = 0; ib < nb; ++ib) {
+        int sumi0 = 0;
+        int sumi1 = 0;
+
+        for (int j = 0; j < qk/2; ++j) {
+            const int v0 = (x[ib].qs[j] & 0x0F) - 8;
+            const int v1 = (x[ib].qs[j] >>   4) - 8;
+
+            sumi0 += (v0 * y[ib].qs[j]);
+            sumi1 += (v1 * y[ib].qs[j + qk/2]);
+        }
+
+        const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        sumf += (float)sumi0 * d;
+        sumf += (float)sumi1 * d;
+    }
+    *s = sumf;
+}
+
+static void vec_dot_q8_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
+                    size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int qk = QK8_0;
+    const int nb = n / qk;
+
+    float sumf = 0;
+    for (int ib = 0; ib < nb; ++ib) {
+        int sumi = 0;
+
+        for (int j = 0; j < qk; ++j) {
+            sumi += (x[ib].qs[j] * y[ib].qs[j]);
+        }
+
+        const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        sumf += (float)sumi * d;
+    }
+    *s = sumf;
+}
+
 typedef struct {
     const ggml_tensor *src0;
     const ggml_tensor *src1;
@@ -172,6 +285,51 @@ typedef struct {
     int32_t ir1_end;
     worker_synctoken_t *synctoken;
 } mulmat_thread_data_t;
+
+static void quantize_row_q8_0(const float * x, block_q8_0 * y, int n) {
+    const int nb = n / QK8_0;
+    for (int i = 0; i < nb; ++i) {
+        float max_val = 0.0f;
+        for (int j = 0; j < QK8_0; ++j) {
+            float v = fabsf(x[i * QK8_0 + j]);
+            if (v > max_val) {
+                max_val = v;
+            }
+        }
+        float d = max_val / 127.0f;
+        if (d == 0.0f) {
+            d = 1e-6f;
+        }
+        y[i].d = ggml_compute_fp32_to_fp16(1.0f / d);
+        for (int j = 0; j < QK8_0; ++j) {
+            float v = x[i * QK8_0 + j];
+            y[i].qs[j] = (int8_t)roundf(v / d);
+        }
+    }
+}
+
+static enum ggml_type ggml_vec_dot_type(enum ggml_type type) {
+    switch (type) {
+        case GGML_TYPE_F32:
+            return GGML_TYPE_F32;
+        case GGML_TYPE_F16:
+            return GGML_TYPE_F16;
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q5_0:
+            return GGML_TYPE_Q8_0;
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q5_1:
+            return GGML_TYPE_Q8_1;
+        case GGML_TYPE_Q8_0:
+            return GGML_TYPE_Q8_0;
+        case GGML_TYPE_Q8_1:
+            return GGML_TYPE_Q8_1;
+        default:
+            return GGML_TYPE_F32;
+    }
+}
+
+
 
 static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, const ggml_tensor *src1,
                                                    struct ggml_tensor *dst,
@@ -211,13 +369,30 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
         return;
     }
 
-    const void * wdata = src1->data;
-    const size_t row_size = 4 * ne10;
+    const enum ggml_type vec_dot_type = ggml_vec_dot_type(type);
+    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+    const void * wdata = (src1->type == vec_dot_type) ? src1->data : NULL;
+
+    if (wdata == NULL) {
+        const size_t q8_size = ne11 * row_size;
+        void * q8_data = ggmlop_get_work_data(q8_size);
+        if (q8_data != NULL) {
+            for (int i = 0; i < ne11; ++i) {
+                const float * src_row = (const float*)((const char*)src1->data + i * nb11);
+                block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i * row_size);
+                quantize_row_q8_0(src_row, dst_row, ne10);
+            }
+            wdata = q8_data;
+        } else {
+            wdata = src1->data;
+        }
+    }
 
     const int32_t blck_0 = 16;
     const int32_t blck_1 = 16;
 
-    const size_t src1_col_stride = src1_cont ? row_size : nb11;
+    const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
     float tmp[32];
 
@@ -239,15 +414,27 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                      : (i11 * nb11 + i12 * nb12 + i13 * nb13));
                 float * dst_col = (float*)((char*)dst->data + (i11 * nb1 + i12 * nb2 + i13 * nb3));
 
+                const int32_t block_rows = MIN(iir0 + blck_0, ir0_end) - iir0;
+
                 for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                    const int32_t row_idx = ir0 - iir0;
+
                     if (type == GGML_TYPE_F16) {
-                        vec_dot_f16_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                       (uintptr_t)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                       (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        vec_dot_f16_f32(ne00, &tmp[row_idx], 0,
+                                       (const uint16_t*)(src0_row + ir0 * nb01), 0,
+                                       (float*)src1_col, 0, 1);
+                    } else if (type == GGML_TYPE_Q4_0) {
+                        const block_q4_0 * q4_row = (const block_q4_0*)(src0_row + ir0 * nb01);
+                        const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
+                        vec_dot_q4_0_q8_0(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
+                    } else if (type == GGML_TYPE_Q8_0) {
+                        const block_q8_0 * q8_row = (const block_q8_0*)(src0_row + ir0 * nb01);
+                        const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
+                        vec_dot_q8_0_q8_0(ne00, &tmp[row_idx], 0, q8_row, 0, q8_col, 0, 1);
                     } else {
-                        vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                    (float*)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                    (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        vec_dot_f32(ne00, &tmp[row_idx], 0,
+                                    (const float*)(src0_row + ir0 * nb01), 0,
+                                    (float*)src1_col, 0, 1);
                     }
                 }
 
@@ -457,16 +644,30 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
         return;
     }
 
-    const void * wdata = src1->data;
-    const size_t row_size_f32 = 4 * ne10;
-    const size_t row_size_f16 = 2 * ne10;
+    const enum ggml_type vec_dot_type = ggml_vec_dot_type(type);
+    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+
+    const void * wdata = (src1->type == vec_dot_type) ? src1->data : NULL;
+
+    if (wdata == NULL) {
+        const size_t q8_size = ne11 * row_size;
+        void * q8_data = ggmlop_get_work_data(q8_size);
+        if (q8_data != NULL) {
+            for (int i = 0; i < ne11; ++i) {
+                const float * src_row = (const float*)((const char*)src1->data + i * nb11);
+                block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i * row_size);
+                quantize_row_q8_0(src_row, dst_row, ne10);
+            }
+            wdata = q8_data;
+        } else {
+            wdata = src1->data;
+        }
+    }
 
     const int32_t blck_0 = VTCM_BLOCK_ROWS;
     const int32_t blck_1 = VTCM_BLOCK_COLS;
 
-    const bool src1_is_f16 = src1->type == GGML_TYPE_F16;
-    const size_t row_size = src1_is_f16 ? row_size_f16 : row_size_f32;
-    const size_t src1_col_stride = src1_cont ? row_size : nb11;
+    const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
     const size_t max_rows_in_vtcm = (vtcm_size / sizeof(float)) / ne00;
     const int32_t rows_per_vtcm_block = MIN(max_rows_in_vtcm, VTCM_BLOCK_ROWS);
@@ -500,18 +701,28 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                     memcpy(vtcm_buf, src0_row + iir0 * nb01, copy_size);
 
                     for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
-                        if (type == GGML_TYPE_F16 && src1_is_f16) {
-                            vec_dot_f16_f16(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                           (uintptr_t)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                           (uint16_t*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        const int32_t row_idx = ir0 - iir0;
+
+                        if (type == GGML_TYPE_F16 && vec_dot_type == GGML_TYPE_F16) {
+                            vec_dot_f16_f16(ne00, &tmp[row_idx], 0,
+                                           (const uint16_t*)(vtcm_buf + row_idx * nb01), 0,
+                                           (uint16_t*)src1_col, 0, 1);
                         } else if (type == GGML_TYPE_F16) {
-                            vec_dot_f16_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                           (uintptr_t)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                           (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                            vec_dot_f16_f32(ne00, &tmp[row_idx], 0,
+                                           (const uint16_t*)(vtcm_buf + row_idx * nb01), 0,
+                                           (float*)src1_col, 0, 1);
+                        } else if (type == GGML_TYPE_Q4_0) {
+                            const block_q4_0 * q4_row = (const block_q4_0*)(vtcm_buf + row_idx * nb01);
+                            const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
+                            vec_dot_q4_0_q8_0(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
+                        } else if (type == GGML_TYPE_Q8_0) {
+                            const block_q8_0 * q8_row = (const block_q8_0*)(vtcm_buf + row_idx * nb01);
+                            const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
+                            vec_dot_q8_0_q8_0(ne00, &tmp[row_idx], 0, q8_row, 0, q8_col, 0, 1);
                         } else {
-                            vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                        (float*)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                        (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                            vec_dot_f32(ne00, &tmp[row_idx], 0,
+                                        (const float*)(vtcm_buf + row_idx * nb01), 0,
+                                        (float*)src1_col, 0, 1);
                         }
                     }
 

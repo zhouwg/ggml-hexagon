@@ -82,8 +82,43 @@ void ggmlhexagon_dump_tensor(const ggml_tensor * tensor, int dump_tensor_data) {
     }
 }
 
-size_t ggml_row_size(enum ggml_type type, int64_t ne) {
-    return 4*ne;
+static inline uint32_t fp32_to_bits(float f) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_value = f;
+    return fp32.as_bits;
+}
+
+static inline float fp32_from_bits(uint32_t w) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_bits = w;
+    return fp32.as_value;
+}
+
+uint16_t ggml_compute_fp32_to_fp16(float f) {
+    const float scale_to_inf = fp32_from_bits(0x77800000U);
+    const float scale_to_zero = fp32_from_bits(0x08800000U);
+    float base = (fabsf(f) * scale_to_inf) * scale_to_zero;
+
+    const uint32_t w = fp32_to_bits(f);
+    const uint32_t shl1_w = w + w;
+    const uint32_t sign = w & 0x80000000U;
+    uint32_t bias = shl1_w & 0xFF000000U;
+    if (bias < 0x71000000U) {
+        bias = 0x71000000U;
+    }
+
+    base = fp32_from_bits((bias >> 1) + 0x07800000U) + base;
+    const uint32_t bits = fp32_to_bits(base);
+    const uint32_t exp_bits = (bits >> 13) & 0x00007C00U;
+    const uint32_t mantissa_bits = bits & 0x00000FFFU;
+    const uint32_t nonsign = exp_bits + mantissa_bits;
+    return (sign >> 16) | (shl1_w > 0xFF000000U ? 0x7E00U : nonsign);
 }
 
 size_t ggml_nbytes(const struct ggml_tensor * tensor) {
