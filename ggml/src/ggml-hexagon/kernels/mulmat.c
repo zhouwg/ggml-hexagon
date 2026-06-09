@@ -1,6 +1,6 @@
 #include "ggml-dsp.h"
+#include "worker_pool.h"
 
-// 128 byte vectors
 #define VSIZE_BYTES 128
 #define VSIZE_WORDS VSIZE_BYTES/4
 
@@ -8,8 +8,6 @@
 #define SIZEOF_FP16 (2)
 #define VLEN_FP32   (VSIZE_BYTES / SIZEOF_FP32)
 #define VLEN_FP16   (VSIZE_BYTES / SIZEOF_FP16)
-
-union ui32f { int32_t i; float f; };
 
 typedef union {
     HVX_Vector v;
@@ -143,25 +141,49 @@ static void vec_dot_f16_f32(int n, float *GGML_RESTRICT s, size_t bs, const uint
     *s = sumf;
 }
 
+typedef struct {
+    const ggml_tensor *src0;
+    const ggml_tensor *src1;
+    ggml_tensor *dst;
+    enum ggml_type type;
+    int32_t num_rows_per_vec_dot;
+    int32_t ir0_start;
+    int32_t ir0_end;
+    int32_t ir1_start;
+    int32_t ir1_end;
+    worker_synctoken_t *synctoken;
+} mulmat_thread_data_t;
+
 static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, const ggml_tensor *src1,
                                                    struct ggml_tensor *dst,
                                                    const enum ggml_type type,
                                                    const int32_t num_rows_per_vec_dot,
                                                    const int32_t ir0_start, const int32_t ir0_end,
                                                    const int32_t ir1_start, const int32_t ir1_end) {
-    dst->ne[0] = src0->ne[1];
-    dst->ne[1] = src1->ne[1];
-    dst->ne[2] = src1->ne[2];
-    dst->ne[3] = src1->ne[3];
-
-    dst->nb[0] = 4;
-    dst->nb[1] = dst->nb[0] * dst->ne[0];
-    dst->nb[2] = dst->nb[1] * dst->ne[1];
-    dst->nb[3] = dst->nb[2] * dst->ne[2];
-
-    GGML_TENSOR_BINARY_OP_LOCALS
-
     const bool src1_cont = ggml_is_contiguous(src1);
+
+    const int32_t ne00 = src0->ne[0];
+    const int32_t ne01 = src0->ne[1];
+    const int32_t ne02 = src0->ne[2];
+    const int32_t ne03 = src0->ne[3];
+
+    const int32_t ne10 = src1->ne[0];
+    const int32_t ne11 = src1->ne[1];
+    const int32_t ne12 = src1->ne[2];
+    const int32_t ne13 = src1->ne[3];
+
+    const size_t nb01 = src0->nb[1];
+    const size_t nb02 = src0->nb[2];
+    const size_t nb03 = src0->nb[3];
+
+    const size_t nb11 = src1->nb[1];
+    const size_t nb12 = src1->nb[2];
+    const size_t nb13 = src1->nb[3];
+
+    const size_t nb1 = dst->nb[1];
+    const size_t nb2 = dst->nb[2];
+    const size_t nb3 = dst->nb[3];
+    const size_t nb0 = dst->nb[0];
 
     const int32_t r2 = ne12 / ne02;
     const int32_t r3 = ne13 / ne03;
@@ -173,9 +195,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     const void * wdata = src1->data;
     const size_t row_size = 4 * ne10;
 
-    assert(ne12 % ne02 == 0);
-    assert(ne13 % ne03 == 0);
-
     const int32_t blck_0 = 16;
     const int32_t blck_1 = 16;
 
@@ -186,16 +205,12 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     for (int32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int32_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
             for (int32_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ir1 += num_rows_per_vec_dot) {
-                const int32_t i13 = (ir1 / (ne12 * ne1));
-                const int32_t i12 = (ir1 - i13 * ne12 * ne1) / ne1;
-                const int32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
+                const int32_t i13 = (ir1 / (ne12 * ne11));
+                const int32_t i12 = (ir1 - i13 * ne12 * ne11) / ne11;
+                const int32_t i11 = (ir1 - i13 * ne12 * ne11 - i12 * ne11);
 
                 const int32_t i03 = i13 / r3;
                 const int32_t i02 = i12 / r2;
-
-                const int32_t i1 = i11;
-                const int32_t i2 = i12;
-                const int32_t i3 = i13;
 
                 const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
 
@@ -203,7 +218,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                     (src1_cont
                      ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
                      : (i11 * nb11 + i12 * nb12 + i13 * nb13));
-                float * dst_col = (float*)((char*)dst->data + (i1 * nb1 + i2 * nb2 + i3 * nb3));
+                float * dst_col = (float*)((char*)dst->data + (i11 * nb1 + i12 * nb2 + i13 * nb3));
 
                 for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
                     if (type == GGML_TYPE_F16) {
@@ -225,6 +240,21 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     }
 }
 
+static void mulmat_thread_func(void * data) {
+    mulmat_thread_data_t * tdata = (mulmat_thread_data_t *) data;
+
+    ggml_compute_forward_mul_mat_one_chunk(
+        tdata->src0, tdata->src1, tdata->dst,
+        tdata->type, tdata->num_rows_per_vec_dot,
+        tdata->ir0_start, tdata->ir0_end,
+        tdata->ir1_start, tdata->ir1_end
+    );
+
+    if (tdata->synctoken != NULL) {
+        worker_pool_synctoken_jobdone(tdata->synctoken);
+    }
+}
+
 static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
 
@@ -238,22 +268,10 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
     dst->nb[2] = dst->nb[1] * dst->ne[1];
     dst->nb[3] = dst->nb[2] * dst->ne[2];
 
-    GGML_TENSOR_BINARY_OP_LOCALS
-
-    int32_t  const vec_dot_num_rows     = 1;
-
-    GGML_ASSERT(ne0 == ne01);
-    GGML_ASSERT(ne1 == ne11);
-    GGML_ASSERT(ne2 == ne12);
-    GGML_ASSERT(ne3 == ne13);
-
-    GGML_ASSERT(nb00 == (src0->type == GGML_TYPE_F16 ? 2 : 4));
-    GGML_ASSERT(nb10 == (src1->type == GGML_TYPE_F16 ? 2 : 4));
-
-    GGML_ASSERT(nb0 == sizeof(float));
-    GGML_ASSERT(nb0 <= nb1);
-    GGML_ASSERT(nb1 <= nb2);
-    GGML_ASSERT(nb2 <= nb3);
+    const int32_t ne0 = src0->ne[1];
+    const int32_t ne1 = src1->ne[1];
+    const int32_t ne2 = src1->ne[2];
+    const int32_t ne3 = src1->ne[3];
 
     const int32_t nr0 = ne0;
     const int32_t nr1 = ne1 * ne2 * ne3;
@@ -284,11 +302,12 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
         const int32_t ir1_start = dr1 * ith1;
         const int32_t ir1_end = MIN(ir1_start + dr1, nr1);
 
-        int32_t num_rows_per_vec_dot = vec_dot_num_rows;
+        int32_t num_rows_per_vec_dot = 1;
 
-        if ((nr0 % 2 != 0) || (ne11 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
+        if ((nr0 % 2 != 0) || (ne1 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
             num_rows_per_vec_dot = 1;
         }
+
         ggml_compute_forward_mul_mat_one_chunk(src0, src1, dst, src0->type, num_rows_per_vec_dot,
                                                ir0_start, ir0_end, ir1_start, ir1_end);
 
@@ -304,12 +323,69 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
 
 static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
+
+    dst->ne[0] = src0->ne[1];
+    dst->ne[1] = src1->ne[1];
+    dst->ne[2] = src1->ne[2];
+    dst->ne[3] = src1->ne[3];
+
+    dst->nb[0] = 4;
+    dst->nb[1] = dst->nb[0] * dst->ne[0];
+    dst->nb[2] = dst->nb[1] * dst->ne[1];
+    dst->nb[3] = dst->nb[2] * dst->ne[2];
+
+    const int32_t ne0 = src0->ne[1];
+    const int32_t ne1 = src1->ne[1];
+    const int32_t ne2 = src1->ne[2];
+    const int32_t ne3 = src1->ne[3];
+
+    const int32_t nr0 = ne0;
+    const int32_t nr1 = ne1 * ne2 * ne3;
+
+    unsigned int n_threads = num_workers;
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > 8) n_threads = 8;
+
+    const int32_t rows_per_thread = (nr1 + n_threads - 1) / n_threads;
+
+    mulmat_thread_data_t thread_data[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (unsigned int t = 0; t < n_threads; t++) {
+        const int32_t ir1_start = t * rows_per_thread;
+        const int32_t ir1_end = MIN(ir1_start + rows_per_thread, nr1);
+
+        thread_data[t].src0 = src0;
+        thread_data[t].src1 = src1;
+        thread_data[t].dst = dst;
+        thread_data[t].type = src0->type;
+        thread_data[t].num_rows_per_vec_dot = 1;
+        thread_data[t].ir0_start = 0;
+        thread_data[t].ir0_end = nr0;
+        thread_data[t].ir1_start = ir1_start;
+        thread_data[t].ir1_end = ir1_end;
+        thread_data[t].synctoken = (t == 0) ? NULL : &synctoken;
+
+        if (t == 0) {
+            mulmat_thread_func(&thread_data[t]);
+        } else {
+            worker_pool_job_t job;
+            job.fptr = mulmat_thread_func;
+            job.dptr = &thread_data[t];
+            worker_pool_submit(NULL, job);
+        }
+    }
+
+    worker_pool_synctoken_wait(&synctoken);
+
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return 0;
 }
 
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
-    if (ggmlop_get_thread_counts() > 1) {
+    if (ggmlop_get_thread_counts() > 1 && num_workers > 1) {
         return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
     } else {
         return ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);

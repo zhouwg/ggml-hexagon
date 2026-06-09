@@ -662,9 +662,12 @@ function prepare_run_on_phone()
 
     adb shell chmod +x ${REMOTE_PATH}/${program}
 
+    #configuration for cDSP's logcat
     adb shell "rm /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
     adb shell "echo 0x1f > /data/local/tmp/${program}.farf"
+    #observe cDSP's log with debug build:./scripts/build-run-android.sh build_debug
+    #adb logcat  | grep -iE "CDSP0"
 }
 
 
