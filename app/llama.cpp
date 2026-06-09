@@ -9,8 +9,7 @@
 extern const char * LICENSES[];
 
 // visible
-int llama_server(int argc, char ** argv);
-int llama_cli(int argc, char ** argv);
+// disabled: llama_server and llama_cli (requires mtmd and ui)
 
 // hidden
 int llama_completion(int argc, char ** argv);
@@ -47,8 +46,6 @@ struct command {
 };
 
 static const command cmds[] = {
-    {"serve",         "HTTP API server",                                    {"server"},   false, llama_server       },
-    {"cli",           "Command-line interactive interface",                 {"client"},   false, llama_cli          },
     {"update",        "Update llama to the latest release",                 {},           false, llama_update       },
     {"completion",    "Text completion",                                    {"complete"}, true,  llama_completion   },
     {"bench",         "Benchmark prompt processing and text generation",    {},           true,  llama_bench        },
