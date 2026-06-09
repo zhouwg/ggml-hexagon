@@ -4,7 +4,21 @@
 #define VSIZE_BYTES 128
 #define VSIZE_WORDS VSIZE_BYTES/4
 
+#define SIZEOF_FP32 (4)
+#define SIZEOF_FP16 (2)
+#define VLEN_FP32   (VSIZE_BYTES / SIZEOF_FP32)
+#define VLEN_FP16   (VSIZE_BYTES / SIZEOF_FP16)
+
 union ui32f { int32_t i; float f; };
+
+typedef union {
+    HVX_Vector v;
+    uint8_t    b[VSIZE_BYTES];
+    uint16_t   h[VLEN_FP16];
+    uint32_t   w[VLEN_FP32];
+    __fp16     fp16[VLEN_FP16];
+    float      fp32[VLEN_FP32];
+} HVX_VectorAlias;
 
 static inline uint32_t fp32_to_bits(float f) {
     union {
@@ -43,48 +57,69 @@ static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
     return fp32_from_bits(result);
 }
 
-// create a vector of floats from a float
-static __attribute__((always_inline)) HVX_Vector create_sfv_from_sf(float value) {
-    union ui32f cvt;
-    cvt.f = value;
-    HVX_Vector tmp = Q6_V_vsplat_R(cvt.i);
-    return tmp;
+static inline float hvx_vec_get_f32(HVX_Vector v) {
+    HVX_VectorAlias va;
+    va.v = v;
+    return va.fp32[0];
 }
 
-// create a vector of qf32's from a float
-static __attribute__((always_inline)) HVX_Vector create_qf32v_from_sf(float value) {
-    HVX_Vector tmp = Q6_Vqf32_vadd_Vqf32Vsf(Q6_V_vsplat_R(0), create_sfv_from_sf(value));
-    return tmp;
+static inline HVX_Vector hvx_vec_reduce_sum_n_f32(HVX_Vector in, unsigned int n) {
+    unsigned int total = n * 4;
+    unsigned int width = 4;
+
+    HVX_Vector sum = in, sum_t;
+    while (width < total) {
+        sum_t = Q6_V_vror_VR(sum, width);
+        sum   = Q6_Vsf_vadd_VsfVsf(sum, sum_t);
+        width = width << 1;
+    }
+    return sum;
 }
 
-// convert qf32 vector to float vector
-static __attribute__((always_inline)) HVX_Vector convert_qf32v_to_fltv(HVX_Vector vect) {
-    HVX_Vector tmp = Q6_Vsf_equals_Vqf32(vect);
-    return tmp;
+static inline HVX_Vector hvx_vec_reduce_sum_f32(HVX_Vector in) {
+    return hvx_vec_reduce_sum_n_f32(in, VLEN_FP32);
 }
 
-// get lowest float from a vector of floats
-static __attribute__((always_inline)) float get_flt0_from_fltv(HVX_Vector vect) {
-    union ui32f cvt;
-    cvt.i = vect[0];
-    return cvt.f;
-}
+static void vec_dot_f32_hvx(int n, float *GGML_RESTRICT s, const float *GGML_RESTRICT x, const float *GGML_RESTRICT y) {
+    const HVX_Vector * restrict vx = (const HVX_Vector *) x;
+    const HVX_Vector * restrict vy = (const HVX_Vector *) y;
 
-// get lowest float from a vector of qf32's
-static __attribute__((always_inline)) float get_flt0_from_qf32v(HVX_Vector vect) {
-    union ui32f cvt;
-    HVX_Vector tmp = convert_qf32v_to_fltv(vect);
-    cvt.i = tmp[0];
-    return cvt.f;
+    uint32_t nvec = n / VLEN_FP32;
+    uint32_t nloe = n % VLEN_FP32;
+
+    HVX_Vector rsum = Q6_V_vsplat_R(0);
+
+    uint32_t i = 0;
+
+    #pragma unroll(4)
+    for (i = 0; i < nvec; i++) {
+        HVX_Vector prod = Q6_Vsf_vmpy_VsfVsf(vx[i], vy[i]);
+        rsum = Q6_Vsf_vadd_VsfVsf(rsum, prod);
+    }
+
+    if (nloe) {
+        HVX_VectorPred bmask = Q6_Q_vsetq_R(nloe * 4);
+        HVX_Vector x_sf = Q6_V_vand_QV(bmask, vx[i]);
+        HVX_Vector y_sf = Q6_V_vand_QV(bmask, vy[i]);
+        HVX_Vector prod = Q6_Vsf_vmpy_VsfVsf(x_sf, y_sf);
+        rsum = Q6_Vsf_vadd_VsfVsf(rsum, prod);
+    }
+
+    *s = hvx_vec_get_f32(hvx_vec_reduce_sum_f32(rsum));
 }
 
 static void vec_dot_f32(int n, float *GGML_RESTRICT s, size_t bs, const float *GGML_RESTRICT x,
                     size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
-    assert(nrc == 1);
-    UNUSED(nrc);
+    UNUSED(bs);
     UNUSED(bx);
     UNUSED(by);
-    UNUSED(bs);
+    UNUSED(nrc);
+
+    if (n >= VLEN_FP32 && ((uintptr_t)x & 0x7F) == 0 && ((uintptr_t)y & 0x7F) == 0) {
+        vec_dot_f32_hvx(n, s, x, y);
+        return;
+    }
+
     ggml_float sumf = 0.0;
     for (int i = 0; i < n; ++i) {
         sumf += (ggml_float) (x[i] * y[i]);
@@ -94,11 +129,11 @@ static void vec_dot_f32(int n, float *GGML_RESTRICT s, size_t bs, const float *G
 
 static void vec_dot_f16_f32(int n, float *GGML_RESTRICT s, size_t bs, const uint16_t *GGML_RESTRICT x,
                     size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
-    assert(nrc == 1);
-    UNUSED(nrc);
+    UNUSED(bs);
     UNUSED(bx);
     UNUSED(by);
-    UNUSED(bs);
+    UNUSED(nrc);
+
     ggml_float sumf = 0.0;
     for (int i = 0; i < n; ++i) {
         float va = ggml_compute_fp16_to_fp32(x[i]);
@@ -114,10 +149,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                                                    const int32_t num_rows_per_vec_dot,
                                                    const int32_t ir0_start, const int32_t ir0_end,
                                                    const int32_t ir1_start, const int32_t ir1_end) {
-    ggmlhexagon_dump_tensor(src0, 0);
-    ggmlhexagon_dump_tensor(src1, 0);
-    ggmlhexagon_dump_tensor(dst, 0);
-
     dst->ne[0] = src0->ne[1];
     dst->ne[1] = src1->ne[1];
     dst->ne[2] = src1->ne[2];
@@ -127,7 +158,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     dst->nb[1] = dst->nb[0] * dst->ne[0];
     dst->nb[2] = dst->nb[1] * dst->ne[1];
     dst->nb[3] = dst->nb[2] * dst->ne[2];
-    ggmlhexagon_dump_tensor(dst, 0);
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -197,9 +227,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
 
 static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
-    ggmlhexagon_dump_tensor(src0, 0);
-    ggmlhexagon_dump_tensor(src1, 0);
-    ggmlhexagon_dump_tensor(dst, 0);
 
     dst->ne[0] = src0->ne[1];
     dst->ne[1] = src1->ne[1];
@@ -210,7 +237,6 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
     dst->nb[1] = dst->nb[0] * dst->ne[0];
     dst->nb[2] = dst->nb[1] * dst->ne[1];
     dst->nb[3] = dst->nb[2] * dst->ne[2];
-    ggmlhexagon_dump_tensor(dst, 0);
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
