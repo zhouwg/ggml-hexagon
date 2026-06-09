@@ -5883,7 +5883,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
             ggmlhexagon_dump_op_info(op_tensor);
             if (src0_rank != src1_rank)
                 return false;
-            if (src0_rank != 2)
+            if (src0_rank < 2)
                 return false;
 
             if (1 == g_hexagon_appcfg.enable_q_mulmat) {
@@ -5896,7 +5896,8 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                         || src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q8_K
                        ) && (src1->type == GGML_TYPE_F32) && (op_tensor->type == GGML_TYPE_F32);
             } else {
-                return (src0->type == GGML_TYPE_F32) && (src1->type == GGML_TYPE_F32) &&
+                return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&
+                       (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) &&
                        (op_tensor->type == GGML_TYPE_F32);
             }
         }

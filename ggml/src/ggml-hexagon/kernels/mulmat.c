@@ -6,6 +6,43 @@
 
 union ui32f { int32_t i; float f; };
 
+static inline uint32_t fp32_to_bits(float f) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_value = f;
+    return fp32.as_bits;
+}
+
+static inline float fp32_from_bits(uint32_t w) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_bits = w;
+    return fp32.as_value;
+}
+
+static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
+    const uint32_t w = (uint32_t)h << 16;
+    const uint32_t sign = w & 0x80000000U;
+    const uint32_t two_w = w + w;
+
+    const uint32_t exp_offset = 0xE0U << 23;
+    const float exp_scale = fp32_from_bits(0x7800000U);
+    const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
+
+    const uint32_t magic_mask = 126U << 23;
+    const float magic_bias = 0.5f;
+    const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
+
+    const uint32_t denormalized_cutoff = 1U << 27;
+    const uint32_t result = sign |
+        (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
+    return fp32_from_bits(result);
+}
+
 // create a vector of floats from a float
 static __attribute__((always_inline)) HVX_Vector create_sfv_from_sf(float value) {
     union ui32f cvt;
@@ -48,10 +85,25 @@ static void vec_dot_f32(int n, float *GGML_RESTRICT s, size_t bs, const float *G
     UNUSED(bx);
     UNUSED(by);
     UNUSED(bs);
-    // scalar
     ggml_float sumf = 0.0;
     for (int i = 0; i < n; ++i) {
         sumf += (ggml_float) (x[i] * y[i]);
+    }
+    *s = sumf;
+}
+
+static void vec_dot_f16_f32(int n, float *GGML_RESTRICT s, size_t bs, const uint16_t *GGML_RESTRICT x,
+                    size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+    ggml_float sumf = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float va = ggml_compute_fp16_to_fp32(x[i]);
+        float vb = y[i];
+        sumf += (ggml_float) (va * vb);
     }
     *s = sumf;
 }
@@ -81,7 +133,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
 
     const bool src1_cont = ggml_is_contiguous(src1);
 
-    // broadcast factors
     const int32_t r2 = ne12 / ne02;
     const int32_t r3 = ne13 / ne03;
 
@@ -90,19 +141,16 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     }
 
     const void * wdata = src1->data;
-    const size_t row_size = 4* ne10;
+    const size_t row_size = 4 * ne10;
 
     assert(ne12 % ne02 == 0);
     assert(ne13 % ne03 == 0);
 
-    // block-tiling attempt
     const int32_t blck_0 = 16;
     const int32_t blck_1 = 16;
 
-    const size_t src1_col_stride = src1_cont || nb11;
+    const size_t src1_col_stride = src1_cont ? row_size : nb11;
 
-    // attempt to reduce false-sharing (does not seem to make a difference)
-    // 16 * 2, accounting for mmla kernels
     float tmp[32];
 
     for (int32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
@@ -112,7 +160,6 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                 const int32_t i12 = (ir1 - i13 * ne12 * ne1) / ne1;
                 const int32_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
 
-                // broadcast src0 into src1
                 const int32_t i03 = i13 / r3;
                 const int32_t i02 = i12 / r2;
 
@@ -122,19 +169,22 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
 
                 const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
 
-                // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
-                //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are using
-                //       the original src1 data pointer, so we should index using the indices directly
                 const char * src1_col = (const char*)wdata +
-                                        (src1_cont
-                                         ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
-                                         : (i11 * nb11 + i12 * nb12 + i13 * nb13));
+                    (src1_cont
+                     ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
+                     : (i11 * nb11 + i12 * nb12 + i13 * nb13));
                 float * dst_col = (float*)((char*)dst->data + (i1 * nb1 + i2 * nb2 + i3 * nb3));
 
                 for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
-                    vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                (float*)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
-                                (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                    if (type == GGML_TYPE_F16) {
+                        vec_dot_f16_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                       (uint16_t*)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                       (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                    } else {
+                        vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                    (float*)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                    (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                    }
                 }
 
                 for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
@@ -171,75 +221,31 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
     GGML_ASSERT(ne2 == ne12);
     GGML_ASSERT(ne3 == ne13);
 
-    // we don't support permuted src0 or src1
-    GGML_ASSERT(nb00 == 4);
-    GGML_ASSERT(nb10 == 4);
+    GGML_ASSERT(nb00 == (src0->type == GGML_TYPE_F16 ? 2 : 4));
+    GGML_ASSERT(nb10 == (src1->type == GGML_TYPE_F16 ? 2 : 4));
 
-    // dst cannot be transposed or permuted
     GGML_ASSERT(nb0 == sizeof(float));
     GGML_ASSERT(nb0 <= nb1);
     GGML_ASSERT(nb1 <= nb2);
     GGML_ASSERT(nb2 <= nb3);
 
-#if 0 //naive algorithm for fp32, can pass various case in UT
-    {
-        //ggml_dump_tensor(src0);
-        //ggml_dump_tensor(src1);
-
-        float * a = (float*)src0->data;
-        float * b = (float*)src1->data;
-        float * c = (float*)dst->data;
-        int M = src0->ne[1];
-        int K = src0->ne[0];
-        int N = src1->ne[1];
-        float sum = 0;
-        for (int i = 0; i < M; i++) {
-            for (int j = 0; j < N; j++) {
-                sum = 0;
-                for (int h = 0; h < K; h++) {
-                    sum += a[i * K + h] * b[h * N + j];
-                }
-                c[i * N + j] = sum;
-            }
-        }
-        return 0;
-    }
-#endif
-
-    // This is the size of the first dimension of the result, so we can iterate that way. (see the ASSERT above, these are the same numbers)
     const int32_t nr0 = ne0;
-
-    // This is the size of the rest of the dimensions of the result
     const int32_t nr1 = ne1 * ne2 * ne3;
 
-    // Now select a reasonable chunk size.
     int chunk_size = 16;
-
-    // We need to step up the size if it's small
     if (nr0 == 1 || nr1 == 1) {
         chunk_size = 64;
     }
 
-    // distribute the work across the inner or outer loop based on which one is larger
-    // The number of chunks in the 0/1 dim.
-    // CEIL(nr0/chunk_size)
     int32_t nchunk0 = (nr0 + chunk_size - 1) / chunk_size;
     int32_t nchunk1 = (nr1 + chunk_size - 1) / chunk_size;
 
-    // If the chunking is poor for the number of threads on this setup, scrap the whole plan.  Re-chunk it by thread.
-    //   Also, chunking by thread was measured to have perform better on NUMA systems.  See https://github.com/ggml-org/llama.cpp/pull/6915
-    //   In theory, chunking should be just as useful on NUMA and non NUMA systems, but testing disagreed with that.
-    if (nchunk0 * nchunk1 <  4) {
-        // distribute the thread work across the inner or outer loop based on which one is larger
-        nchunk0 =  1; // parallelize by src0 rows
-        nchunk1 =  1; // parallelize by src1 rows
-    }
+    nchunk0 = 1;
+    nchunk1 = 1;
 
-    // The number of elements in each chunk
     const int32_t dr0 = (nr0 + nchunk0 - 1) / nchunk0;
     const int32_t dr1 = (nr1 + nchunk1 - 1) / nchunk1;
 
-    // The first chunk comes from our thread_id, the rest will get auto-assigned.
     int current_chunk = 0;
 
     while (current_chunk < nchunk0 * nchunk1) {
@@ -252,11 +258,8 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
         const int32_t ir1_start = dr1 * ith1;
         const int32_t ir1_end = MIN(ir1_start + dr1, nr1);
 
-        // dot kernels can handle 1 row and col at a time, but mmla kernels can process 2 rows and cols
         int32_t num_rows_per_vec_dot = vec_dot_num_rows;
 
-        // these checks are needed to avoid crossing dim1 boundaries
-        // can be optimized, but the logic would become more complicated, so keeping it like this for simplicity
         if ((nr0 % 2 != 0) || (ne11 % 2 != 0) || ((ir0_end - ir0_start) % 2 != 0) || ((ir1_end - ir1_start) % 2 != 0)) {
             num_rows_per_vec_dot = 1;
         }
