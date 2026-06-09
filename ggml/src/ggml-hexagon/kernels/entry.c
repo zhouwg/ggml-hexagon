@@ -4,7 +4,7 @@ static int32 g_thread_counts = 1;
 static void * g_work_data = NULL;
 static size_t g_work_size = 0;
 
-#define MAX_WORK_SIZE (1024 * 1024 * 64)
+#define MAX_WORK_SIZE (1024 * 1024 * 1024)
 
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     void * tptr = NULL;
@@ -24,6 +24,12 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
 int ggmlop_dsp_close(remote_handle64 handle) {
     if (handle)
         free((void*)handle);
+
+    if (g_work_data != NULL) {
+        free(g_work_data);
+        g_work_data = NULL;
+        g_work_size = 0;
+    }
 
     return 0;
 }

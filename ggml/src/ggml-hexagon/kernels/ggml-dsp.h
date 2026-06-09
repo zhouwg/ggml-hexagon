@@ -101,8 +101,10 @@ extern "C" {
 #define GGMLHEXAGON_TMPBUF_LEN                              256
 #if GGMLHEXAGON_DEBUG
 #define GGMLHEXAGON_LOG_DEBUG(...)                          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)                          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #else
 #define GGMLHEXAGON_LOG_DEBUG(...)
+#define GGMLHEXAGON_LOG_ERROR(...)
 #endif
 
 #define GGML_TENSOR_LOCALS_1(type, prefix, pointer, array) \
@@ -225,13 +227,13 @@ static inline size_t ggml_type_size(enum ggml_type type) {
             return sizeof(uint16_t);
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
-            return sizeof(__fp16) + QK4_0/2;
+            return sizeof(uint16_t) + QK4_0/2;
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
-            return sizeof(__fp16) + QK4_0/2 + QK4_0/2;
+            return sizeof(uint16_t) + QK4_0/2 + QK4_0/2;
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
-            return sizeof(__fp16) + QK8_0;
+            return sizeof(uint16_t) + QK8_0;
         case GGML_TYPE_I8:
             return sizeof(int8_t);
         default:

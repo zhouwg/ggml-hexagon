@@ -41,18 +41,22 @@ static inline float fp32_from_bits(uint32_t w) {
 
 static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
     const uint32_t w = (uint32_t)h << 16;
-    const uint32_t sign = w & 0x80000000U;
+    const uint32_t sign = w & UINT32_C(0x80000000);
     const uint32_t two_w = w + w;
 
-    const uint32_t exp_offset = 0xE0U << 23;
-    const float exp_scale = fp32_from_bits(0x7800000U);
+    const uint32_t exp_offset = UINT32_C(0xE0) << 23;
+#if (defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 199901L) || defined(__GNUC__) && !defined(__STRICT_ANSI__)) && (!defined(__cplusplus) || __cplusplus >= 201703L)
+    const float exp_scale = 0x1.0p-112f;
+#else
+    const float exp_scale = fp32_from_bits(UINT32_C(0x7800000));
+#endif
     const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
 
-    const uint32_t magic_mask = 126U << 23;
+    const uint32_t magic_mask = UINT32_C(126) << 23;
     const float magic_bias = 0.5f;
     const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
 
-    const uint32_t denormalized_cutoff = 1U << 27;
+    const uint32_t denormalized_cutoff = UINT32_C(1) << 27;
     const uint32_t result = sign |
         (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
     return fp32_from_bits(result);
@@ -165,16 +169,16 @@ static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint
 #define QK4_0 32
 #define QK8_0 32
 
-#define GGML_Q4_0_BLCK_SZ (sizeof(__fp16) + QK4_0/2)
-#define GGML_Q8_0_BLCK_SZ (sizeof(__fp16) + QK8_0)
+#define GGML_Q4_0_BLCK_SZ (sizeof(uint16_t) + QK4_0/2)
+#define GGML_Q8_0_BLCK_SZ (sizeof(uint16_t) + QK8_0)
 
 typedef struct {
-    __fp16 d;
+    uint16_t d;
     uint8_t qs[QK4_0 / 2];
 } block_q4_0;
 
 typedef struct {
-    __fp16 d;
+    uint16_t d;
     int8_t qs[QK8_0];
 } block_q8_0;
 
@@ -226,7 +230,7 @@ static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const bl
     UNUSED(by);
     UNUSED(nrc);
 
-    const int qk = QK8_0;
+    const int qk = QK4_0;
     const int nb = n / qk;
 
     float sumf = 0;
@@ -243,8 +247,7 @@ static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const bl
         }
 
         const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
-        sumf += (float)sumi0 * d;
-        sumf += (float)sumi1 * d;
+        sumf += (float)(sumi0 + sumi1) * d;
     }
     *s = sumf;
 }
@@ -278,6 +281,7 @@ typedef struct {
     const ggml_tensor *src1;
     ggml_tensor *dst;
     enum ggml_type type;
+    enum ggml_type vec_dot_type;
     int32_t num_rows_per_vec_dot;
     int32_t ir0_start;
     int32_t ir0_end;
@@ -289,21 +293,17 @@ typedef struct {
 static void quantize_row_q8_0(const float * x, block_q8_0 * y, int n) {
     const int nb = n / QK8_0;
     for (int i = 0; i < nb; ++i) {
-        float max_val = 0.0f;
+        float amax = 0.0f;
         for (int j = 0; j < QK8_0; ++j) {
-            float v = fabsf(x[i * QK8_0 + j]);
-            if (v > max_val) {
-                max_val = v;
-            }
+            const float v = x[i * QK8_0 + j];
+            amax = MAX(amax, fabsf(v));
         }
-        float d = max_val / 127.0f;
-        if (d == 0.0f) {
-            d = 1e-6f;
-        }
-        y[i].d = ggml_compute_fp32_to_fp16(1.0f / d);
+        const float d = amax / ((1 << 7) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+        y[i].d = ggml_compute_fp32_to_fp16(d);
         for (int j = 0; j < QK8_0; ++j) {
-            float v = x[i * QK8_0 + j];
-            y[i].qs[j] = (int8_t)roundf(v / d);
+            const float x0 = x[i * QK8_0 + j] * id;
+            y[i].qs[j] = roundf(x0);
         }
     }
 }
@@ -334,6 +334,7 @@ static enum ggml_type ggml_vec_dot_type(enum ggml_type type) {
 static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, const ggml_tensor *src1,
                                                    struct ggml_tensor *dst,
                                                    const enum ggml_type type,
+                                                   const enum ggml_type vec_dot_type,
                                                    const int32_t num_rows_per_vec_dot,
                                                    const int32_t ir0_start, const int32_t ir0_end,
                                                    const int32_t ir1_start, const int32_t ir1_end) {
@@ -369,28 +370,45 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
         return;
     }
 
-    const enum ggml_type vec_dot_type = ggml_vec_dot_type(type);
     const size_t row_size = ggml_row_size(vec_dot_type, ne10);
-
-    const void * wdata = (src1->type == vec_dot_type) ? src1->data : NULL;
-
-    if (wdata == NULL) {
-        const size_t q8_size = ne11 * row_size;
-        void * q8_data = ggmlop_get_work_data(q8_size);
-        if (q8_data != NULL) {
-            for (int i = 0; i < ne11; ++i) {
-                const float * src_row = (const float*)((const char*)src1->data + i * nb11);
-                block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i * row_size);
-                quantize_row_q8_0(src_row, dst_row, ne10);
-            }
-            wdata = q8_data;
-        } else {
-            wdata = src1->data;
-        }
-    }
 
     const int32_t blck_0 = 16;
     const int32_t blck_1 = 16;
+
+    const void * wdata = src1->data;
+    if (src1->type != vec_dot_type) {
+        const size_t nbw1 = row_size;
+        const size_t nbw2 = nbw1 * ne11;
+        const size_t nbw3 = nbw2 * ne12;
+        const size_t q8_size = nbw3 * ne13;
+        void * q8_data = ggmlop_get_work_data(q8_size);
+        if (q8_data != NULL) {
+            if (vec_dot_type == GGML_TYPE_F16) {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            for (int i = 0; i < ne10; ++i) {
+                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_0(src_row, dst_row, ne10);
+                        }
+                    }
+                }
+            }
+            wdata = q8_data;
+        }
+    }
 
     const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
@@ -409,7 +427,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                 const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
 
                 const char * src1_col = (const char*)wdata +
-                    (src1_cont
+                    (src1_cont || src1->type != vec_dot_type
                      ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
                      : (i11 * nb11 + i12 * nb12 + i13 * nb13));
                 float * dst_col = (float*)((char*)dst->data + (i11 * nb1 + i12 * nb2 + i13 * nb3));
@@ -420,9 +438,15 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                     const int32_t row_idx = ir0 - iir0;
 
                     if (type == GGML_TYPE_F16) {
-                        vec_dot_f16_f32(ne00, &tmp[row_idx], 0,
-                                       (const uint16_t*)(src0_row + ir0 * nb01), 0,
-                                       (float*)src1_col, 0, 1);
+                        if (vec_dot_type == GGML_TYPE_F16 && src1->type != GGML_TYPE_F16) {
+                            vec_dot_f16_f16(ne00, &tmp[row_idx], 0,
+                                           (const uint16_t*)(src0_row + ir0 * nb01), 0,
+                                           (uint16_t*)src1_col, 0, 1);
+                        } else {
+                            vec_dot_f16_f32(ne00, &tmp[row_idx], 0,
+                                           (const uint16_t*)(src0_row + ir0 * nb01), 0,
+                                           (float*)src1_col, 0, 1);
+                        }
                     } else if (type == GGML_TYPE_Q4_0) {
                         const block_q4_0 * q4_row = (const block_q4_0*)(src0_row + ir0 * nb01);
                         const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
@@ -451,7 +475,8 @@ static void mulmat_thread_func(void * data) {
 
     ggml_compute_forward_mul_mat_one_chunk(
         tdata->src0, tdata->src1, tdata->dst,
-        tdata->type, tdata->num_rows_per_vec_dot,
+        tdata->type, tdata->vec_dot_type,
+        tdata->num_rows_per_vec_dot,
         tdata->ir0_start, tdata->ir0_end,
         tdata->ir1_start, tdata->ir1_end
     );
@@ -481,6 +506,8 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
 
     const int32_t nr0 = ne0;
     const int32_t nr1 = ne1 * ne2 * ne3;
+
+    const enum ggml_type vec_dot_type = ggml_vec_dot_type(src0->type);
 
     int chunk_size = 16;
     if (nr0 == 1 || nr1 == 1) {
@@ -514,7 +541,7 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
             num_rows_per_vec_dot = 1;
         }
 
-        ggml_compute_forward_mul_mat_one_chunk(src0, src1, dst, src0->type, num_rows_per_vec_dot,
+        ggml_compute_forward_mul_mat_one_chunk(src0, src1, dst, src0->type, vec_dot_type, num_rows_per_vec_dot,
                                                ir0_start, ir0_end, ir1_start, ir1_end);
 
         if (1 >= nchunk0 * nchunk1) {
@@ -548,6 +575,46 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
     const int32_t nr0 = ne0;
     const int32_t nr1 = ne1 * ne2 * ne3;
 
+    const enum ggml_type vec_dot_type = ggml_vec_dot_type(src0->type);
+
+    const void * wdata = src1->data;
+    if (src1->type != vec_dot_type) {
+        const size_t nbw1 = ggml_row_size(vec_dot_type, src1->ne[0]);
+        const size_t nbw2 = nbw1 * src1->ne[1];
+        const size_t nbw3 = nbw2 * src1->ne[2];
+        const size_t q8_size = nbw3 * src1->ne[3];
+        void * q8_data = ggmlop_get_work_data(q8_size);
+        if (q8_data != NULL) {
+            if (vec_dot_type == GGML_TYPE_F16) {
+                for (int i13 = 0; i13 < src1->ne[3]; ++i13) {
+                    for (int i12 = 0; i12 < src1->ne[2]; ++i12) {
+                        for (int i11 = 0; i11 < src1->ne[1]; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2] + i11 * src1->nb[1]);
+                            uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            for (int i = 0; i < src1->ne[0]; ++i) {
+                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (int i13 = 0; i13 < src1->ne[3]; ++i13) {
+                    for (int i12 = 0; i12 < src1->ne[2]; ++i12) {
+                        for (int i11 = 0; i11 < src1->ne[1]; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2] + i11 * src1->nb[1]);
+                            block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_0(src_row, dst_row, src1->ne[0]);
+                        }
+                    }
+                }
+            }
+            wdata = q8_data;
+        } else {
+            GGMLHEXAGON_LOG_ERROR("Failed to allocate work data for mulmat");
+            return -1;
+        }
+    }
+
     unsigned int n_threads = num_workers;
     if (n_threads < 1) n_threads = 1;
     if (n_threads > 8) n_threads = 8;
@@ -567,6 +634,7 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
         thread_data[t].src1 = src1;
         thread_data[t].dst = dst;
         thread_data[t].type = src0->type;
+        thread_data[t].vec_dot_type = vec_dot_type;
         thread_data[t].num_rows_per_vec_dot = 1;
         thread_data[t].ir0_start = 0;
         thread_data[t].ir0_end = nr0;
@@ -650,13 +718,34 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
     const void * wdata = (src1->type == vec_dot_type) ? src1->data : NULL;
 
     if (wdata == NULL) {
-        const size_t q8_size = ne11 * row_size;
+        const size_t nbw1 = row_size;
+        const size_t nbw2 = nbw1 * ne11;
+        const size_t nbw3 = nbw2 * ne12;
+        const size_t q8_size = nbw3 * ne13;
         void * q8_data = ggmlop_get_work_data(q8_size);
         if (q8_data != NULL) {
-            for (int i = 0; i < ne11; ++i) {
-                const float * src_row = (const float*)((const char*)src1->data + i * nb11);
-                block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i * row_size);
-                quantize_row_q8_0(src_row, dst_row, ne10);
+            if (vec_dot_type == GGML_TYPE_F16) {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            for (int i = 0; i < ne10; ++i) {
+                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            block_q8_0 * dst_row = (block_q8_0*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_0(src_row, dst_row, ne10);
+                        }
+                    }
+                }
             }
             wdata = q8_data;
         } else {
@@ -689,7 +778,7 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                 const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
 
                 const char * src1_col = (const char*)wdata +
-                    (src1_cont
+                    (src1_cont || src1->type != vec_dot_type
                      ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
                      : (i11 * nb11 + i12 * nb12 + i13 * nb13));
                 float * dst_col = (float*)((char*)dst->data + (i11 * nb1 + i12 * nb2 + i13 * nb3));
@@ -828,8 +917,11 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
 }
 
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
-    if (ggmlop_get_thread_counts() > 1 && num_workers > 1) {
-        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
+    if (num_workers > 1 && ggmlop_get_thread_counts() > 1) {
+        //default version at the moment
+        return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
+        //TODO:performance is slower than ggmlop_dsp_mulmat_multithread  at the moment
+        //return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     } else {
         return ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
     }

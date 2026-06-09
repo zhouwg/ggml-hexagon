@@ -626,6 +626,20 @@ function is_so_file_changed() {
 }
 
 
+function update_ggml_libs()
+{
+    #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libggml-base.so                 ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so                  ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so              ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libggml.so                      ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libllama-common.so              ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so     ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so          ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libllama.so                     ${REMOTE_PATH}/
+}
+
+
 function prepare_run_on_phone()
 {
     if [ $# != 1 ]; then
@@ -645,7 +659,7 @@ function prepare_run_on_phone()
     else
         printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
         #upload ggml runtime libs to Android phone
-        adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
+        update_ggml_libs
     fi
 
 
