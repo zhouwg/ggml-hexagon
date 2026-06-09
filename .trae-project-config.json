@@ -48,8 +48,8 @@
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
     "workdir_remote": "/home/zhouwg/develop/ggml-hexagon",
     "phone_connected_on": "remote host 192.168.0.200 (adb connects to the Android phone there)",
-    "default_verify_target": "source-built libggmldsp-skel.so (scripts/build-run-android.sh line 656: prepare_ggmldsp enabled)",
-    "compare_with_prebuilt": "To compare against prebuilt binary, comment out line 656 (prepare_ggmldsp) and enable line 653 (prepare_ggmldsp_prebuilt) in scripts/build-run-android.sh"
+    "default_verify_target": "source-built libggmldsp-skel.so (scripts/build-run-android.sh line 671: prepare_ggmldsp enabled)",
+    "compare_with_prebuilt": "To compare against prebuilt binary, comment out line 671 (prepare_ggmldsp) and enable line 668 (prepare_ggmldsp_prebuilt) in scripts/build-run-android.sh"
   },
   "hexagon_implementations": {
     "description": "Two ggml-hexagon implementations exist in this project",
