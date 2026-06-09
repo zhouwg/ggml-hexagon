@@ -9,6 +9,9 @@
 #define VLEN_FP32   (VSIZE_BYTES / SIZEOF_FP32)
 #define VLEN_FP16   (VSIZE_BYTES / SIZEOF_FP16)
 
+#define VTCM_BLOCK_ROWS 16
+#define VTCM_BLOCK_COLS 16
+
 typedef union {
     HVX_Vector v;
     uint8_t    b[VSIZE_BYTES];
@@ -141,6 +144,22 @@ static void vec_dot_f16_f32(int n, float *GGML_RESTRICT s, size_t bs, const uint
     *s = sumf;
 }
 
+static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint16_t *GGML_RESTRICT x,
+                    size_t bx, const uint16_t *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    ggml_float sumf = 0.0;
+    for (int i = 0; i < n; ++i) {
+        float va = ggml_compute_fp16_to_fp32(x[i]);
+        float vb = ggml_compute_fp16_to_fp32(y[i]);
+        sumf += (ggml_float) (va * vb);
+    }
+    *s = sumf;
+}
+
 typedef struct {
     const ggml_tensor *src0;
     const ggml_tensor *src1;
@@ -223,7 +242,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                 for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
                     if (type == GGML_TYPE_F16) {
                         vec_dot_f16_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
-                                       (uint16_t*)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                       (uintptr_t)(src0_row + ir0 * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
                                        (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
                     } else {
                         vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
@@ -384,9 +403,222 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
     return 0;
 }
 
+typedef struct {
+    const ggml_tensor *src0;
+    const ggml_tensor *src1;
+    ggml_tensor *dst;
+    enum ggml_type type;
+    int32_t num_rows_per_vec_dot;
+    int32_t ir0_start;
+    int32_t ir0_end;
+    int32_t ir1_start;
+    int32_t ir1_end;
+    uint8_t *vtcm_buf;
+    size_t vtcm_size;
+    worker_synctoken_t *synctoken;
+} mulmat_thread_data_vtcm_t;
+
+static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, const ggml_tensor *src1,
+                                                    struct ggml_tensor *dst,
+                                                    const enum ggml_type type,
+                                                    const int32_t num_rows_per_vec_dot,
+                                                    const int32_t ir0_start, const int32_t ir0_end,
+                                                    const int32_t ir1_start, const int32_t ir1_end,
+                                                    uint8_t *vtcm_buf, size_t vtcm_size) {
+    const bool src1_cont = ggml_is_contiguous(src1);
+
+    const int32_t ne00 = src0->ne[0];
+    const int32_t ne01 = src0->ne[1];
+    const int32_t ne02 = src0->ne[2];
+    const int32_t ne03 = src0->ne[3];
+
+    const int32_t ne10 = src1->ne[0];
+    const int32_t ne11 = src1->ne[1];
+    const int32_t ne12 = src1->ne[2];
+    const int32_t ne13 = src1->ne[3];
+
+    const size_t nb01 = src0->nb[1];
+    const size_t nb02 = src0->nb[2];
+    const size_t nb03 = src0->nb[3];
+
+    const size_t nb11 = src1->nb[1];
+    const size_t nb12 = src1->nb[2];
+    const size_t nb13 = src1->nb[3];
+
+    const size_t nb1 = dst->nb[1];
+    const size_t nb2 = dst->nb[2];
+    const size_t nb3 = dst->nb[3];
+    const size_t nb0 = dst->nb[0];
+
+    const int32_t r2 = ne12 / ne02;
+    const int32_t r3 = ne13 / ne03;
+
+    if (ir0_start >= ir0_end || ir1_start >= ir1_end) {
+        return;
+    }
+
+    const void * wdata = src1->data;
+    const size_t row_size_f32 = 4 * ne10;
+    const size_t row_size_f16 = 2 * ne10;
+
+    const int32_t blck_0 = VTCM_BLOCK_ROWS;
+    const int32_t blck_1 = VTCM_BLOCK_COLS;
+
+    const bool src1_is_f16 = src1->type == GGML_TYPE_F16;
+    const size_t row_size = src1_is_f16 ? row_size_f16 : row_size_f32;
+    const size_t src1_col_stride = src1_cont ? row_size : nb11;
+
+    const size_t max_rows_in_vtcm = (vtcm_size / sizeof(float)) / ne00;
+    const int32_t rows_per_vtcm_block = MIN(max_rows_in_vtcm, VTCM_BLOCK_ROWS);
+
+    float tmp[32];
+
+    for (int32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
+        for (int32_t iir0_base = ir0_start; iir0_base < ir0_end; iir0_base += rows_per_vtcm_block) {
+            const int32_t iir0_end = MIN(iir0_base + rows_per_vtcm_block, ir0_end);
+
+            for (int32_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ir1 += num_rows_per_vec_dot) {
+                const int32_t i13 = (ir1 / (ne12 * ne11));
+                const int32_t i12 = (ir1 - i13 * ne12 * ne11) / ne11;
+                const int32_t i11 = (ir1 - i13 * ne12 * ne11 - i12 * ne11);
+
+                const int32_t i03 = i13 / r3;
+                const int32_t i02 = i12 / r2;
+
+                const char * src0_row = (const char*)src0->data + (0 + i02 * nb02 + i03 * nb03);
+
+                const char * src1_col = (const char*)wdata +
+                    (src1_cont
+                     ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
+                     : (i11 * nb11 + i12 * nb12 + i13 * nb13));
+                float * dst_col = (float*)((char*)dst->data + (i11 * nb1 + i12 * nb2 + i13 * nb3));
+
+                for (int32_t iir0 = iir0_base; iir0 < iir0_end; iir0 += blck_0) {
+                    const int32_t block_rows = MIN(iir0 + blck_0, iir0_end) - iir0;
+                    const size_t copy_size = block_rows * nb01;
+
+                    memcpy(vtcm_buf, src0_row + iir0 * nb01, copy_size);
+
+                    for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
+                        if (type == GGML_TYPE_F16 && src1_is_f16) {
+                            vec_dot_f16_f16(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                           (uintptr_t)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                           (uint16_t*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        } else if (type == GGML_TYPE_F16) {
+                            vec_dot_f16_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                           (uintptr_t)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                           (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        } else {
+                            vec_dot_f32(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                        (float*)(vtcm_buf + (ir0 - iir0) * nb01), (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                        (float*)src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                        }
+                    }
+
+                    for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                        memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), block_rows * sizeof(float));
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void mulmat_thread_func_vtcm(void * data) {
+    mulmat_thread_data_vtcm_t * tdata = (mulmat_thread_data_vtcm_t *) data;
+
+    ggml_compute_forward_mul_mat_vtcm_chunk(
+        tdata->src0, tdata->src1, tdata->dst,
+        tdata->type, tdata->num_rows_per_vec_dot,
+        tdata->ir0_start, tdata->ir0_end,
+        tdata->ir1_start, tdata->ir1_end,
+        tdata->vtcm_buf, tdata->vtcm_size
+    );
+
+    if (tdata->synctoken != NULL) {
+        worker_pool_synctoken_jobdone(tdata->synctoken);
+    }
+}
+
+static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
+
+    dst->ne[0] = src0->ne[1];
+    dst->ne[1] = src1->ne[1];
+    dst->ne[2] = src1->ne[2];
+    dst->ne[3] = src1->ne[3];
+
+    dst->nb[0] = 4;
+    dst->nb[1] = dst->nb[0] * dst->ne[0];
+    dst->nb[2] = dst->nb[1] * dst->ne[1];
+    dst->nb[3] = dst->nb[2] * dst->ne[2];
+
+    const int32_t ne0 = src0->ne[1];
+    const int32_t ne1 = src1->ne[1];
+    const int32_t ne2 = src1->ne[2];
+    const int32_t ne3 = src1->ne[3];
+
+    const int32_t nr0 = ne0;
+    const int32_t nr1 = ne1 * ne2 * ne3;
+
+    unsigned int n_threads = num_workers;
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > 8) n_threads = 8;
+
+    const size_t vtcm_per_thread = 64 * 1024;
+    const size_t total_vtcm = vtcm_per_thread * n_threads;
+
+    void *vtcm_base = HAP_request_VTCM(total_vtcm, 0);
+    if (vtcm_base == NULL) {
+        GGMLHEXAGON_LOG_DEBUG("%s: VTCM allocation failed, falling back to non-VTCM", __func__);
+        return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
+    }
+
+    const int32_t rows_per_thread = (nr1 + n_threads - 1) / n_threads;
+
+    mulmat_thread_data_vtcm_t thread_data[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (unsigned int t = 0; t < n_threads; t++) {
+        const int32_t ir1_start = t * rows_per_thread;
+        const int32_t ir1_end = MIN(ir1_start + rows_per_thread, nr1);
+
+        thread_data[t].src0 = src0;
+        thread_data[t].src1 = src1;
+        thread_data[t].dst = dst;
+        thread_data[t].type = src0->type;
+        thread_data[t].num_rows_per_vec_dot = 1;
+        thread_data[t].ir0_start = 0;
+        thread_data[t].ir0_end = nr0;
+        thread_data[t].ir1_start = ir1_start;
+        thread_data[t].ir1_end = ir1_end;
+        thread_data[t].vtcm_buf = (uint8_t *)vtcm_base + t * vtcm_per_thread;
+        thread_data[t].vtcm_size = vtcm_per_thread;
+        thread_data[t].synctoken = (t == 0) ? NULL : &synctoken;
+
+        if (t == 0) {
+            mulmat_thread_func_vtcm(&thread_data[t]);
+        } else {
+            worker_pool_job_t job;
+            job.fptr = mulmat_thread_func_vtcm;
+            job.dptr = &thread_data[t];
+            worker_pool_submit(NULL, job);
+        }
+    }
+
+    worker_pool_synctoken_wait(&synctoken);
+
+    HAP_release_VTCM(vtcm_base);
+
+    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
+    return 0;
+}
+
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     if (ggmlop_get_thread_counts() > 1 && num_workers > 1) {
-        return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
+        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     } else {
         return ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
     }
