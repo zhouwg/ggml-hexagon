@@ -5,11 +5,13 @@
   "remote_workdir": "/home/zhouwg/develop/ggml-hexagon",
   "scripts": {
     "build": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build",
-    "ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3"
+    "ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3",
+    "run_testop_add": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD"
   },
   "commands": {
     "verify_build": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build\"",
-    "run_ut": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3\""
+    "run_ut": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3\"",
+    "run_testop_add": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD\""
   },
   "hexagon_backend_cdsp_index": 3,
   "build_rules": {
@@ -38,7 +40,10 @@
     "build_on": "remote server 192.168.0.200",
     "user": "zhouwg",
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
-    "workdir_remote": "/home/zhouwg/develop/ggml-hexagon"
+    "workdir_remote": "/home/zhouwg/develop/ggml-hexagon",
+    "phone_connected_on": "remote host 192.168.0.200 (adb connects to the Android phone there)",
+    "default_verify_target": "source-built libggmldsp-skel.so (scripts/build-run-android.sh line 656: prepare_ggmldsp enabled)",
+    "compare_with_prebuilt": "To compare against prebuilt binary, comment out line 656 (prepare_ggmldsp) and enable line 653 (prepare_ggmldsp_prebuilt) in scripts/build-run-android.sh"
   },
   "hexagon_implementations": {
     "description": "Two ggml-hexagon implementations exist in this project",
@@ -59,5 +64,12 @@
     "active_kernels": "ggml/src/ggml-hexagon/kernels/",
     "testing_focus": "jz_implementation",
     "description": "All development and testing tasks should focus on JZ's implementation"
+  },
+  "cdsp_data_path_notes": {
+    "idl_usage": "ggml/src/ggml-hexagon/kernels/ggmlop.idl is NOT actively used. The real artifacts are the customized skel.c, stub.c and skel.h generated/tailored from that IDL.",
+    "shared_memory_model": "ARM-AP side and cDSP side share data via ion shared memory buffer. DSP writes results directly into the shared buffer, so NO memcpy back-copy is needed on the AP side after op_func returns.",
+    "ap_side_data_path_status": "ARM-AP side code path in ggml-hexagon.cpp is known good - it works correctly with the prebuilt libggmldsp-skel.so for both testops and inference.",
+    "dsptensor_field_order": "The order of fields in struct dsptensor (defined in kernels/skel.h) MUST match the pack/unpack layout hard-coded in kernels/stub.c and kernels/skel.c. Expected layout at uint32 level: offset 0=type, 1-4=ne, 5-8=nb, 9=op, 10-25=op_params, 26=flags, 27=data_len, 28=data (pointer).",
+    "data_len_semantics": "data_len must be the number of ELEMENTS (not bytes). The stub code sets buffer length as nLen = 4 * data_len, so for a float tensor of N elements, data_len = N (not 4*N). Use ggml_nelements(tensor) / ggml_blck_size(tensor->type)."
   }
 }

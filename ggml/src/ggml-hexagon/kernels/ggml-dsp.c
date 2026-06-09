@@ -90,10 +90,11 @@ size_t ggml_nbytes(const struct ggml_tensor * tensor) {
     size_t nbytes;
     const size_t blck_size = 1;
     if (blck_size == 1) {
-        nbytes = 4;
+        nbytes = 0;
         for (int i = 0; i < GGML_MAX_DIMS; ++i) {
             nbytes += (tensor->ne[i] - 1)*tensor->nb[i];
         }
+        nbytes += tensor->nb[GGML_MAX_DIMS - 1];
     } else {
         nbytes = tensor->ne[0]*tensor->nb[0]/blck_size;
         for (int i = 1; i < GGML_MAX_DIMS; ++i) {

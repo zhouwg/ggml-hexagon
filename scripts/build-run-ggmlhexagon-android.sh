@@ -487,7 +487,7 @@ function build_ggml_hexagon_debug()
     build_arm64_debug
 }
 
-#for jz's ggml-hexagon backend in branch self-build-jz
+#for jz's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
 {
     adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
@@ -512,6 +512,7 @@ esac
 }
 
 
+#for jz's prebuilt ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp_prebuilt()
 {
     adb push ./scripts/ggml-hexagon-for-binary-lib.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
@@ -648,12 +649,12 @@ function prepare_run_on_phone()
     fi
 
 
-    #for verify prebuilt libggmldsp-skel.so on Hexagon cDSP
+    #for verify jz's prebuilt libggmldsp-skel.so
     #comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
-    prepare_ggmldsp_prebuilt
+    #prepare_ggmldsp_prebuilt
 
-    #for verify libggmldsp-skel.so which generated from source codes in this branch
-    #prepare_ggmldsp
+    #for verify jz's open-source libggmldsp-skel.so which generated from source codes in this branch
+    prepare_ggmldsp
 
     adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
 

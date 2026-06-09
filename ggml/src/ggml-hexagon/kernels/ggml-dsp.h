@@ -145,6 +145,7 @@ enum ggmlhexagon_log_level {
 
 enum ggml_type {
     GGML_TYPE_F32     = 0,
+    GGML_TYPE_F16     = 1,
 };
 
 typedef double      ggml_float;

@@ -8,39 +8,67 @@ static inline void l2fetch(const void * p, uint32_t stride,
 }
 
 static inline void ggmlhexagon_dsp_add_f32(const int n, float * GGML_RESTRICT z, const float * GGML_RESTRICT x, const float * GGML_RESTRICT y) {
-    HVX_Vector * va;
-    HVX_Vector * vb;
-    HVX_Vector * vc;
-    HVX_Vector qf32;
-    const size_t FLOATS_PER_VECTOR = 128 / sizeof(float);
-    const size_t block  = n / FLOATS_PER_VECTOR;
-    const size_t left   = n % FLOATS_PER_VECTOR;
-    const size_t blocks = block * FLOATS_PER_VECTOR;
+    for (size_t i = 0; i < n; ++i) {
+        z[i] = x[i] + y[i];
+    }
+}
 
-    if ((((uintptr_t)z | (uintptr_t)x | (uintptr_t)y) % ALIGN_128_BYTE) != 0) {
-        GGMLHEXAGON_LOG_DEBUG("memaddress mismatch alignment 128 bytes z:%p x:%p y:%p", z, x, y);
-        for (size_t i = 0; i < n; ++i)
-            z[i] = x[i] + y[i];
+static inline uint32_t fp32_to_bits(float f) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_value = f;
+    return fp32.as_bits;
+}
 
-        return;
+static inline float fp32_from_bits(uint32_t w) {
+    union {
+        float as_value;
+        uint32_t as_bits;
+    } fp32;
+    fp32.as_bits = w;
+    return fp32.as_value;
+}
+
+static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
+    const uint32_t w = (uint32_t)h << 16;
+    const uint32_t sign = w & 0x80000000U;
+    const uint32_t two_w = w + w;
+
+    const uint32_t exp_offset = 0xE0U << 23;
+    const float exp_scale = fp32_from_bits(0x7800000U);
+    const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
+
+    const uint32_t magic_mask = 126U << 23;
+    const float magic_bias = 0.5f;
+    const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
+
+    const uint32_t denormalized_cutoff = 1U << 27;
+    const uint32_t result = sign |
+        (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
+    return fp32_from_bits(result);
+}
+
+static inline uint16_t ggml_compute_fp32_to_fp16(float f) {
+    const float scale_to_inf = fp32_from_bits(0x77800000U);
+    const float scale_to_zero = fp32_from_bits(0x08800000U);
+    float base = (fabsf(f) * scale_to_inf) * scale_to_zero;
+
+    const uint32_t w = fp32_to_bits(f);
+    const uint32_t shl1_w = w + w;
+    const uint32_t sign = w & 0x80000000U;
+    uint32_t bias = shl1_w & 0xFF000000U;
+    if (bias < 0x71000000U) {
+        bias = 0x71000000U;
     }
 
-    va = (HVX_Vector *)x;
-    vb = (HVX_Vector *)y;
-    vc = (HVX_Vector *)z;
-    //unroll is better but need more carefully check for various cases and I think DSP also don't like branch predication
-    for (size_t i = 0; i < block; ++i) {
-        l2fetch(va + VLEN, VLEN, VLEN, 1, 0);
-        l2fetch(vb + VLEN, VLEN, VLEN, 1, 0);
-        //*vc++ = Q6_Vsf_vadd_VsfVsf(*va++, *vb++);
-        qf32 = Q6_Vqf32_vadd_VsfVsf(*va++, *vb++);
-        *vc++ = Q6_Vsf_equals_Vqf32(qf32);
-    }
-
-    if (left > 0) {
-        for (size_t i = 0; i < left; ++i)
-            z[i + blocks] = x[i + blocks] + y[i + blocks];
-    }
+    base = fp32_from_bits((bias >> 1) + 0x07800000U) + base;
+    const uint32_t bits = fp32_to_bits(base);
+    const uint32_t exp_bits = (bits >> 13) & 0x00007C00U;
+    const uint32_t mantissa_bits = bits & 0x00000FFFU;
+    const uint32_t nonsign = exp_bits + mantissa_bits;
+    return (sign >> 16) | (shl1_w > 0xFF000000U ? 0x7E00U : nonsign);
 }
 
 static void ggml_compute_forward_add_f32(
@@ -50,78 +78,30 @@ static void ggml_compute_forward_add_f32(
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
     uint64_t start_time = ggml_time_us();
 
-    memcpy(dst->ne, src1->ne, 16);
-    memcpy(dst->nb, src1->nb, 16);
-    dst->type = src1->type;
     ggmlhexagon_dump_tensor(src0, 1);
     ggmlhexagon_dump_tensor(src1, 1);
     ggmlhexagon_dump_tensor(dst, 1);
 
-    GGML_ASSERT(ggml_can_repeat(src1, src0) && ggml_are_same_shape(src0, dst));
+    const int n = ggml_nelements(src0);
 
-    const int rank = ggml_n_dims(src0);
-    if (1 == rank) {
-        //element-wise addition with vector
-        const size_t len = src0->ne[0];
-        float * dst_ptr  = (float *) (dst->data);
-        float * src0_ptr = (float *) (src0->data);
-        float * src1_ptr = (float *) (src1->data);
-        ggmlhexagon_dsp_add_f32(len, dst_ptr, src0_ptr, src1_ptr);
-        return;
-    }
+    if (src0->type == GGML_TYPE_F16) {
+        uint16_t * dst_ptr  = (uint16_t *)dst->data;
+        uint16_t * src0_ptr = (uint16_t *)src0->data;
+        uint16_t * src1_ptr = (uint16_t *)src1->data;
 
-    const int ith = 0;
-    const int nth = 1;
-
-    const int nr  = ggml_nrows(src0);
-    GGML_TENSOR_BINARY_OP_LOCALS
-
-    GGML_ASSERT( nb0 == sizeof(float));
-    GGML_ASSERT(nb00 == sizeof(float));
-
-    const int dr = (nr + nth - 1)/nth;
-    const int ir0 = dr*ith;
-    const int ir1 = MIN(ir0 + dr, nr);
-    if (nb10 == sizeof(float)) {
-        for (int ir = ir0; ir < ir1; ++ir) {
-            // src1 is broadcastable across src0 and dst in i1, i2, i3
-            const int32_t i03 = ir/(ne02*ne01);
-            const int32_t i02 = (ir - i03*ne02*ne01)/ne01;
-            const int32_t i01 = (ir - i03*ne02*ne01 - i02*ne01);
-
-            const int32_t i13 = i03 % ne13;
-            const int32_t i12 = i02 % ne12;
-            const int32_t i11 = i01 % ne11;
-            const int32_t nr0 = ne00 / ne10;
-
-            float * dst_ptr  = (float *) ((char *) dst->data  + i03*nb3  + i02*nb2  + i01*nb1 );
-            float * src0_ptr = (float *) ((char *) src0->data + i03*nb03 + i02*nb02 + i01*nb01);
-            float * src1_ptr = (float *) ((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11);
-            for (int32_t r = 0; r < nr0; ++r) {
-                ggmlhexagon_dsp_add_f32(ne10, dst_ptr + r*ne10, src0_ptr + r*ne10, src1_ptr);
-            }
+        for (int i = 0; i < n; ++i) {
+            float f0 = ggml_compute_fp16_to_fp32(src0_ptr[i]);
+            float f1 = ggml_compute_fp16_to_fp32(src1_ptr[i]);
+            float f_result = f0 + f1;
+            dst_ptr[i] = ggml_compute_fp32_to_fp16(f_result);
         }
     } else {
-        // src1 is not contiguous
-        for (int ir = ir0; ir < ir1; ++ir) {
-            // src1 is broadcastable across src0 and dst in i1, i2, i3
-            const int32_t i03 = ir/(ne02*ne01);
-            const int32_t i02 = (ir - i03*ne02*ne01)/ne01;
-            const int32_t i01 = (ir - i03*ne02*ne01 - i02*ne01);
+        float * dst_ptr  = (float *)dst->data;
+        float * src0_ptr = (float *)src0->data;
+        float * src1_ptr = (float *)src1->data;
 
-            const int32_t i13 = i03 % ne13;
-            const int32_t i12 = i02 % ne12;
-            const int32_t i11 = i01 % ne11;
-
-            float * dst_ptr  = (float *) ((char *) dst->data  + i03*nb3  + i02*nb2  + i01*nb1 );
-            float * src0_ptr = (float *) ((char *) src0->data + i03*nb03 + i02*nb02 + i01*nb01);
-
-            for (int32_t i0 = 0; i0 < ne0; ++i0) {
-                const int32_t i10 = i0 % ne10;
-                float * src1_ptr = (float *) ((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11 + i10*nb10);
-
-                dst_ptr[i0] = src0_ptr[i0] + *src1_ptr;
-            }
+        for (int i = 0; i < n; ++i) {
+            dst_ptr[i] = src0_ptr[i] + src1_ptr[i];
         }
     }
 
