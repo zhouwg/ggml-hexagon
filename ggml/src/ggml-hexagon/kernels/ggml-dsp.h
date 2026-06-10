@@ -177,6 +177,7 @@ GGML_API int64_t ggml_time_us(void);
 
 GGML_API size_t ggml_nbytes(const struct ggml_tensor * tensor);
 GGML_API int64_t ggml_nrows(const struct ggml_tensor * tensor);
+GGML_API int64_t ggml_nelements(const struct ggml_tensor * tensor);
 GGML_API int ggml_n_dims(const struct ggml_tensor * tensor);
 GGML_API bool ggml_is_contiguous(const struct ggml_tensor * tensor);
 GGML_API void ggml_abort(const char * file, int line, const char * fmt, ...);

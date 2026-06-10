@@ -47,6 +47,8 @@ extern "C"
 void worker_pool_constructor(void) __attribute__((constructor));
 void worker_pool_destructor(void) __attribute__((destructor));
 
+int ggmlop_get_thread_counts(void);
+
 #ifdef __cplusplus
 }
 #endif
@@ -163,6 +165,9 @@ void worker_pool_constructor()
         num_workers = MAX_NUM_WORKERS;
         FARF(HIGH, "Limiting number of threads to maximum supported value %u", num_workers);
     }
+
+    //enable user's specified thread_counts in ggml-hexagon.cfg
+    num_workers = ggmlop_get_thread_counts();
 
     num_hvx128_contexts = (qurt_hvx_get_units() >> 8) & 0xFF;
 
