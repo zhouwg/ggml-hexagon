@@ -617,6 +617,7 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 ```
 $ git checkout self-build-jz
 $ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_testops
 $ ./scripts/build-run-android.sh run_llamabench 3
 
 ```
@@ -632,6 +633,7 @@ the following screenshot is created on 2026-06-02 in branch self-build-jz and <b
 ```
 $ git checkout self-build
 $ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_testops
 $ ./scripts/build-run-android.sh run_llamabench
 
 ```
