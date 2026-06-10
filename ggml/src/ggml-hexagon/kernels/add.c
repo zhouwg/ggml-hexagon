@@ -13,44 +13,6 @@ static inline void ggmlhexagon_dsp_add_f32(const int n, float * GGML_RESTRICT z,
     }
 }
 
-static inline uint32_t fp32_to_bits(float f) {
-    union {
-        float as_value;
-        uint32_t as_bits;
-    } fp32;
-    fp32.as_value = f;
-    return fp32.as_bits;
-}
-
-static inline float fp32_from_bits(uint32_t w) {
-    union {
-        float as_value;
-        uint32_t as_bits;
-    } fp32;
-    fp32.as_bits = w;
-    return fp32.as_value;
-}
-
-static inline float ggml_compute_fp16_to_fp32(uint16_t h) {
-    const uint32_t w = (uint32_t)h << 16;
-    const uint32_t sign = w & 0x80000000U;
-    const uint32_t two_w = w + w;
-
-    const uint32_t exp_offset = 0xE0U << 23;
-    const float exp_scale = fp32_from_bits(0x7800000U);
-    const float normalized_value = fp32_from_bits((two_w >> 4) + exp_offset) * exp_scale;
-
-    const uint32_t magic_mask = 126U << 23;
-    const float magic_bias = 0.5f;
-    const float denormalized_value = fp32_from_bits((two_w >> 17) | magic_mask) - magic_bias;
-
-    const uint32_t denormalized_cutoff = 1U << 27;
-    const uint32_t result = sign |
-        (two_w < denormalized_cutoff ? fp32_to_bits(denormalized_value) : fp32_to_bits(normalized_value));
-    return fp32_from_bits(result);
-}
-
-
 
 static void ggml_compute_forward_add_f32(
         const struct ggml_tensor * src0,

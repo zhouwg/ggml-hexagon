@@ -190,6 +190,7 @@ GGML_API void ggmlhexagon_log_internal(int level, const char *file, const char *
 GGML_API int ggmlop_get_thread_counts(void);
 GGML_API void * ggmlop_get_work_data(size_t size);
 GGML_API uint16_t ggml_compute_fp32_to_fp16(float f);
+GGML_API float ggml_compute_fp16_to_fp32(uint16_t h);
 
 static inline int ggml_blck_size(enum ggml_type type) {
     switch (type) {
