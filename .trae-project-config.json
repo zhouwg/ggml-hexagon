@@ -12,12 +12,12 @@
     "run_llamabench": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamabench 3"
   },
   "commands": {
-    "verify_build": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build\"",
-    "run_ut": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testops\"",
-    "run_testop_add": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD\"",
-    "run_testop_mulmat": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop MUL_MAT\"",
-    "run_llamacli": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3\"",
-    "run_llamabench": "ssh zhouwg@192.168.0.200 \"cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamabench 3\""
+    "verify_build": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build",
+    "run_ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testops",
+    "run_testop_add": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD",
+    "run_testop_mulmat": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop MUL_MAT",
+    "run_llamacli": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3",
+    "run_llamabench": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamabench 3"
   },
   "hexagon_backend_cdsp_index": 3,
   "build_rules": {
@@ -43,11 +43,9 @@
     "reason": "These files are symbolic links. Modify the target file instead."
   },
   "notes": {
-    "build_on": "remote server 192.168.0.200",
-    "user": "zhouwg",
+    "execution_mode": "local (no ssh needed - project is on local filesystem)",
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
-    "workdir_remote": "/home/zhouwg/develop/ggml-hexagon",
-    "phone_connected_on": "remote host 192.168.0.200 (adb connects to the Android phone there)",
+    "phone_connected_locally": "adb connects to the Android phone locally",
     "default_verify_target": "source-built libggmldsp-skel.so (scripts/build-run-android.sh line 671: prepare_ggmldsp enabled)",
     "compare_with_prebuilt": "To compare against prebuilt binary, comment out line 671 (prepare_ggmldsp) and enable line 668 (prepare_ggmldsp_prebuilt) in scripts/build-run-android.sh"
   },
@@ -74,9 +72,7 @@
   "cdsp_data_path_notes": {
     "idl_usage": "ggml/src/ggml-hexagon/kernels/ggmlop.idl is NOT actively used. The real artifacts are the customized skel.c, stub.c and skel.h generated/tailored from that IDL.",
     "shared_memory_model": "ARM-AP side and cDSP side share data via ion shared memory buffer. DSP writes results directly into the shared buffer, so NO memcpy back-copy is needed on the AP side after op_func returns.",
-    "ap_side_data_path_status": "ARM-AP side code path in ggml-hexagon.cpp is known good - it works correctly with the prebuilt libggmldsp-skel.so for both testops and inference.",
-    "dsptensor_field_order": "The order of fields in struct dsptensor (defined in kernels/skel.h) MUST match the pack/unpack layout hard-coded in kernels/stub.c and kernels/skel.c. Expected layout at uint32 level: offset 0=type, 1-4=ne, 5-8=nb, 9=op, 10-25=op_params, 26=flags, 27=data_len, 28=data (pointer).",
-    "data_len_semantics": "data_len must be the number of ELEMENTS (not bytes). The stub code sets buffer length as nLen = 4 * data_len, so for a float tensor of N elements, data_len = N (not 4*N). Use ggml_nelements(tensor) / ggml_blck_size(tensor->type)."
+    "ap_side_data_path_status": "ARM-AP side code path in ggml-hexagon.cpp is known good - it works correctly with the prebuilt libggmldsp-skel.so for both testops and inference."
   },
   "testing_rules": {
     "description": "Test commands for different test types. All tests should be run remotely on 192.168.0.200, especially when the project is on CIFS filesystem.",
@@ -85,5 +81,198 @@
     "inference_test": "./scripts/build-run-android.sh run_llamacli 3",
     "benchmark_test": "./scripts/build-run-android.sh run_llamabench 3",
     "note": "All tests must be executed remotely on the remote build host (192.168.0.200). Do NOT run tests locally, especially when the project is on a CIFS file system."
+  },
+  "log_viewing_rules": {
+    "description": "How to view logs (execute locally on this machine)",
+    "ut_program_log": {
+      "description": "View ggml-hexagon ARM-AP side log",
+      "command": "adb logcat | grep ggml-hexagon",
+      "note": "Use this to debug UT program issues, test failures, and ARM-AP side errors"
+    },
+    "dsp_log": {
+      "description": "View cDSP (Hexagon DSP) side log",
+      "command": "adb logcat | grep CDSP0",
+      "note": "Use this to debug DSP-side issues, including DSP crashes, memory issues, and HMX/HVX instruction errors"
+    },
+    "workflow": "After running a test, always check the relevant log to understand what happened. If UT fails, check ut_program_log first. If DSP crashes or produces incorrect results, check dsp_log."
+  },
+  "mulmat_performance_comparison": {
+    "title": "MUL_MAT Single-thread vs Multi-thread Performance Comparison",
+    "description": "Used to compare performance differences of MUL_MAT operation between single-thread and multi-thread modes",
+    "configuration_file": "scripts/ggml-hexagon.cfg",
+    "thread_counts_setting": "thread_counts",
+    "steps": [
+      {
+        "step": 1,
+        "description": "Set single-thread mode",
+        "action": "Modify thread_counts = 1 in scripts/ggml-hexagon.cfg"
+      },
+      {
+        "step": 2,
+        "description": "Clear logs",
+        "action": "Run command: adb logcat -c"
+      },
+      {
+        "step": 3,
+        "description": "Run MUL_MAT test",
+        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
+      },
+      {
+        "step": 4,
+        "description": "Capture single-thread test logs",
+        "action": "Run command: adb logcat | grep ggml-hexagon > /tmp/single_thread_mulmat.log"
+      },
+      {
+        "step": 5,
+        "description": "Set multi-thread mode",
+        "action": "Modify thread_counts = 6 in scripts/ggml-hexagon.cfg"
+      },
+      {
+        "step": 6,
+        "description": "Clear logs",
+        "action": "Run command: adb logcat -c"
+      },
+      {
+        "step": 7,
+        "description": "Run MUL_MAT test",
+        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
+      },
+      {
+        "step": 8,
+        "description": "Capture multi-thread test logs",
+        "action": "Run command: adb logcat | grep ggml-hexagon > /tmp/multi_thread_mulmat.log"
+      },
+      {
+        "step": 9,
+        "description": "Analyze results",
+        "action": "Compare the time differences of 'inference duration of MUL_MAT' between the two tests"
+      }
+    ],
+    "expected_results": {
+      "small_matrix": "256x256 matrix: expected speedup ~2.0-2.5x",
+      "medium_matrix": "1024x1024 matrix: expected speedup ~1.5-2.0x",
+      "large_matrix": "4096x4096 matrix: expected speedup ~1.2-1.5x",
+      "note": "Speedup decreases with matrix size, mainly limited by DSP's VTCM memory bandwidth"
+    },
+    "performance_trend": {
+      "best_case": "Medium-sized matrices (600x600, 900x900) achieve best speedup (~2.3x)",
+      "medium_case": "Small matrices (<1024) achieve good speedup (1.7-2.3x)",
+      "limited_case": "Large matrices (>2048) have reduced speedup (1.2-1.5x), limited by memory bandwidth"
+    },
+    "reminder": "All commands must be executed on remote host 192.168.0.200"
+  },
+  "vec_dot_f32_hvx_performance_comparison": {
+    "title": "vec_dot_f32_hvx_ai vs vec_dot_f32_hvx_me Performance Comparison",
+    "description": "Used to compare performance differences between two HVX dot product implementations",
+    "source_file": "ggml/src/ggml-hexagon/kernels/mulmat.c",
+    "steps": [
+      {
+        "step": 1,
+        "description": "Enable vec_dot_f32_hvx_ai",
+        "action": "Modify mulmat.c line 251-255: uncomment vec_dot_f32_hvx_ai, comment vec_dot_f32_hvx_me"
+      },
+      {
+        "step": 2,
+        "description": "Build project",
+        "action": "Run command: ./scripts/build-run-android.sh build"
+      },
+      {
+        "step": 3,
+        "description": "Clear logs",
+        "action": "Run command: adb logcat -c"
+      },
+      {
+        "step": 4,
+        "description": "Run MUL_MAT test",
+        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
+      },
+      {
+        "step": 5,
+        "description": "Capture ai version logs",
+        "action": "Run command: adb logcat -d | grep 'inference duration.*MUL_MAT' | grep -E 'f32_[0-9]+x[0-9]+f32_[0-9]+x[0-9]+f32' > /tmp/vec_dot_ai.log"
+      },
+      {
+        "step": 6,
+        "description": "Enable vec_dot_f32_hvx_me",
+        "action": "Modify mulmat.c line 251-255: comment vec_dot_f32_hvx_ai, uncomment vec_dot_f32_hvx_me"
+      },
+      {
+        "step": 7,
+        "description": "Build project",
+        "action": "Run command: ./scripts/build-run-android.sh build"
+      },
+      {
+        "step": 8,
+        "description": "Clear logs",
+        "action": "Run command: adb logcat -c"
+      },
+      {
+        "step": 9,
+        "description": "Run MUL_MAT test",
+        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
+      },
+      {
+        "step": 10,
+        "description": "Capture me version logs",
+        "action": "Run command: adb logcat -d | grep 'inference duration.*MUL_MAT' | grep -E 'f32_[0-9]+x[0-9]+f32_[0-9]+x[0-9]+f32' > /tmp/vec_dot_me.log"
+      },
+      {
+        "step": 11,
+        "description": "Analyze results",
+        "action": "Compare the time differences between the two implementations"
+      }
+    ],
+    "performance_summary": {
+      "ai_version_faster": "vec_dot_f32_hvx_ai is significantly faster in most cases",
+      "large_matrix_speedup": "Up to 49% faster for 4096x4096 matrices",
+      "small_matrix_speedup": "Up to 37% faster for small matrices",
+      "recommendation": "Use vec_dot_f32_hvx_ai for better performance"
+    }
+  },
+  "mulmat_vtcm_hmx_performance_comparison": {
+    "title": "MUL_MAT VTCM+HMX Performance Comparison",
+    "description": "Used to compare performance differences of MUL_MAT operation between different algorithm types: 0=auto, 32=VTCM+HMX, 33=VTCM multithread",
+    "source_file": "ggml/src/ggml-hexagon/kernels/mulmat.c",
+    "algotype_values": {
+      "0": "Auto mode (default)",
+      "32": "VTCM+HMX mode",
+      "33": "VTCM multithread mode"
+    },
+    "steps": [
+      {
+        "step": 1,
+        "description": "Run MUL_MAT test with algorithm type 0 (auto)",
+        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 0 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo0.log"
+      },
+      {
+        "step": 2,
+        "description": "Run MUL_MAT test with algorithm type 32 (VTCM+HMX)",
+        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 32 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo32.log"
+      },
+      {
+        "step": 3,
+        "description": "Run MUL_MAT test with algorithm type 33 (VTCM multithread)",
+        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 33 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo33.log"
+      },
+      {
+        "step": 4,
+        "description": "Generate performance report",
+        "action": "Compare the inference duration data from all three logs and generate performance comparison report"
+      }
+    ],
+    "expected_results": {
+      "f32_matrix": "FP32 matrix multiplication: expected speedup ~10-15% with VTCM+HMX",
+      "f16_weight": "FP16 weight matrices: expected speedup ~15-45% with VTCM+HMX",
+      "q4_0_weight": "Q4_0 quantized weights: expected speedup ~15-70% with VTCM+HMX",
+      "q8_0_weight": "Q8_0 quantized weights: expected speedup ~15-75% with VTCM+HMX",
+      "note": "Quantized weights achieve best speedup due to efficient dequantization in VTCM"
+    },
+    "performance_trend": {
+      "best_case": "Quantized weights (Q4_0, Q8_0) achieve best speedup (~70-75%)",
+      "medium_case": "FP16 weights achieve good speedup (15-45%)",
+      "limited_case": "FP32 matrices have moderate speedup (10-15%)",
+      "vtcm_limit": "Very large matrices (>4096) may fall back due to VTCM memory constraints"
+    },
+    "reminder": "All commands must be executed on the local development machine with Android phone connected via adb"
   }
 }

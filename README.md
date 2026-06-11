@@ -600,3 +600,42 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
 - [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+
+
+## Branches
+
+- master
+  https://github.com/zhouwg/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
+- self-build
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
+- self-build-jz
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends. the implementation of the prebuilt libggmldsp-skel.so is complicated&dirty, so the open-source code of libggmldsp-skel.so can be found in this branch.
+
+
+## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
+
+```
+$ git checkout self-build-jz
+$ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_testops
+$ ./scripts/build-run-android.sh run_llamabench 3
+
+```
+the following screenshot is created on 2026-06-02 in branch self-build-jz and <b>can be reproduced</b> in branch self-build-jz-backup-20260607-before-merge-master.the following screenshot can't be reproduced in branch self-build-jz because branch self-build-jz is under active development.
+
+<img width="1879" height="285" alt="Screenshot from 2026-06-02 22-07-53" src="https://github.com/user-attachments/assets/a65ba531-b740-4348-af51-ab91b7cef1a2" />
+
+
+## How to build the official ggml-hexagon backend for Snapdragon-based Android device
+
+[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/zhouwg/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I don't think it's a straight way, the simple way in this llama.cpp-derived project:
+
+```
+$ git checkout self-build
+$ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-android.sh run_testops
+$ ./scripts/build-run-android.sh run_llamabench
+
+```
+
+<img width="1879" height="593" alt="Screenshot from 2026-06-02 22-25-57" src="https://github.com/user-attachments/assets/3c6550c1-3d3a-448a-912b-dd399d7c2808" />

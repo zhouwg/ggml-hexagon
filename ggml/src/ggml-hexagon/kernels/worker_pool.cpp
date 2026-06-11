@@ -166,9 +166,6 @@ void worker_pool_constructor()
         FARF(HIGH, "Limiting number of threads to maximum supported value %u", num_workers);
     }
 
-    //enable user's specified thread_counts in ggml-hexagon.cfg
-    num_workers = ggmlop_get_thread_counts();
-
     num_hvx128_contexts = (qurt_hvx_get_units() >> 8) & 0xFF;
 
     /* initialize static worker_pool for clients who pass NULL as context.*/
@@ -367,6 +364,40 @@ void worker_pool_destructor()
     FARF(HIGH, "In worker_pool destructor");
 
     worker_pool_deinit(&static_context);
+}
+
+AEEResult worker_pool_reinit_with_threads(unsigned int new_num_workers)
+{
+    FARF(HIGH, "Reinitializing worker pool with %u workers", new_num_workers);
+
+    if (new_num_workers == num_workers) {
+        FARF(HIGH, "Worker count unchanged, skipping reinit");
+        return AEE_SUCCESS;
+    }
+
+    if (new_num_workers < 1) {
+        FARF(ERROR, "Invalid worker count %u", new_num_workers);
+        return AEE_EBADPARM;
+    }
+
+    if (new_num_workers > MAX_NUM_WORKERS) {
+        FARF(HIGH, "Limiting worker count to MAX_NUM_WORKERS %u", MAX_NUM_WORKERS);
+        new_num_workers = MAX_NUM_WORKERS;
+    }
+
+    if (static_context != NULL) {
+        worker_pool_deinit(&static_context);
+    }
+
+    num_workers = new_num_workers;
+
+    if (worker_pool_init(&static_context) != AEE_SUCCESS) {
+        FARF(ERROR, "Could not reinitialize worker pool");
+        return AEE_EFAILED;
+    }
+
+    FARF(HIGH, "Worker pool reinitialized with %u workers", num_workers);
+    return AEE_SUCCESS;
 }
 
 /*===========================================================================

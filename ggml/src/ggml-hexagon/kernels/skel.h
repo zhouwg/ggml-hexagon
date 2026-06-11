@@ -1,7 +1,5 @@
-#ifndef _SKEL_H
-#define _SKEL_H
-//qidl copyright
-//qidl nested=false
+#ifndef _GGMLOP_H
+#define _GGMLOP_H
 #include <AEEStdDef.h>
 #include <remote.h>
 #include <string.h>
@@ -180,7 +178,14 @@ static __inline void _qaic_memmove(void* dst, void* src, int size) {
 #ifdef _WIN32
 #define _QAIC_FARF(level, msg, ...) (void)0
 #else
-#define _QAIC_FARF(level, msg, ...) (void)0
+#define _QAIC_FARF(level, msg, ...) \
+   do {\
+      if(0 == (HAP_debug_v2) ) {\
+         (void)0; \
+      } else { \
+         FARF(level, msg , ##__VA_ARGS__); \
+      } \
+   }while(0)
 #endif //_WIN32 for _QAIC_FARF
 
 #define _TRY(ee, func) \
@@ -227,9 +232,6 @@ typedef struct _cstring1_s {
 } _cstring1_t;
 
 #endif /* __QAIC_STRING1_OBJECT_DEFINED__ */
-/// Enabling stub-skel mismatch check feature in the auto-gen files.
-/// Please refer to the IDL documentation for more details on the feature.
-/// It is fully supported only on Kailua and later targets.
 #define IDL_VERSION "0.0.1"
 typedef struct dsptensor dsptensor;
 struct dsptensor {
@@ -239,7 +241,7 @@ struct dsptensor {
    int32_t op;
    int32_t op_params[16];
    int32_t flags;
-   void * data;
+   void* data;
    int data_len;
 };
 /**
@@ -264,7 +266,7 @@ struct dsptensor {
     * @retval, 0 on success
     */
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_open)(const char* uri, remote_handle64* h) __QAIC_HEADER_ATTRIBUTE;
-/**
+/** 
     * Closes a handle.  If this is the last handle to close, the session
     * is closed as well, releasing all the allocated resources.
 
@@ -275,11 +277,11 @@ __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_close)(remote_handle64 h) __QA
 __QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_setclocks)(remote_handle64 _h, int32 power_level, int32 latency, int32 mulmat_algotype, int32 thread_counts) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_add)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_mulmat)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_softmax)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_rmsnorm)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_pool2d)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-
+__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_execute_task)(remote_handle64 _h, int32 ggml_op_type, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
+#ifndef ggmlop_URI
+#define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"
+#endif /*ggmlop_URI*/
 #ifdef __cplusplus
 }
 #endif
-#endif //_SKEL_H
+#endif //_GGMLOP_H

@@ -1,5 +1,5 @@
-//qidl copyright
-//qidl nested=false
+#ifndef _GGMLOP_SKEL_H
+#define _GGMLOP_SKEL_H
 #include "skel.h"
 
 #include <string.h>
@@ -277,20 +277,20 @@ static const Type* const typeArrays[7] = {&(types[0]),&(types[1]),&(types[1]),&(
 static const StructType structTypes[1] = {{0x7,&(typeArrays[0]),0x70,0x4,0x6c,0x4,0x4,0x4}};
 static const Type types[5] = {{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{0x10,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x4}}, 8,0x4},{0x40,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x10}}, 8,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[4]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4}};
 static const Parameter parameters[6] = {{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)0x0,0}}, 4,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),3,0}};
-static const Parameter* const parameterArrays[9] = {(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[0])),(&(parameters[1])),(&(parameters[2]))};
-static const Method methods[4] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[7])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[9])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,4,(&(parameterArrays[0])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[4])),0x4,0x4}};
-static const Method* const methodArrays[5] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3])};
-static const char strings[145] = "mulmat_algotype\0thread_counts\0dsp_setclocks\0power_level\0dsp_mulmat\0op_params\0dsp_add\0latency\0flags\0close\0src1\0data\0src0\0open\0dst\0uri\0op\0nb\0ne\0h\0";
-static const uint16_t methodStrings[60] = {56,115,11,139,136,133,67,93,110,105,11,139,136,133,67,93,110,125,11,139,136,133,67,93,110,77,115,11,139,136,133,67,93,110,105,11,139,136,133,67,93,110,125,11,139,136,133,67,93,110,30,44,85,0,16,120,129,142,99,142};
-static const uint16_t methodStringsArrays[5] = {55,58,50,25,0};
-__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {8,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
+static const Parameter* const parameterArrays[11] = {(&(parameters[3])),(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[0])),(&(parameters[1])),(&(parameters[2]))};
+static const Method methods[5] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[8])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[10])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,4,(&(parameterArrays[4])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[1])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe8,0x6c,4,4,(&(parameterArrays[0])),0x4,0x4}};
+static const Method* const methodArrays[6] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3]),&(methods[4])};
+static const char strings[175] = "dsp_execute_task\0mulmat_algotype\0thread_counts\0dsp_setclocks\0ggml_op_type\0power_level\0dsp_mulmat\0op_params\0dsp_add\0latency\0flags\0close\0src1\0data\0src0\0open\0dst\0uri\0op\0nb\0ne\0h\0";
+static const uint16_t methodStrings[86] = {0,61,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,86,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,107,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,47,74,115,17,33,150,159,172,129,172};
+static const uint16_t methodStringsArrays[6] = {81,84,76,51,26,0};
+__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {6,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
 #endif //_GGMLOP_SLIM_H
 extern int adsp_mmap_fd_getinfo(int, uint32_t *);
 #ifdef __cplusplus
 extern "C" {
 #endif
-_ATTRIBUTE_VISIBILITY uint32_t ggmldsp_skel_handle_invoke_qaic_version = 10048;
-_ATTRIBUTE_VISIBILITY char ggmldsp_skel_handle_invoke_uri[79+1]="file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1";
+_ATTRIBUTE_VISIBILITY uint32_t ggmlop_skel_handle_invoke_qaic_version = 10048;
+_ATTRIBUTE_VISIBILITY char ggmldsp_skel_handle_invoke_uri[77+1]="file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1";
 static __inline int _skel_pack(_ATTRIBUTE_UNUSED remote_arg* _praROutPost, _ATTRIBUTE_UNUSED remote_arg* _ppraROutPost[1], _ATTRIBUTE_UNUSED void* _primROut, _ATTRIBUTE_UNUSED uint32_t _rout0[1], _ATTRIBUTE_UNUSED uint32_t _rout1[4], _ATTRIBUTE_UNUSED uint32_t _rout2[4], _ATTRIBUTE_UNUSED uint32_t _rout3[1], _ATTRIBUTE_UNUSED uint32_t _rout4[16], _ATTRIBUTE_UNUSED uint32_t _rout5[1], _ATTRIBUTE_UNUSED char* _rout6[1], _ATTRIBUTE_UNUSED uint32_t _rout6Len[1]) {
    int _nErr = 0;
    remote_arg* _praROutPostStart = _praROutPost;
@@ -343,7 +343,63 @@ static __inline int _skel_unpack_1(_ATTRIBUTE_UNUSED _allocator* _al, _ATTRIBUTE
    _QAIC_CATCH(_nErr) {}
    return _nErr;
 }
-static __inline int _skel_method(int (*_pfn)(remote_handle64, const dsptensor*, const dsptensor*, dsptensor*), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
+static __inline int _skel_method(int (*_pfn)(remote_handle64, int32, const dsptensor*, const dsptensor*, dsptensor*), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
+   remote_arg* _praEnd = 0;
+   uint32_t _in0[1] = {0};
+   uintptr_t _in1[SLIM_IFPTR32(29, 16)] = {0};
+   uintptr_t _in2[SLIM_IFPTR32(29, 16)] = {0};
+   uintptr_t _rout3[SLIM_IFPTR32(29, 16)] = {0};
+   uint32_t* _primIn= 0;
+   int _numIn[1] = {0};
+   uint32_t* _primROut= 0;
+   int _numInH[1] = {0};
+   int _numROut[1] = {0};
+   remote_arg* _praIn = 0;
+   remote_arg* _praROut = 0;
+   remote_arg* _praROutPost = 0;
+   remote_arg** _ppraROutPost = &_praROutPost;
+   _allocator _al[1] = {{0}};
+   remote_arg** _ppraIn = &_praIn;
+   remote_arg** _ppraROut = &_praROut;
+   remote_arg* _praHIn = 0;
+   remote_arg** _ppraHIn = &_praHIn;
+   remote_arg* _praHROut = 0;
+   remote_arg** _ppraHROut = &_praHROut;
+   int _nErr = 0;
+   _praEnd = ((_pra + REMOTE_SCALARS_INBUFS(_sc)) + REMOTE_SCALARS_OUTBUFS(_sc) + REMOTE_SCALARS_INHANDLES(_sc) + REMOTE_SCALARS_OUTHANDLES(_sc));
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INBUFS(_sc)>=1);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTBUFS(_sc)>=1);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, (_pra + ((1 + 1) + (((0 + 0) + 0) + 0))) <= _praEnd);
+   _numIn[0] = (REMOTE_SCALARS_INBUFS(_sc) - 1);
+   _QAIC_ASSERT(_nErr, _pra[0].buf.nLen >= 232);
+   _primIn = _pra[0].buf.pv;
+   _QAIC_ASSERT(_nErr, _pra[(_numIn[0] + 1)].buf.nLen >= 108);
+   _primROut = _pra[(_numIn[0] + 1)].buf.pv;
+   _numInH[0] = REMOTE_SCALARS_INHANDLES(_sc);
+   _numROut[0] = REMOTE_SCALARS_OUTBUFS(_sc);
+   _praIn = (_pra + 1);
+   _praROut = (_praIn + _numIn[0] + 1);
+   _praROutPost = _praROut;
+   _COPY(_in0, 0, _primIn, 0, 4);
+   _allocator_init(_al, 0, 0);
+   if(_praHIn == 0)
+   {
+      _praHIn = ((_praROut + _numROut[0]) + 1);
+   }
+   if(_praHROut == 0)
+      (_praHROut = _praHIn + _numInH[0] + 0);
+   _TRY(_nErr, _skel_unpack_1(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 4), 0, (uint32_t*)&(((uint32_t*)_in1)[0]), (uint32_t*)&(((uint32_t*)_in1)[1]), (uint32_t*)&(((uint32_t*)_in1)[5]), (uint32_t*)&(((uint32_t*)_in1)[9]), (uint32_t*)&(((uint32_t*)_in1)[10]), (uint32_t*)&(((uint32_t*)_in1)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in1)[27]), (char**)&(((uint64_t*)_in1)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in1)[28]), (uint32_t*)&(((uint32_t*)_in1)[30]))));
+   _TRY(_nErr, _skel_unpack_1(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 116), 0, (uint32_t*)&(((uint32_t*)_in2)[0]), (uint32_t*)&(((uint32_t*)_in2)[1]), (uint32_t*)&(((uint32_t*)_in2)[5]), (uint32_t*)&(((uint32_t*)_in2)[9]), (uint32_t*)&(((uint32_t*)_in2)[10]), (uint32_t*)&(((uint32_t*)_in2)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in2)[27]), (char**)&(((uint64_t*)_in2)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in2)[28]), (uint32_t*)&(((uint32_t*)_in2)[30]))));
+   _TRY(_nErr, _skel_unpack(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 228), ((char*)_primROut + 0), (uint32_t*)&(((uint32_t*)_rout3)[0]), (uint32_t*)&(((uint32_t*)_rout3)[1]), (uint32_t*)&(((uint32_t*)_rout3)[5]), (uint32_t*)&(((uint32_t*)_rout3)[9]), (uint32_t*)&(((uint32_t*)_rout3)[10]), (uint32_t*)&(((uint32_t*)_rout3)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout3)[27]), (char**)&(((uint64_t*)_rout3)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout3)[28]), (uint32_t*)&(((uint32_t*)_rout3)[30]))));
+   _TRY(_nErr, _pfn(_h, (int32)*_in0, (const dsptensor*)_in1, (const dsptensor*)_in2, (dsptensor*)_rout3));
+   _TRY(_nErr, _skel_pack((_praROutPost + 0), _ppraROutPost, ((char*)_primROut + 0), (uint32_t*)&(((uint32_t*)_rout3)[0]), (uint32_t*)&(((uint32_t*)_rout3)[1]), (uint32_t*)&(((uint32_t*)_rout3)[5]), (uint32_t*)&(((uint32_t*)_rout3)[9]), (uint32_t*)&(((uint32_t*)_rout3)[10]), (uint32_t*)&(((uint32_t*)_rout3)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout3)[27]), (char**)&(((uint64_t*)_rout3)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout3)[28]), (uint32_t*)&(((uint32_t*)_rout3)[30]))));
+   _QAIC_CATCH(_nErr) {}
+   _allocator_deinit(_al);
+   return _nErr;
+}
+static __inline int _skel_method_1(int (*_pfn)(remote_handle64, const dsptensor*, const dsptensor*, dsptensor*), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
    remote_arg* _praEnd = 0;
    uintptr_t _in0[SLIM_IFPTR32(29, 16)] = {0};
    uintptr_t _in1[SLIM_IFPTR32(29, 16)] = {0};
@@ -397,7 +453,7 @@ static __inline int _skel_method(int (*_pfn)(remote_handle64, const dsptensor*, 
    _allocator_deinit(_al);
    return _nErr;
 }
-static __inline int _skel_method_1(int (*_pfn)(remote_handle64, int32, int32, int32, int32), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
+static __inline int _skel_method_2(int (*_pfn)(remote_handle64, int32, int32, int32, int32), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
    remote_arg* _praEnd = 0;
    uint32_t _in0[1] = {0};
    uint32_t _in1[1] = {0};
@@ -411,7 +467,7 @@ static __inline int _skel_method_1(int (*_pfn)(remote_handle64, int32, int32, in
    _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INHANDLES(_sc)==0);
    _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTHANDLES(_sc)==0);
    _QAIC_ASSERT(_nErr, (_pra + ((1 + 0) + (((0 + 0) + 0) + 0))) <= _praEnd);
-   _QAIC_ASSERT(_nErr, _pra[0].buf.nLen >= 12);
+   _QAIC_ASSERT(_nErr, _pra[0].buf.nLen >= 16);
    _primIn = _pra[0].buf.pv;
    _COPY(_in0, 0, _primIn, 0, 4);
    _COPY(_in1, 0, _primIn, 4, 4);
@@ -421,7 +477,7 @@ static __inline int _skel_method_1(int (*_pfn)(remote_handle64, int32, int32, in
    _QAIC_CATCH(_nErr) {}
    return _nErr;
 }
-static __inline int _skel_method_2(int (*_pfn)(remote_handle64), uint32_t _sc, remote_arg* _pra) {
+static __inline int _skel_method_3(int (*_pfn)(remote_handle64), uint32_t _sc, remote_arg* _pra) {
    remote_arg* _praEnd = 0;
    remote_handle64 _in0[1] = {0};
    remote_arg* _praRHandleIn = _pra + REMOTE_SCALARS_INBUFS(_sc) +  REMOTE_SCALARS_OUTBUFS(_sc);
@@ -565,7 +621,7 @@ static __inline int _stub_skel_version_check(char*_in0, int* resVal) {
    _QAIC_CATCH(_nErr) {}
    return 0;
 }
-static __inline int _skel_method_3(int (*_pfn)(const char*, remote_handle64*), uint32_t _sc, remote_arg* _pra) {
+static __inline int _skel_method_4(int (*_pfn)(const char*, remote_handle64*), uint32_t _sc, remote_arg* _pra) {
    remote_arg* _praEnd = 0;
    char* _in0[1] = {0};
    uint32_t _in0Len[1] = {0};
@@ -601,15 +657,21 @@ static __inline int _skel_method_3(int (*_pfn)(const char*, remote_handle64*), u
 __QAIC_SKEL_EXPORT int __QAIC_SKEL(ggmldsp_skel_handle_invoke)(remote_handle64 _h, uint32_t _sc, remote_arg* _pra) __QAIC_SKEL_ATTRIBUTE {
    switch(REMOTE_SCALARS_METHOD(_sc)){
       case 0:
-      return _skel_method_3(__QAIC_IMPL(ggmlop_dsp_open), _sc, _pra);
+      return _skel_method_4(__QAIC_IMPL(ggmlop_dsp_open), _sc, _pra);
       case 1:
-      return _skel_method_2(__QAIC_IMPL(ggmlop_dsp_close), _sc, _pra);
+      return _skel_method_3(__QAIC_IMPL(ggmlop_dsp_close), _sc, _pra);
       case 2:
-      return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_setclocks), _h, _sc, _pra);
+      return _skel_method_2(__QAIC_IMPL(ggmlop_dsp_setclocks), _h, _sc, _pra);
       case 3:
-      return _skel_method(__QAIC_IMPL(ggmlop_dsp_add), _h, _sc, _pra);
+      return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_add), _h, _sc, _pra);
       case 4:
-      return _skel_method(__QAIC_IMPL(ggmlop_dsp_mulmat), _h, _sc, _pra);
+      return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_mulmat), _h, _sc, _pra);
+      case 5:
+      return _skel_method(__QAIC_IMPL(ggmlop_dsp_execute_task), _h, _sc, _pra);
    }
    return AEE_EUNSUPPORTED;
 }
+#ifdef __cplusplus
+}
+#endif
+#endif //_GGMLOP_SKEL_H

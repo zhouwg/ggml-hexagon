@@ -19,4 +19,5 @@ interface ggmlop : remote_handle64 {
    AEEResult dsp_setclocks(in int32 power_level,in int32 latency,in int32 mulmat_algotype, in int32 thread_counts);
    long      dsp_add(in dsptensor src0, in dsptensor src1, rout dsptensor dst);
    long      dsp_mulmat(in dsptensor src0, in dsptensor src1, rout dsptensor dst);
+   long      dsp_execute_task(in int32 ggml_op_type, in dsptensor src0, in dsptensor src1, rout dsptensor dst);
 };

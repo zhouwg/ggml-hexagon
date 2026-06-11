@@ -391,7 +391,7 @@ function build_arm64
 {
     build_idl
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     show_pwd
@@ -404,7 +404,7 @@ function build_arm64_debug
 {
     build_idl
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     show_pwd
@@ -663,8 +663,8 @@ function prepare_run_on_phone()
     fi
 
 
-    #for verify jz's prebuilt libggmldsp-skel.so
-    #comment this line when build library on Hexagon cDSP from the reference/self-develop source codes in this project
+    #for verify jz's prebuilt libggmldsp-skel.so, built from the reference/self-develop source codes in this project
+    #incompatible since 06(June)/11/2026
     #prepare_ggmldsp_prebuilt
 
     #for verify jz's open-source libggmldsp-skel.so which generated from source codes in this branch
@@ -894,6 +894,7 @@ function show_usage()
     echo "  $0 print_oplist"
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
+    echo "  $0 clean"
     echo "  $0 updateqnnlib"
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT                                                    (verify accuracy    of ADD/MUL_MAT)"
@@ -944,6 +945,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "build_debug" ]; then
         build_ggml_hexagon_debug
+        exit 0
+    elif [ "$1" == "clean" ]; then
+        remove_temp_dir
         exit 0
     elif [ "$1" == "run_testops" ]; then
         run_test-ops

@@ -1,6 +1,5 @@
 /*
- * Copyright (c) zhouwg(https://github.com/zhouwg)
- * Copyright (c) 2024-2025 The ggml authors
+ * Copyright (c) 2024-2026 The ggml authors
  *
  * Qualcomm QNN SDK and reference tech guides could be found at:
  * https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
@@ -25,7 +24,8 @@
  *
  *  currently provide following ggml op' implementation through cDSP in hexagon-kernels:
  * - GGML_OP_ADD & GGML_OP_MUL_MAT:
- *   this is a hwaccel skeleton, can expand other ggml ops accordingly
+ *   this is a practical implementation(although mulmat's performance is slower than Qualcomm's official ggml-hexagon backend at the moment),
+ *   can expand other ggml ops easily & accordingly.
  *
  */
 #include <stdio.h>
@@ -202,6 +202,15 @@ using qnn_singlenode_res_t                      = std::tuple<Qnn_GraphHandle_t, 
 typedef void (* ggmlqnn_op_func_t)(ggml_backend_hexagon_context * ctx, ggml_tensor * op);
 typedef int  (* notify_callback_fn)(void * context, int domain, int session, remote_rpc_status_flags_t status);
 typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor * src0, const dsptensor * src1, dsptensor * dst);
+#define GGMLHEXAGON_MAX_OPS_PER_TASK 16
+#define GGMLHEXAGON_MAX_TENSORS_PER_TASK 32
+
+struct ggmlhexagon_task {
+    int32 op_type;
+    ggml_tensor * src0;
+    ggml_tensor * src1;
+    ggml_tensor * dst;
+};
 
 enum qnn_index_type {
     QNN_TENSOR_INDEX = 0,
@@ -380,8 +389,8 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .qnn_runtimelib_path    = "C:\\",
 #endif
-        .ggml_hexagon_version   = {"1.14"},
-        .ggml_dsp_version       = {"0.63"},
+        .ggml_hexagon_version   = {"1.15"},
+        .ggml_dsp_version       = {"0.99.0"},
 };
 
 //file:///opt/qcom/aistack/qairt/2.31.0.250130/docs/QNN/general/overview.html#tbl-supported-snapdragon-devices
@@ -698,7 +707,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_ADD_ID, 0, nullptr, nullptr},
         {false, GGML_OP_ADD1, 0, nullptr, nullptr},
         {false, GGML_OP_ACC, 0, nullptr, nullptr},
-        {false, GGML_OP_SUB, 2, nullptr, nullptr},
+        {true,  GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},
         {false, GGML_OP_MUL, 2, nullptr, nullptr},
         {false, GGML_OP_DIV, 2, nullptr, nullptr},
         {false, GGML_OP_SQR, 0, nullptr, nullptr},
@@ -5414,22 +5423,14 @@ static int ggmlhexagon_request_status_notifications(int domain_id, void * contex
 static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     size_t candidate_size   = 0;
     uint8_t * rpc_buffer    = nullptr;
-#ifdef SD_USE_HEXAGON // for stable-diffusion.cpp
     size_t probe_slots[]    = {1024, 1536, 2000, 2048, 1024 + 2048, 4096};
-#else
-    size_t probe_slots[]    = {1024, 1536, 2000, 2048};
-#endif
     size_t probe_counts     = sizeof(probe_slots) / sizeof(size_t);
 
     if (nullptr == ctx)
         return 1;
 
     for (size_t idx = 0; idx < probe_counts; idx++) {
-#ifdef SD_USE_HEXAGON // for stable-diffusion.cpp
         rpc_buffer = static_cast<uint8_t *>(rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, (probe_slots[idx] * SIZE_IN_MB)));
-#else
-        rpc_buffer = static_cast<uint8_t *>(rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, (probe_slots[idx] * SIZE_IN_MB)));
-#endif
         if (nullptr == rpc_buffer) {
             GGMLHEXAGON_LOG_DEBUG("alloc rpcmem %d (MiB) failure during probe rpc memory info, reason: %s\n", probe_slots[idx], strerror(errno));
             break;
@@ -5451,12 +5452,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
         GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
         ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-#ifdef SD_USE_HEXAGON // use rpcmem_alloc2 to alloc 2+ GiB memory, it's a workaround to make stablediffusion.cpp happy
         ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
-#else
-        //FIXME: it seems there is unknown issue with 2+ GiB memory pool
-        ctx->rpc_mempool = rpcmem_alloc(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
-#endif
         if (nullptr == ctx->rpc_mempool) {
             GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
             return 2;
@@ -5752,8 +5748,78 @@ bail:
     return -1;
 }
 
+static void ggmlhexagon_task_init(struct ggmlhexagon_task * task) {
+    memset(task, 0, sizeof(struct ggmlhexagon_task));
+}
+
+static int ggmlhexagon_task_add_op(struct ggmlhexagon_task * task, ggml_op op_type, ggml_tensor * src0, ggml_tensor * src1, ggml_tensor * dst) {
+    task->op_type = op_type;
+    task->src0 = src0;
+    task->src1 = src1;
+    task->dst = dst;
+    return 0;
+}
+
+static int ggmlhexagon_task_execute(ggml_backend_hexagon_context * ctx, struct ggmlhexagon_task * task) {
+    if (!task->src0 || !task->dst) {
+        return AEE_SUCCESS;
+    }
+
+    struct dsptensor dsptensor_0;
+    struct dsptensor dsptensor_1;
+    struct dsptensor dsptensor_2;
+
+    memset(&dsptensor_0, 0, sizeof(dsptensor_0));
+    dsptensor_0.data = task->src0->data;
+    dsptensor_0.data_len = ggml_nelements(task->src0);
+    dsptensor_0.type = task->src0->type;
+    dsptensor_0.ne[0] = task->src0->ne[0];
+    dsptensor_0.ne[1] = task->src0->ne[1];
+    dsptensor_0.ne[2] = task->src0->ne[2];
+    dsptensor_0.ne[3] = task->src0->ne[3];
+    dsptensor_0.nb[0] = task->src0->nb[0];
+    dsptensor_0.nb[1] = task->src0->nb[1];
+    dsptensor_0.nb[2] = task->src0->nb[2];
+    dsptensor_0.nb[3] = task->src0->nb[3];
+
+    memset(&dsptensor_1, 0, sizeof(dsptensor_1));
+    if (task->src1) {
+        dsptensor_1.data = task->src1->data;
+        dsptensor_1.data_len = ggml_nelements(task->src1);
+        dsptensor_1.type = task->src1->type;
+        dsptensor_1.ne[0] = task->src1->ne[0];
+        dsptensor_1.ne[1] = task->src1->ne[1];
+        dsptensor_1.ne[2] = task->src1->ne[2];
+        dsptensor_1.ne[3] = task->src1->ne[3];
+        dsptensor_1.nb[0] = task->src1->nb[0];
+        dsptensor_1.nb[1] = task->src1->nb[1];
+        dsptensor_1.nb[2] = task->src1->nb[2];
+        dsptensor_1.nb[3] = task->src1->nb[3];
+    }
+
+    memset(&dsptensor_2, 0, sizeof(dsptensor_2));
+    dsptensor_2.data = task->dst->data;
+    dsptensor_2.data_len = ggml_nelements(task->dst);
+    dsptensor_2.type = task->dst->type;
+    dsptensor_2.ne[0] = task->dst->ne[0];
+    dsptensor_2.ne[1] = task->dst->ne[1];
+    dsptensor_2.ne[2] = task->dst->ne[2];
+    dsptensor_2.ne[3] = task->dst->ne[3];
+    dsptensor_2.nb[0] = task->dst->nb[0];
+    dsptensor_2.nb[1] = task->dst->nb[1];
+    dsptensor_2.nb[2] = task->dst->nb[2];
+    dsptensor_2.nb[3] = task->dst->nb[3];
+    memcpy(dsptensor_2.op_params, task->dst->op_params, sizeof(dsptensor_2.op_params));
+
+    int hexagon_error = ggmlop_dsp_execute_task(ctx->ggmlop_handle, task->op_type, &dsptensor_0, task->src1 ? &dsptensor_1 : NULL, &dsptensor_2);
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_task failed: %d", hexagon_error);
+    }
+
+    return hexagon_error;
+}
+
 static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_tensor * op) {
-    //skip sanity check because already checked in other place
     struct dsptensor dsptensor_0;
     struct dsptensor dsptensor_1;
     struct dsptensor dsptensor_2;
@@ -5777,70 +5843,80 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
 
     input_tensor_count  =  ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op)].input_param_count;
     op_func             =  ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op)].dsp_op_func;
-    if (nullptr == op_func) {
-        GGMLHEXAGON_LOG_DEBUG("op GGML_OP_%s and dsp func %s not supported on cCSP", ggml_op_name(op->op), ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op)].hexagon_op_name);
+
+    if (nullptr != op_func) {
+        std::chrono::high_resolution_clock::time_point start_time = std::chrono::high_resolution_clock::now();
+        dsptensor_0.data        = src0->data;
+        dsptensor_0.data_len    = ggml_nbytes(src0);
+        dsptensor_0.type        = src0->type;
+
+        dsptensor_0.ne[0] = src0->ne[0];
+        dsptensor_0.ne[1] = src0->ne[1];
+        dsptensor_0.ne[2] = src0->ne[2];
+        dsptensor_0.ne[3] = src0->ne[3];
+
+        dsptensor_0.nb[0] = src0->nb[0];
+        dsptensor_0.nb[1] = src0->nb[1];
+        dsptensor_0.nb[2] = src0->nb[2];
+        dsptensor_0.nb[3] = src0->nb[3];
+
+        if (2 == input_tensor_count) {
+            GGML_ASSERT(nullptr != src1);
+            dsptensor_1.data        = src1->data;
+            dsptensor_1.type        = src1->type;
+            dsptensor_1.data_len    = ggml_nbytes(src1);
+
+            dsptensor_1.ne[0] = src1->ne[0];
+            dsptensor_1.ne[1] = src1->ne[1];
+            dsptensor_1.ne[2] = src1->ne[2];
+            dsptensor_1.ne[3] = src1->ne[3];
+
+            dsptensor_1.nb[0] = src1->nb[0];
+            dsptensor_1.nb[1] = src1->nb[1];
+            dsptensor_1.nb[2] = src1->nb[2];
+            dsptensor_1.nb[3] = src1->nb[3];
+        }
+
+        dsptensor_2.data        = dst->data;
+        dsptensor_2.data_len    = ggml_nbytes(dst);
+        dsptensor_2.type        = dst->type;
+
+        dsptensor_2.ne[0] = dst->ne[0];
+        dsptensor_2.ne[1] = dst->ne[1];
+        dsptensor_2.ne[2] = dst->ne[2];
+        dsptensor_2.ne[3] = dst->ne[3];
+
+        dsptensor_2.nb[0] = dst->nb[0];
+        dsptensor_2.nb[1] = dst->nb[1];
+        dsptensor_2.nb[2] = dst->nb[2];
+        dsptensor_2.nb[3] = dst->nb[3];
+
+        memcpy(dsptensor_2.op_params, dst->op_params, GGML_MAX_OP_PARAMS / sizeof(int32_t));
+        std::chrono::high_resolution_clock::time_point end_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<size_t, std::nano> duration = end_time - start_time;
+        GGMLHEXAGON_LOG_DEBUG("pack duration %llu ns", duration.count());
+
+        hexagon_error = op_func(ctx->ggmlop_handle, &dsptensor_0, &dsptensor_1, &dsptensor_2);
+        if (AEE_SUCCESS != hexagon_error) {
+            GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp", ggml_op_name(op->op));
+        }
+    } else if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op)].supported) {
+        struct ggmlhexagon_task task;
+        ggmlhexagon_task_init(&task);
+
+        int ret = ggmlhexagon_task_add_op(&task, op->op, src0, src1, dst);
+        if (ret != 0) {
+            GGMLHEXAGON_LOG_WARN("failed to add op to task");
+            return;
+        }
+
+        hexagon_error = ggmlhexagon_task_execute(ctx, &task);
+        if (AEE_SUCCESS != hexagon_error) {
+            GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via batch task", ggml_op_name(op->op));
+        }
+    } else {
+        GGMLHEXAGON_LOG_DEBUG("op GGML_OP_%s not supported on cDSP", ggml_op_name(op->op));
         return;
-    }
-
-    //FIXME:try to fully understand the tech detail in qidl:
-    // qidl is a binary tool to generate some very complicated and hard-to customized bridge-layer codes
-    // between ARM-AP and cDSP. the mechanism in qidl/FastRPC is exactly similar to mechanism in TEE.
-    // try to find a better/efficient approach to exchange necessary data between ARM-AP side and cDSP side.
-    // manually modifying the important data structure ggml_tensor in ggml.h is not make-sense and not acceptable.
-    std::chrono::high_resolution_clock::time_point start_time = std::chrono::high_resolution_clock::now();
-    dsptensor_0.data        = src0->data;
-    dsptensor_0.data_len    = ggml_nbytes(src0);
-    dsptensor_0.type        = src0->type;
-
-    dsptensor_0.ne[0] = src0->ne[0];
-    dsptensor_0.ne[1] = src0->ne[1];
-    dsptensor_0.ne[2] = src0->ne[2];
-    dsptensor_0.ne[3] = src0->ne[3];
-
-    dsptensor_0.nb[0] = src0->nb[0];
-    dsptensor_0.nb[1] = src0->nb[1];
-    dsptensor_0.nb[2] = src0->nb[2];
-    dsptensor_0.nb[3] = src0->nb[3];
-
-    if (2 == input_tensor_count) {
-        GGML_ASSERT(nullptr != src1);
-        dsptensor_1.data        = src1->data;
-        dsptensor_1.type        = src1->type;
-        dsptensor_1.data_len    = ggml_nbytes(src1);
-
-        dsptensor_1.ne[0] = src1->ne[0];
-        dsptensor_1.ne[1] = src1->ne[1];
-        dsptensor_1.ne[2] = src1->ne[2];
-        dsptensor_1.ne[3] = src1->ne[3];
-
-        dsptensor_1.nb[0] = src1->nb[0];
-        dsptensor_1.nb[1] = src1->nb[1];
-        dsptensor_1.nb[2] = src1->nb[2];
-        dsptensor_1.nb[3] = src1->nb[3];
-    }
-
-    dsptensor_2.data        = dst->data;
-    dsptensor_2.data_len    = ggml_nbytes(dst);
-    dsptensor_2.type        = dst->type;
-
-    dsptensor_2.ne[0] = dst->ne[0];
-    dsptensor_2.ne[1] = dst->ne[1];
-    dsptensor_2.ne[2] = dst->ne[2];
-    dsptensor_2.ne[3] = dst->ne[3];
-
-    dsptensor_2.nb[0] = dst->nb[0];
-    dsptensor_2.nb[1] = dst->nb[1];
-    dsptensor_2.nb[2] = dst->nb[2];
-    dsptensor_2.nb[3] = dst->nb[3];
-
-    memcpy(dsptensor_2.op_params, dst->op_params, GGML_MAX_OP_PARAMS / sizeof(int32_t));
-    std::chrono::high_resolution_clock::time_point end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<size_t, std::nano> duration = end_time - start_time;
-    GGMLHEXAGON_LOG_DEBUG("pack duration %llu ns", duration.count());
-
-    hexagon_error = op_func(ctx->ggmlop_handle, &dsptensor_0, &dsptensor_1, &dsptensor_2);
-    if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp", ggml_op_name(op->op));
     }
 
     op_perf.info();
@@ -5871,6 +5947,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
     }
     switch (op_tensor->op) {
         case GGML_OP_ADD:
+        case GGML_OP_SUB:
         {
             ggmlhexagon_dump_op_info(op_tensor);
             if (!ggml_are_same_shape(src0, src1)) {
@@ -5878,26 +5955,45 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
             }
             return ((src0->type == GGML_TYPE_F32) || (src0->type == GGML_TYPE_F16));
         }
+        case GGML_OP_PERMUTE:
+        {
+            return true;
+        }
         case GGML_OP_MUL_MAT:
         {
             ggmlhexagon_dump_op_info(op_tensor);
-            if (src0_rank != src1_rank)
+            const int64_t m = src0->ne[1];
+            const int64_t k = src0->ne[0];
+            const int64_t n = src1->ne[1];
+            GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
+
+            if (src0_rank != src1_rank) {
+                GGMLHEXAGON_LOG_DEBUG("MUL_MAT not supported: src0_rank(%d) != src1_rank(%d)", src0_rank, src1_rank);
                 return false;
-            if (src0_rank < 2)
+            }
+            if (src0_rank < 2) {
+                GGMLHEXAGON_LOG_DEBUG("MUL_MAT not supported: src0_rank(%d) < 2", src0_rank);
                 return false;
+            }
 
             if (1 == g_hexagon_appcfg.enable_q_mulmat) {
                 if (1 == g_hexagon_appcfg.enable_all_q_mulmat) {
-                    return (src0->type == GGML_TYPE_F32  || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && (src1->type == GGML_TYPE_F32);
+                    bool supported = (src0->type == GGML_TYPE_F32  || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && (src1->type == GGML_TYPE_F32);
+                    GGMLHEXAGON_LOG_DEBUG("MUL_MAT enable_all_q_mulmat: src0.type=%d, src1.type=%d, supported=%d", src0->type, src1->type, supported);
+                    return supported;
                 }
 
-                return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
+                bool supported = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
                         || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q8_0
                        ) && (src1->type == GGML_TYPE_F32) && (op_tensor->type == GGML_TYPE_F32);
+                GGMLHEXAGON_LOG_DEBUG("MUL_MAT enable_q_mulmat: src0.type=%d, src1.type=%d, op.type=%d, supported=%d", src0->type, src1->type, op_tensor->type, supported);
+                return supported;
             } else {
-                return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&
-                       (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) &&
+                bool supported = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) &&
+                       (src1->type == GGML_TYPE_F32) &&
                        (op_tensor->type == GGML_TYPE_F32);
+                GGMLHEXAGON_LOG_DEBUG("MUL_MAT default: src0.type=%d, src1.type=%d, op.type=%d, supported=%d", src0->type, src1->type, op_tensor->type, supported);
+                return supported;
             }
         }
         case GGML_OP_SOFT_MAX:{
@@ -6169,6 +6265,134 @@ static enum ggml_status ggml_backend_hexagon_buffer_init_tensor(ggml_backend_buf
     GGML_UNUSED(tensor);
     GGML_UNUSED(ctx);
     return GGML_STATUS_SUCCESS;
+}
+
+static inline size_t hex_round_up(size_t n, size_t m) {
+    return (n + m - 1) & ~(m - 1);
+}
+
+static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
+    const int QK4_0 = 32;
+    const int QK_Q4_0x4x2 = 256;
+
+    int64_t nrows = ggml_nrows(t);
+
+    size_t row_size    = ggml_row_size(t->type, t->ne[0]);
+    size_t row_size_pd = ggml_row_size(t->type, hex_round_up(t->ne[0], QK_Q4_0x4x2));
+    size_t row_size_rp = row_size_pd;
+
+    const size_t total_tensor_size = (size_t)nrows * row_size;
+    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
+
+    const int64_t n_full_rows = n_bytes_to_copy / row_size;
+    const size_t  n_rem_bytes = n_bytes_to_copy % row_size;
+
+    void * buf_pd = ggml_aligned_malloc(row_size_pd);
+    GGML_ASSERT(buf_pd != NULL);
+
+    void * buf_rp = ggml_aligned_malloc(row_size_rp);
+    GGML_ASSERT(buf_rp != NULL);
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) t->data + (i * row_size);
+
+        memcpy(buf_pd, src, row_size);
+
+        const uint8_t * x = (const uint8_t *) buf_pd;
+        uint8_t * y = (uint8_t *) buf_rp;
+
+        const int qk = QK_Q4_0x4x2;
+        const int nb = t->ne[0] / qk;
+
+        const int dblk_size = 8 * 2;
+        const int qblk_size = qk / 2;
+        const int qrow_size = t->ne[0] / 2;
+        const int q4_blk_sz = QK4_0 / 2 + 2;
+
+        uint8_t * y_q = y + 0;
+        uint8_t * y_d = y + qrow_size;
+
+        for (int ib = 0; ib < nb; ib++) {
+            uint8_t qs[QK_Q4_0x4x2];
+
+            for (int j = 0; j < 8; j++) {
+                const uint8_t * b = x + (ib * 8 + j) * q4_blk_sz + 2;
+                for (int k = 0; k < QK4_0 / 2; k++) {
+                    qs[j * QK4_0 + 2*k + 0] = (b[k] & 0x0F);
+                    qs[j * QK4_0 + 2*k + 1] = (b[k] >> 4);
+                }
+            }
+
+            uint8_t * q = y_q + (ib * qblk_size);
+            for (int j = 0; j < qk / 2; j++) {
+                q[j] = (qs[j + 128] << 4) | qs[j];
+            }
+
+            uint16_t * d = (uint16_t *) (y_d + ib * dblk_size);
+            for (int j = 0; j < 8; j++) {
+                const uint16_t * scale = (const uint16_t *)(x + (ib * 8 + j) * q4_blk_sz);
+                d[j] = *scale;
+            }
+        }
+
+        memcpy(dst, buf_rp, row_size);
+    }
+
+    if (n_rem_bytes > 0) {
+        const uint8_t * src = (const uint8_t *) data + (n_full_rows * row_size);
+        uint8_t *       dst = (uint8_t *) t->data + (n_full_rows * row_size);
+
+        memset(buf_pd, 0, row_size_pd);
+        memcpy(buf_pd, src, n_rem_bytes);
+
+        const uint8_t * x = (const uint8_t *) buf_pd;
+        uint8_t * y = (uint8_t *) buf_rp;
+
+        const int qk = QK_Q4_0x4x2;
+        const int nb = (t->ne[0] + qk - 1) / qk;
+
+        const int dblk_size = 8 * 2;
+        const int qblk_size = qk / 2;
+        const int qrow_size = t->ne[0] / 2;
+        const int q4_blk_sz = QK4_0 / 2 + 2;
+
+        uint8_t * y_q = y + 0;
+        uint8_t * y_d = y + qrow_size;
+
+        for (int ib = 0; ib < nb; ib++) {
+            uint8_t qs[QK_Q4_0x4x2] = {0};
+
+            for (int j = 0; j < 8 && (ib * 8 + j) * q4_blk_sz < row_size_pd; j++) {
+                const uint8_t * b = x + (ib * 8 + j) * q4_blk_sz + 2;
+                for (int k = 0; k < QK4_0 / 2; k++) {
+                    qs[j * QK4_0 + 2*k + 0] = (b[k] & 0x0F);
+                    qs[j * QK4_0 + 2*k + 1] = (b[k] >> 4);
+                }
+            }
+
+            uint8_t * q = y_q + (ib * qblk_size);
+            bool partial = (ib == nb - 1);
+            for (int j = 0; j < qk / 2; j++) {
+                if (partial) {
+                    q[j] = (qs[j * 2 + 1] << 4) | qs[j * 2 + 0];
+                } else {
+                    q[j] = (qs[j + 128] << 4) | qs[j];
+                }
+            }
+
+            uint16_t * d = (uint16_t *) (y_d + ib * dblk_size);
+            for (int j = 0; j < 8 && (ib * 8 + j) * q4_blk_sz < row_size_pd; j++) {
+                const uint16_t * scale = (const uint16_t *)(x + (ib * 8 + j) * q4_blk_sz);
+                d[j] = *scale;
+            }
+        }
+
+        memcpy(dst, buf_rp, n_rem_bytes);
+    }
+
+    ggml_aligned_free(buf_pd, row_size_pd);
+    ggml_aligned_free(buf_rp, row_size_rp);
 }
 
 static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,

@@ -1,5 +1,5 @@
-//qidl copyright
-//qidl nested=false
+#ifndef _GGMLOP_STUB_H
+#define _GGMLOP_STUB_H
 #include "skel.h"
 #include <string.h>
 #ifndef _WIN32
@@ -277,13 +277,13 @@ static const Type* const typeArrays[7] = {&(types[0]),&(types[1]),&(types[1]),&(
 static const StructType structTypes[1] = {{0x7,&(typeArrays[0]),0x70,0x4,0x6c,0x4,0x4,0x4}};
 static const Type types[5] = {{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{0x10,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x4}}, 8,0x4},{0x40,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x10}}, 8,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[4]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4}};
 static const Parameter parameters[6] = {{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)0x0,0}}, 4,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),3,0}};
-static const Parameter* const parameterArrays[9] = {(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[0])),(&(parameters[1])),(&(parameters[2]))};
-static const Method methods[4] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[6])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[8])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0xc,0x0,3,3,(&(parameterArrays[3])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[0])),0x4,0x4}};
-static const Method* const methodArrays[8] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3]),&(methods[3]),&(methods[3]),&(methods[3])};
-static const char strings[167] = "dsp_setclocks\0dsp_rmsnorm\0dsp_softmax\0dcvs_enable\0power_level\0dsp_pool2d\0dsp_mulmat\0op_params\0dsp_add\0latency\0flags\0close\0src1\0data\0type\0src0\0open\0dst\0uri\0op\0nb\0ne\0h\0";
-static const uint16_t methodStrings[134] = {62,137,132,161,158,155,84,110,127,122,132,161,158,155,84,110,127,147,132,161,158,155,84,110,127,14,137,132,161,158,155,84,110,127,122,132,161,158,155,84,110,127,147,132,161,158,155,84,110,127,26,137,132,161,158,155,84,110,127,122,132,161,158,155,84,110,127,147,132,161,158,155,84,110,127,73,137,132,161,158,155,84,110,127,122,132,161,158,155,84,110,127,147,132,161,158,155,84,110,127,94,137,132,161,158,155,84,110,127,122,132,161,158,155,84,110,127,147,132,161,158,155,84,110,127,0,50,102,38,142,151,164,116,164};
-static const uint16_t methodStringsArrays[8] = {129,132,125,100,75,50,25,0};
-__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {8,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
+static const Parameter* const parameterArrays[11] = {(&(parameters[3])),(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[0])),(&(parameters[1])),(&(parameters[2]))};
+static const Method methods[5] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[8])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[10])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,4,(&(parameterArrays[4])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[1])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe8,0x6c,4,4,(&(parameterArrays[0])),0x4,0x4}};
+static const Method* const methodArrays[6] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3]),&(methods[4])};
+static const char strings[175] = "dsp_execute_task\0mulmat_algotype\0thread_counts\0dsp_setclocks\0ggml_op_type\0power_level\0dsp_mulmat\0op_params\0dsp_add\0latency\0flags\0close\0src1\0data\0src0\0open\0dst\0uri\0op\0nb\0ne\0h\0";
+static const uint16_t methodStrings[86] = {0,61,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,86,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,107,145,28,169,166,163,97,123,140,135,28,169,166,163,97,123,140,155,28,169,166,163,97,123,140,47,74,115,17,33,150,159,172,129,172};
+static const uint16_t methodStringsArrays[6] = {81,84,76,51,26,0};
+__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {6,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
 #endif //_GGMLOP_SLIM_H
 
 
@@ -305,16 +305,16 @@ static __inline int _stub_method(remote_handle64 _handle, uint32_t _mid, uint32_
    _COPY(_primIn, 0, _in0, 0, 4);
    _COPY(_primIn, 4, _in1, 0, 4);
    _COPY(_primIn, 8, _in2, 0, 4);
-   _COPY(_primIn, 12,_in3, 0, 4);
+   _COPY(_primIn, 12, _in3, 0, 4);
    _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
    _CATCH_FARF(_nErr) {
       _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 power_level, int32 latency, int32 mulmat_algotype, int32 threads) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 power_level, int32 latency, int32 mulmat_algotype, int32 thread_counts) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 2;
-   return _stub_method(_handle, _mid, (uint32_t*)&power_level, (uint32_t*)&latency, (uint32_t*)&mulmat_algotype, (uint32_t*)&threads);
+   return _stub_method(_handle, _mid, (uint32_t*)&power_level, (uint32_t*)&latency, (uint32_t*)&mulmat_algotype, (uint32_t*)&thread_counts);
 }
 static __inline int _stub_unpack(_ATTRIBUTE_UNUSED remote_arg* _praROutPost, _ATTRIBUTE_UNUSED remote_arg* _ppraROutPost[1], _ATTRIBUTE_UNUSED void* _primROut, _ATTRIBUTE_UNUSED uint32_t _rout0[1], _ATTRIBUTE_UNUSED uint32_t _rout1[4], _ATTRIBUTE_UNUSED uint32_t _rout2[4], _ATTRIBUTE_UNUSED uint32_t _rout3[1], _ATTRIBUTE_UNUSED uint32_t _rout4[16], _ATTRIBUTE_UNUSED uint32_t _rout5[1], _ATTRIBUTE_UNUSED char* _rout6[1], _ATTRIBUTE_UNUSED uint32_t _rout6Len[1]) {
    int _nErr = 0;
@@ -406,9 +406,11 @@ static __inline int _stub_method_1(remote_handle64 _handle, uint32_t _mid, uintp
    _count_1(_numIn, _numROut, _numInH, _numROutH, (uint32_t*)&(((uint32_t*)_in1)[0]), (uint32_t*)&(((uint32_t*)_in1)[1]), (uint32_t*)&(((uint32_t*)_in1)[5]), (uint32_t*)&(((uint32_t*)_in1)[9]), (uint32_t*)&(((uint32_t*)_in1)[10]), (uint32_t*)&(((uint32_t*)_in1)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in1)[27]), (char**)&(((uint64_t*)_in1)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in1)[28]), (uint32_t*)&(((uint32_t*)_in1)[30])));
    _count(_numIn, _numROut, _numInH, _numROutH, (uint32_t*)&(((uint32_t*)_rout2)[0]), (uint32_t*)&(((uint32_t*)_rout2)[1]), (uint32_t*)&(((uint32_t*)_rout2)[5]), (uint32_t*)&(((uint32_t*)_rout2)[9]), (uint32_t*)&(((uint32_t*)_rout2)[10]), (uint32_t*)&(((uint32_t*)_rout2)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout2)[27]), (char**)&(((uint64_t*)_rout2)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout2)[28]), (uint32_t*)&(((uint32_t*)_rout2)[30])));
    if(_numIn[0]>=255){
+          _QAIC_FARF(RUNTIME_ERROR, "ERROR: Unsupported number of input buffers\n");
           return AEE_EUNSUPPORTED;
    }
    if(_numROut[0]>=255){
+          _QAIC_FARF(RUNTIME_ERROR, "ERROR: Unsupported number of output buffers\n");
           return AEE_EUNSUPPORTED;
    }
    _allocator_init(_al, 0, 0);
@@ -449,3 +451,77 @@ __QAIC_STUB_EXPORT int __QAIC_STUB(ggmlop_dsp_mulmat)(remote_handle64 _handle, c
    uint32_t _mid = 4;
    return _stub_method_1(_handle, _mid, (uintptr_t*)src0, (uintptr_t*)src1, (uintptr_t*)dst);
 }
+static __inline int _stub_method_2(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uintptr_t _in1[SLIM_IFPTR32(29, 16)], uintptr_t _in2[SLIM_IFPTR32(29, 16)], uintptr_t _rout3[SLIM_IFPTR32(29, 16)]) {
+   remote_arg* _pra = 0;
+   int _numIn[1] = {0};
+   int _numROut[1] = {0};
+   int _numInH[1] = {0};
+   int _numROutH[1] = {0};
+   _allocator _al[1] = {{0}};
+   uint32_t _primIn[58]= {0};
+   uint32_t _primROut[27]= {0};
+   remote_arg* _praIn = 0;
+   remote_arg* _praROut = 0;
+   remote_arg* _praROutPost = 0;
+   remote_arg** _ppraROutPost = &_praROutPost;
+   remote_arg** _ppraIn = &_praIn;
+   remote_arg** _ppraROut = &_praROut;
+   remote_arg* _praHIn = 0;
+   remote_arg** _ppraHIn = &_praHIn;
+   remote_arg* _praHROut = 0;
+   remote_arg** _ppraHROut = &_praHROut;
+   int _nErr = 0;
+   _numIn[0] = 0;
+   _numROut[0] = 0;
+   _numInH[0] = 0;
+   _numROutH[0] = 0;
+   _count_1(_numIn, _numROut, _numInH, _numROutH, (uint32_t*)&(((uint32_t*)_in1)[0]), (uint32_t*)&(((uint32_t*)_in1)[1]), (uint32_t*)&(((uint32_t*)_in1)[5]), (uint32_t*)&(((uint32_t*)_in1)[9]), (uint32_t*)&(((uint32_t*)_in1)[10]), (uint32_t*)&(((uint32_t*)_in1)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in1)[27]), (char**)&(((uint64_t*)_in1)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in1)[28]), (uint32_t*)&(((uint32_t*)_in1)[30])));
+   _count_1(_numIn, _numROut, _numInH, _numROutH, (uint32_t*)&(((uint32_t*)_in2)[0]), (uint32_t*)&(((uint32_t*)_in2)[1]), (uint32_t*)&(((uint32_t*)_in2)[5]), (uint32_t*)&(((uint32_t*)_in2)[9]), (uint32_t*)&(((uint32_t*)_in2)[10]), (uint32_t*)&(((uint32_t*)_in2)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in2)[27]), (char**)&(((uint64_t*)_in2)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in2)[28]), (uint32_t*)&(((uint32_t*)_in2)[30])));
+   _count(_numIn, _numROut, _numInH, _numROutH, (uint32_t*)&(((uint32_t*)_rout3)[0]), (uint32_t*)&(((uint32_t*)_rout3)[1]), (uint32_t*)&(((uint32_t*)_rout3)[5]), (uint32_t*)&(((uint32_t*)_rout3)[9]), (uint32_t*)&(((uint32_t*)_rout3)[10]), (uint32_t*)&(((uint32_t*)_rout3)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout3)[27]), (char**)&(((uint64_t*)_rout3)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout3)[28]), (uint32_t*)&(((uint32_t*)_rout3)[30])));
+   if(_numIn[0]>=255){
+          _QAIC_FARF(RUNTIME_ERROR, "ERROR: Unsupported number of input buffers\n");
+          return AEE_EUNSUPPORTED;
+   }
+   if(_numROut[0]>=255){
+          _QAIC_FARF(RUNTIME_ERROR, "ERROR: Unsupported number of output buffers\n");
+          return AEE_EUNSUPPORTED;
+   }
+   _allocator_init(_al, 0, 0);
+   _QAIC_ALLOCATE(_nErr, _al, ((((((((_numIn[0] + _numROut[0]) + _numInH[0]) + _numROutH[0]) + 1) + 1) + 0) + 0) * sizeof(_pra[0])), 4, _pra);
+   _QAIC_ASSERT(_nErr, _pra);
+   _pra[0].buf.pv = (void*)_primIn;
+   _pra[0].buf.nLen = sizeof(_primIn);
+   _pra[(_numIn[0] + 1)].buf.pv = (void*)_primROut;
+   _pra[(_numIn[0] + 1)].buf.nLen = sizeof(_primROut);
+   _praIn = (_pra + 1);
+   _praROut = (_praIn + _numIn[0] + 1);
+   _praROutPost = _praROut;
+   _COPY(_primIn, 0, _in0, 0, 4);
+   if(_praHIn == 0)
+   {
+      _praHIn = ((_praROut + _numROut[0]) + 1);
+   }
+   if(_praHROut == 0)
+      (_praHROut = _praHIn + _numInH[0] + 0);
+   _TRY(_nErr, _stub_pack_1(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 4), 0, (uint32_t*)&(((uint32_t*)_in1)[0]), (uint32_t*)&(((uint32_t*)_in1)[1]), (uint32_t*)&(((uint32_t*)_in1)[5]), (uint32_t*)&(((uint32_t*)_in1)[9]), (uint32_t*)&(((uint32_t*)_in1)[10]), (uint32_t*)&(((uint32_t*)_in1)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in1)[27]), (char**)&(((uint64_t*)_in1)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in1)[28]), (uint32_t*)&(((uint32_t*)_in1)[30]))));
+   _TRY(_nErr, _stub_pack_1(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 116), 0, (uint32_t*)&(((uint32_t*)_in2)[0]), (uint32_t*)&(((uint32_t*)_in2)[1]), (uint32_t*)&(((uint32_t*)_in2)[5]), (uint32_t*)&(((uint32_t*)_in2)[9]), (uint32_t*)&(((uint32_t*)_in2)[10]), (uint32_t*)&(((uint32_t*)_in2)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_in2)[27]), (char**)&(((uint64_t*)_in2)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_in2)[28]), (uint32_t*)&(((uint32_t*)_in2)[30]))));
+   _TRY(_nErr, _stub_pack(_al, (_praIn + 0), _ppraIn, (_praROut + 0), _ppraROut, _praHIn, _ppraHIn, _praHROut, _ppraHROut, ((char*)_primIn + 228), ((char*)_primROut + 0), (uint32_t*)&(((uint32_t*)_rout3)[0]), (uint32_t*)&(((uint32_t*)_rout3)[1]), (uint32_t*)&(((uint32_t*)_rout3)[5]), (uint32_t*)&(((uint32_t*)_rout3)[9]), (uint32_t*)&(((uint32_t*)_rout3)[10]), (uint32_t*)&(((uint32_t*)_rout3)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout3)[27]), (char**)&(((uint64_t*)_rout3)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout3)[28]), (uint32_t*)&(((uint32_t*)_rout3)[30]))));
+   _QAIC_ASSERT(_nErr, (_numInH[0] + 0) <= 15);
+   _QAIC_ASSERT(_nErr, (_numROutH[0] + 0) <= 15);
+   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, (_numIn[0] + 1), (_numROut[0] + 1), (_numInH[0] + 0), (_numROutH[0] + 0)), _pra));
+   _TRY(_nErr, _stub_unpack((_praROutPost + 0), _ppraROutPost, ((char*)_primROut + 0), (uint32_t*)&(((uint32_t*)_rout3)[0]), (uint32_t*)&(((uint32_t*)_rout3)[1]), (uint32_t*)&(((uint32_t*)_rout3)[5]), (uint32_t*)&(((uint32_t*)_rout3)[9]), (uint32_t*)&(((uint32_t*)_rout3)[10]), (uint32_t*)&(((uint32_t*)_rout3)[26]), SLIM_IFPTR32((char**)&(((uint32_t*)_rout3)[27]), (char**)&(((uint64_t*)_rout3)[14])), SLIM_IFPTR32((uint32_t*)&(((uint32_t*)_rout3)[28]), (uint32_t*)&(((uint32_t*)_rout3)[30]))));
+   _QAIC_CATCH(_nErr) {}
+   _CATCH_FARF(_nErr) {
+      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, (_numIn[0] + 1), (_numROut[0] + 1), (_numInH[0] + 0), (_numROutH[0] + 0)), _mid, __func__);
+   }
+   _allocator_deinit(_al);
+   return _nErr;
+}
+__QAIC_STUB_EXPORT int __QAIC_STUB(ggmlop_dsp_execute_task)(remote_handle64 _handle, int32 ggml_op_type, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_STUB_ATTRIBUTE {
+   uint32_t _mid = 5;
+   return _stub_method_2(_handle, _mid, (uint32_t*)&ggml_op_type, (uintptr_t*)src0, (uintptr_t*)src1, (uintptr_t*)dst);
+}
+#ifdef __cplusplus
+}
+#endif
+#endif //_GGMLOP_STUB_H

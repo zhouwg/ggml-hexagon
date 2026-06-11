@@ -322,6 +322,23 @@ worker_pool_atomic_dec_return(unsigned int *target)
 //---------------------------------------------------------------------------
 WORKERPOOL_API AEEResult
 worker_pool_retrieve_threadID(worker_pool_context_t context, unsigned int* threadIDs);
+
+//---------------------------------------------------------------------------
+/// @brief
+///   Reinitialize the worker pool with a new number of worker threads.
+///   This is useful when the thread count is determined after initial startup.
+///
+///
+/// @param new_num_workers
+///   number of worker threads to use.
+///
+/// @return
+///   0 - success.
+///   any other value - failure.
+//---------------------------------------------------------------------------
+WORKERPOOL_API AEEResult
+worker_pool_reinit_with_threads(unsigned int new_num_workers);
+
 #ifdef __cplusplus
 }
 #endif
