@@ -12,6 +12,9 @@ static void * g_vtcm_base = NULL;
 static size_t g_vtcm_size = 0;
 static unsigned int g_compute_res_ctx_id = 0;
 static int g_power_ctx = 0;
+static int g_hmx_available = 0;
+
+void *                        g_hexagon_power_ctx       = NULL;
 
 #define MAX_WORK_SIZE (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE (8 * 1024 * 1024)
@@ -24,7 +27,7 @@ static int power_on_hvx_hmx(void) {
     req.type = HAP_power_set_apptype;
     req.apptype = HAP_POWER_COMPUTE_CLIENT_CLASS;
     if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
-        GGMLHEXAGON_LOG_DEBUG("HAP_power_set apptype failed");
+        GGMLHEXAGON_LOG_ERROR("HAP_power_set apptype failed");
         return -1;
     }
 
@@ -45,7 +48,7 @@ static int power_on_hvx_hmx(void) {
     req.dcvs_v3.set_sleep_disable = 1;
     req.dcvs_v3.sleep_disable = 1;
     if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
-        GGMLHEXAGON_LOG_DEBUG("HAP_power_set DCVS failed");
+        GGMLHEXAGON_LOG_ERROR("HAP_power_set DCVS failed");
         return -2;
     }
 
@@ -54,7 +57,7 @@ static int power_on_hvx_hmx(void) {
     req.type = HAP_power_set_HVX;
     req.hvx.power_up = 1;
     if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
-        GGMLHEXAGON_LOG_DEBUG("HAP_power_set HVX failed");
+        GGMLHEXAGON_LOG_ERROR("HAP_power_set HVX failed");
         return -3;
     }
 
@@ -63,35 +66,67 @@ static int power_on_hvx_hmx(void) {
     req.type = HAP_power_set_HMX;
     req.hmx.power_up = 1;
     if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
-        GGMLHEXAGON_LOG_DEBUG("HAP_power_set HMX failed");
+        GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX failed, continuing without HMX");
         return -4;
     }
 
-    GGMLHEXAGON_LOG_DEBUG("HAP_power_set for HVX and HMX succeeded");
+    GGMLHEXAGON_LOG_INFO("HAP_power_set for HVX and HMX succeeded");
     return 0;
 }
 
+
+
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     void * tptr = NULL;
-    GGMLHEXAGON_LOG_DEBUG("uri %s", uri);
+    GGMLHEXAGON_LOG_INFO("uri %s", uri);
     tptr = (void *)malloc(1);
     GGML_ASSERT(NULL != tptr);
     *handle = (remote_handle64)tptr;
 
+    unsigned int api_version = qurt_api_version();
+    FARF(ALWAYS, "qurt_api_version            = 0x%x", api_version);
+    FARF(ALWAYS, "qurt_hvx_units              = 0x%d", qurt_hvx_get_units());
+    qurt_arch_version_t  vers;
+    qurt_sysenv_get_arch_version(&vers);
+    FARF(ALWAYS, "qurt_arch_version           = 0x%x", vers.arch_version);
+    qurt_sysenv_app_heap_t aheap;
+    qurt_sysenv_get_app_heap(&aheap);
+    GGMLDSP_LOG_DEBUG("aheap.heap_base=0x%x, aheap.heap_limit=0x%x", aheap.heap_base, aheap.heap_limit);
     qurt_sysenv_max_hthreads_t mhwt;
     qurt_sysenv_get_max_hw_threads(&mhwt);
-    GGMLHEXAGON_LOG_DEBUG("max hardware threads counts=%d", mhwt.max_hthreads);
-    g_thread_counts = mhwt.max_hthreads;
+    FARF(ALWAYS, "qurt_hardware_thread_counts = %d", mhwt.max_hthreads);
+     g_thread_counts = mhwt.max_hthreads;
 
     /* Step 1: Power up HVX and HMX */
-    if (power_on_hvx_hmx() != 0) {
-        GGMLHEXAGON_LOG_DEBUG("power_on_hvx_hmx failed, continuing without HMX");
+    int power_result = power_on_hvx_hmx();
+    if (power_result != 0) {
+        GGMLHEXAGON_LOG_INFO("power_on_hvx_hmx failed (%d), continuing without HMX", power_result);
+        g_hmx_available = 0;
+    } else {
+        g_hmx_available = 1;
     }
 
     /* Step 2: Query VTCM size and allocate resources */
     unsigned int vtcm_size_query = 0;
-    HAP_compute_res_query_VTCM(0, &vtcm_size_query, NULL, NULL, NULL);
-    GGMLHEXAGON_LOG_DEBUG("VTCM total = %u bytes", vtcm_size_query);
+    unsigned int availBlockSize;
+    unsigned int totalBlocksize;
+    compute_res_vtcm_page_t availBlock;
+    compute_res_vtcm_page_t totalBlock;
+    int result = 0;
+    result = HAP_compute_res_query_VTCM(0, &vtcm_size_query, &totalBlock, &availBlockSize, &availBlock);
+    GGMLHEXAGON_LOG_INFO("VTCM total = %u bytes\n", vtcm_size_query);
+    printf("Querying VTCM before acquiring resources:\n");
+    printf("Compute resource query return %d, totalBlocksize %d, availBlockSize %d\n",
+                                 result, vtcm_size_query, availBlockSize);
+    printf("Compute resource query ctd, valid page sizes in total table: %d, valid page sizes in avail table: %d\n",
+                                 totalBlock.page_list_len, availBlock.page_list_len);
+    printf("Compute resource query ctd, (Size, num pages); total (0x%x, %d) Avail (0x%x, %d, 0x%x, %d)\n",
+                                totalBlock.page_list[0].page_size,
+                                totalBlock.page_list[0].num_pages,
+                                availBlock.page_list[0].page_size,
+                                availBlock.page_list[0].num_pages,
+                                availBlock.page_list[1].page_size,
+                                availBlock.page_list[1].num_pages);
 
     /* Step 3: Acquire compute resources (including VTCM and HMX) */
     compute_res_attr_t attr;
@@ -103,27 +138,27 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
 
     g_compute_res_ctx_id = HAP_compute_res_acquire(&attr, 100000);
     if (g_compute_res_ctx_id == 0) {
-        GGMLHEXAGON_LOG_DEBUG("HAP_compute_res_acquire failed, falling back to HAP_request_VTCM");
+        GGMLHEXAGON_LOG_INFO("HAP_compute_res_acquire failed, falling back to HAP_request_VTCM\n");
         /* Fallback to legacy VTCM allocation */
         g_vtcm_base = HAP_request_VTCM(DEFAULT_VTCM_SIZE, 0);
         if (g_vtcm_base != NULL) {
             g_vtcm_size = DEFAULT_VTCM_SIZE;
-            GGMLHEXAGON_LOG_DEBUG("allocated VTCM pool via HAP_request_VTCM: %zu bytes at %p", g_vtcm_size, g_vtcm_base);
+            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via HAP_request_VTCM: %zu bytes at %p\n", g_vtcm_size, g_vtcm_base);
         } else {
-            GGMLHEXAGON_LOG_DEBUG("failed to allocate VTCM pool, will allocate on demand");
+            GGMLHEXAGON_LOG_INFO("failed to allocate VTCM pool, will allocate on demand\n");
         }
     } else {
         /* Using VTCM acquired via HAP_compute_res */
         void * vtcm_ptr = NULL;
         unsigned int vtcm_ptr_size = 0;
         if (HAP_compute_res_attr_get_vtcm_ptr_v2(&attr, &vtcm_ptr, &vtcm_ptr_size) != 0) {
-            GGMLHEXAGON_LOG_DEBUG("HAP_compute_res_attr_get_vtcm_ptr_v2 failed");
+            GGMLHEXAGON_LOG_INFO("HAP_compute_res_attr_get_vtcm_ptr_v2 failed\n");
             HAP_compute_res_release(g_compute_res_ctx_id);
             g_compute_res_ctx_id = 0;
         } else {
             g_vtcm_base = vtcm_ptr;
             g_vtcm_size = vtcm_ptr_size;
-            GGMLHEXAGON_LOG_DEBUG("allocated VTCM pool via compute_res: %zu bytes at %p", g_vtcm_size, g_vtcm_base);
+            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_vtcm_size, g_vtcm_base);
         }
     }
 
@@ -141,39 +176,212 @@ int ggmlop_dsp_close(remote_handle64 handle) {
     }
 
     if (g_compute_res_ctx_id != 0) {
-        /* Release compute resources */
+        HAP_compute_res_release_cached(g_compute_res_ctx_id);
+        //Unlocks the HMX unit from the calling thread
+        // HAP_compute_res_hmx_unlock(g_compute_res_ctx_id);
+
         HAP_compute_res_release(g_compute_res_ctx_id);
         g_compute_res_ctx_id = 0;
         g_vtcm_base = NULL;
         g_vtcm_size = 0;
-        GGMLHEXAGON_LOG_DEBUG("released compute resources");
+        GGMLHEXAGON_LOG_INFO("released compute resources");
     } else if (g_vtcm_base != NULL) {
         HAP_release_VTCM(g_vtcm_base);
         g_vtcm_base = NULL;
         g_vtcm_size = 0;
-        GGMLHEXAGON_LOG_DEBUG("released VTCM pool via HAP_request_VTCM");
+        GGMLHEXAGON_LOG_INFO("released VTCM pool via HAP_request_VTCM");
     }
 
     return 0;
 }
 
+
+static AEEResult set_power_boost(remote_handle64 handle, uint32 on)
+{
+    AEEResult res = AEE_SUCCESS;
+    //Clear the structure to only update the selected fields
+    HAP_power_request_t request = {0};
+    void* rpcperf_ctx = (void*) handle;
+
+    if(on) {
+        request.type = HAP_power_set_DCVS_v3;
+        request.dcvs_v3.set_dcvs_enable = TRUE;
+        request.dcvs_v3.dcvs_enable = TRUE;
+        request.dcvs_v3.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
+        request.dcvs_v3.set_bus_params = TRUE;
+        request.dcvs_v3.bus_params.min_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.bus_params.max_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.bus_params.target_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.set_core_params = TRUE;
+        request.dcvs_v3.core_params.min_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.core_params.max_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.core_params.target_corner = HAP_DCVS_VCORNER_MAX;
+        request.dcvs_v3.set_sleep_disable = TRUE;
+        request.dcvs_v3.sleep_disable = TRUE;
+        res = HAP_power_set(rpcperf_ctx, &request);
+    } else {
+        //These commands are to reset the voting done previously
+        request.type = HAP_power_set_DCVS_v3;
+        request.dcvs_v3.set_core_params = TRUE;
+        res = HAP_power_set(rpcperf_ctx, &request);
+    }
+    if (res == HAP_POWER_ERR_UNKNOWN) {
+        FARF(ERROR, "HAP_power_set FAILED, result 0x%x: Unknown\n", res);
+        res = AEE_EUNKNOWN;
+    } else if (res == HAP_POWER_ERR_INVALID_PARAM) {
+        FARF(ERROR, "HAP_power_set FAILED, result 0x%x: Invalid Param\n", res);
+        res = AEE_EBADPARM;
+    } else if (res == HAP_POWER_ERR_UNSUPPORTED_API) {
+        FARF(ERROR, "HAP_power_set FAILED, result 0x%x: Unsupported API\n", res);
+        res = AEE_EUNSUPPORTED;
+    }
+
+    if(res != AEE_SUCCESS) {
+        FARF(ERROR, "HAP_power_set FAILED! Attempting with HAP_power_set_DCVS_v2. This will reset the powerboost request.\n");
+        HAP_power_request_t request = {0};
+        request.type = HAP_power_set_DCVS_v2;
+        res = HAP_power_set(rpcperf_ctx, &request);
+        if(res != AEE_SUCCESS) {
+            FARF(ERROR, "HAP_power_set FAILED, result 0x%x\n", res);
+            res = AEE_EUNKNOWN;
+        }
+    }
+    return res;
+}
+
+AEEResult hap_probe_dsp(remote_handle64 h) {
+    int retVal = 0;
+
+    unsigned int max_mips       = 0;
+    unsigned int max_bus_bw     = 0;
+    int client_class            = 0;
+    unsigned int clk_freq_hz    = 0;
+    boolean dcvs_enabled;
+    void * context_ptr = NULL;
+
+    HAP_power_response_t response;
+
+    /*
+     * HAP_utils_create_context : Creates a user client context
+     * The client created with this API should be destroyed using
+     * HAP_utils_destroy_context API.
+     *
+     * returns: void* ptr representing a unique context for the client
+     */
+    context_ptr = g_hexagon_power_ctx;
+
+    /*
+     * HAP_power_get : Queries the DSP for current performance levels
+     * Input Parameters :
+     *     context - this parameter is ignored and can be NULL for HAP_power_get function
+     *     response - The power response for the system represented by HAP_power_response_t
+     *
+     * returns:  0 on success, non-zero error code in case of failure
+     */
+    /*
+     * HAP_power_get_max_mips : Returns the maximum MIPS supported
+     * output : max_mips
+     */
+    memset(&response, 0, sizeof(HAP_power_response_t));
+    response.type = HAP_power_get_max_mips;
+    retVal = HAP_power_get(context_ptr, &response);
+    if (retVal!=AEE_SUCCESS) {
+        FARF(ERROR, "Unable to get the maximum MIPS supported");
+        return AEE_EFAILED;
+    }
+
+    max_mips = response.max_mips;
+    /*
+     * HAP_power_get_max_bus_bw : Returns the maximum bus bandwidth supported
+     * output : max_bus_bw
+     */
+    memset(&response, 0, sizeof(HAP_power_response_t));
+    response.type = HAP_power_get_max_bus_bw;
+    retVal = HAP_power_get(context_ptr, &response);
+    if (retVal!=AEE_SUCCESS) {
+        FARF(ERROR, "Unable to get the maximum bus bandwidth supported");
+        return AEE_EFAILED;
+    }
+
+    max_bus_bw = response.max_bus_bw;
+    /*
+     * HAP_power_get_client_class : Returns the client class:
+     *     0x00 - Unknown Client Class
+     *     0x01 - Audio Client Class
+     *     0x02 - Voice Client Class
+     *     0x04 - Compute Client Class
+     *     0x08 - Camera Streaming with 1 HVX Client Class
+     *     0x10 - Camera Streaming with 2 HVX Client Class
+     *
+     * output : client_class
+     */
+    memset(&response, 0, sizeof(HAP_power_response_t));
+    response.type = HAP_power_get_client_class;
+    retVal = HAP_power_get(context_ptr, &response);
+    if (retVal!=AEE_SUCCESS) {
+        FARF(ERROR, "Unable to get the client class");
+        return AEE_EFAILED;
+    }
+
+    client_class = response.client_class;
+    /*
+     * HAP_power_get_clk_Freq : Returns the Core Clock Frequency
+     * output : clk_freq_hz
+     */
+    memset(&response, 0, sizeof(HAP_power_response_t));
+    response.type = HAP_power_get_clk_Freq;
+    retVal = HAP_power_get(context_ptr, &response);
+    if (retVal!=AEE_SUCCESS) {
+        FARF(ERROR, "Unable to get the DSP core clock frequency");
+        return AEE_EFAILED;
+    }
+
+    clk_freq_hz = response.clkFreqHz;
+    /*
+     * HAP_power_get_dcvsEnabled : Returns the DCVS status : 0 - disabled; 1 - enabled
+     * output : dcvs_enabled
+     */
+    memset(&response, 0, sizeof(HAP_power_response_t));
+    response.type = HAP_power_get_dcvsEnabled;
+    retVal = HAP_power_get(context_ptr, &response);
+    if (retVal!=AEE_SUCCESS) {
+        FARF(ERROR, "Unable to get the DCVS status");
+        return AEE_EFAILED;
+    }
+
+    dcvs_enabled = response.dcvsEnabled;
+    printf("\nMaximum MIPS of DSP:             %u"
+                 "\nMaximum Bus Bandwidth supported: %u Bytes/second(%u MiB/s)"
+                 "\nClient Class:                    %x"
+                 "\nCore clock frequency of the DSP: %u"
+                 "\nDCVS status:                     %d",
+                  max_mips, max_bus_bw, max_bus_bw >> 20, client_class, clk_freq_hz, dcvs_enabled);
+
+}
+
 AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 latency, int32 mulmat_algo, int32 thread_counts) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
-    GGMLHEXAGON_LOG_DEBUG("user specified thread_counts %d", thread_counts);
+    GGMLHEXAGON_LOG_INFO("user specified thread_counts %d", thread_counts);
     if (thread_counts <= g_thread_counts) {
         g_thread_counts = thread_counts;
     }
-    GGMLHEXAGON_LOG_DEBUG("real thread_counts %d", g_thread_counts);
+    GGMLHEXAGON_LOG_INFO("real thread_counts %d", g_thread_counts);
 
     g_mulmat_algotype = mulmat_algo;
-    GGMLHEXAGON_LOG_DEBUG("mulmat_algotype %d", g_mulmat_algotype);
+    GGMLHEXAGON_LOG_INFO("mulmat_algotype %d", g_mulmat_algotype);
     FARF(ALWAYS, "mulmat_algotype set to %d (0=auto, 32=VTCM+HMX, 33=VTCM multithread)", g_mulmat_algotype);
 
     if (g_thread_counts >= 1) {
         AEEResult result = worker_pool_reinit_with_threads(g_thread_counts);
         FARF(HIGH, "worker_pool_reinit_with_threads returned %d", result);
     }
+
+    g_hexagon_power_ctx = (void *)(handle);
+
+    hap_probe_dsp(handle);
+
+    //set_power_boost(handle, 1);
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return AEE_SUCCESS;
@@ -189,6 +397,10 @@ int ggmlop_get_thread_counts(void) {
 
 unsigned int ggmlop_get_compute_res_ctx_id(void) {
     return g_compute_res_ctx_id;
+}
+
+int ggmlop_is_hmx_available(void) {
+    return g_hmx_available;
 }
 
 void * ggmlop_get_work_data(size_t size) {

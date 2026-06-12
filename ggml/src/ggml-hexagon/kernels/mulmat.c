@@ -1337,10 +1337,12 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
     if (compute_res_ctx_id != 0) {
         int lock_result = HAP_compute_res_hmx_lock(compute_res_ctx_id);
         if (lock_result != 0) {
+            GGMLHEXAGON_LOG_INFO("HMX lock failed (%d), falling back to VTCM multithread mode\n", lock_result);
             return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
         }
         hmx_locked = 1;
     } else {
+        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -1348,6 +1350,7 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
+        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -1356,6 +1359,7 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
+        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -1377,6 +1381,7 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
+        //GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -1386,6 +1391,7 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
+        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
     }
 
@@ -1393,6 +1399,7 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
+        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 

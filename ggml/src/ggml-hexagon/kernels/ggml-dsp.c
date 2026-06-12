@@ -45,6 +45,20 @@ void ggmlhexagon_log_internal(int level, const char *file, const char *func, int
     va_end(args);
 }
 
+void ggmlhexagon_log_always(int level, const char *file, const char *func, int line, const char *format, ...) {
+    static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
+    va_list args;
+    va_start(args, format);
+    int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ",
+                              func, line);
+    int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix,
+                        GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
+    if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
+        FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_internal_buf);
+    }
+    va_end(args);
+}
+
 void ggmlhexagon_dump_tensor_elements(const ggml_tensor * tensor) {
 #if !GGMLHEXAGON_DEBUG
     return;

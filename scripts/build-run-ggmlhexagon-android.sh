@@ -733,11 +733,10 @@ function prepare_run_on_phone()
 
 
     #for verify jz's prebuilt libggmldsp-skel.so, built from the reference/self-develop source codes in this project
-    #incompatible and not used since 06(June)/11/2026, keep it only for personal use
     #prepare_ggmldsp_prebuilt
 
     #for verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
-    #this is default behaviour, but qualcomm's backend so already updated on device side when running build_qcom
+    #this is default behaviour(it will report libggmldsp-skel.so can't found when exec UT after build_qcom), but qualcomm's backend so already updated on device side when running build_qcom
     prepare_ggmldsp
 
     #for verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) which generated from source codes in this branch

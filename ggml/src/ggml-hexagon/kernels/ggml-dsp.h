@@ -109,17 +109,19 @@ extern "C" {
 #endif
 
 #define GGMLDSP_LOG_DEBUG(...)                             ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLDSP_LOG_WARN(...)                              ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_WARN(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_INFO(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_INFO, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #define GGMLHEXAGON_LOGBUF_LEN                              4096
 #define GGMLHEXAGON_TMPBUF_LEN                              256
 #if GGMLHEXAGON_DEBUG
 #define GGMLHEXAGON_LOG_DEBUG(...)                          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_ERROR(...)                          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #else
 #define GGMLHEXAGON_LOG_DEBUG(...)
-#define GGMLHEXAGON_LOG_ERROR(...)
 #endif
+
+#define GGMLHEXAGON_LOG_INFO(...)                            ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)                           ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #define GGML_TENSOR_LOCALS_1(type, prefix, pointer, array) \
     const type prefix##0 = (pointer)->array[0]; \
@@ -160,6 +162,7 @@ extern "C" {
 enum ggmlhexagon_log_level {
     GGMLHEXAGON_LOG_LEVEL_NONE  = 0,
     GGMLHEXAGON_LOG_LEVEL_DEBUG = 1,
+    GGMLHEXAGON_LOG_LEVEL_INFO = 2,
 };
 
 enum ggml_op {
@@ -371,10 +374,12 @@ GGML_API bool ggml_are_same_shape(const struct ggml_tensor * t0, const struct gg
 GGML_API void ggmlhexagon_dump_tensor_elements(const ggml_tensor * tensor);
 GGML_API void ggmlhexagon_dump_tensor(const ggml_tensor * tensor, int dump_tensor_data);
 GGML_API void ggmlhexagon_log_internal(int level, const char *file, const char *func, int line, const char *format, ...);
+GGML_API void ggmlhexagon_log_always(int level, const char *file, const char *func, int line, const char *format, ...);
 
 GGML_API int ggmlop_get_thread_counts(void);
 GGML_API int ggmlop_get_mulmat_algotype(void);
 GGML_API unsigned int ggmlop_get_compute_res_ctx_id(void);
+GGML_API int ggmlop_is_hmx_available(void);
 GGML_API void * ggmlop_get_work_data(size_t size);
 GGML_API void * ggmlop_get_vtcm_pool(size_t * size);
 GGML_API uint16_t ggml_compute_fp32_to_fp16(float f);
