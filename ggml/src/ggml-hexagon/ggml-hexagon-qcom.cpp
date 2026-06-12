@@ -4007,3 +4007,19 @@ ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
+
+//compatible function
+void ggml_backend_hexagon_set_cfg(int new_hexagon_backend, int new_hwaccel_approach) {
+}
+void ggml_backend_hexagon_set_mulmat_algotype(int new_mulmat_algotype) {
+}
+int ggml_backend_hexagon_get_mulmat_algotype() {
+    return 0;
+}
+ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_libpath) {
+    return nullptr;
+}
+const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
+    return "ggml-hexagon-qcom";
+}
+

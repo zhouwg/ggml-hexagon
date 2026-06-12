@@ -381,6 +381,7 @@ function check_and_download_ndk()
 function build_idl()
 {
     echo "build idl"
+    #not acutually used at the moment
     #if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
     #    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
     #fi
@@ -394,6 +395,8 @@ function build_arm64
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
+    #upload the new libggmldsp-skel.so on device side
+    prepare_ggmldsp
     show_pwd
 
     cd -
@@ -407,9 +410,39 @@ function build_arm64_debug
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
+    #upload the new libggmldsp-skel.so on device side
+    prepare_ggmldsp
     show_pwd
 
     cd -
+}
+
+
+#build qualcomm's official ggml-hexagon backend for performance comparison
+function build_arm64_qcom
+{
+    echo "before build_qcom(build_arm64_qcom), prepare files"
+    /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp      ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp.me
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt        ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt.me
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists-qcom.txt   ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake --build ${LOCAL_BUILD_DIR}
+    #upload the new libggml-htps.so on device side
+    prepare_ggmlhtp
+    show_pwd
+
+    echo "after build_qcom(build_arm64_qcom), restore files"
+    /bin/rm -f CMakeUserPresets.json
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp.me   ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt.me     ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt
+
+    echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
+    echo "./scripts/build-run-android.sh run_testops"
+    echo "./scripts/build-run-android.sh run_llamacli 3"
+    echo "./scripts/build-run-android.sh run_llamabench 3"
 }
 
 
@@ -487,6 +520,41 @@ function build_ggml_hexagon_debug()
     build_arm64_debug
 }
 
+
+function build_ggml_hexagon_qcom()
+{
+    show_pwd
+    check_and_download_ndk
+    check_and_download_opencl_sdk
+    check_and_download_qnn_sdk
+    check_and_download_hexagon_sdk
+    dump_vars
+    remove_temp_dir
+    build_arm64_qcom
+}
+
+
+#for Qualcomm's ggml-hexagon backend
+function prepare_ggmlhtp()
+{
+    echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
+case "$HTP_ARCH_VERSION" in
+    v75)
+        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+    ;;
+
+    v79)
+        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
+    ;;
+
+    *)
+        show_usage
+        exit 1
+    ;;
+esac
+}
+
+
 #for jz's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
 {
@@ -513,9 +581,10 @@ esac
 
 
 #for jz's prebuilt ggml-hexagon backend in branch self-build-jz
+#incompatible since 06(June)/11/2026
 function prepare_ggmldsp_prebuilt()
 {
-    adb push ./scripts/ggml-hexagon-for-binary-lib.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
     echo "adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so"
 case "$HTP_ARCH_VERSION" in
     v69)
@@ -664,11 +733,16 @@ function prepare_run_on_phone()
 
 
     #for verify jz's prebuilt libggmldsp-skel.so, built from the reference/self-develop source codes in this project
-    #incompatible since 06(June)/11/2026
+    #incompatible and not used since 06(June)/11/2026, keep it only for personal use
     #prepare_ggmldsp_prebuilt
 
-    #for verify jz's open-source libggmldsp-skel.so which generated from source codes in this branch
+    #for verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
+    #this is default behaviour, but qualcomm's backend so already updated on device side when running build_qcom
     prepare_ggmldsp
+
+    #for verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) which generated from source codes in this branch
+    #this is non-default behaviour, but jz's backend so already updated on device side when running build
+    #prepare_ggmlhtp
 
     adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
 
@@ -894,6 +968,7 @@ function show_usage()
     echo "  $0 print_oplist"
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
+    echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
     echo "  $0 clean"
     echo "  $0 updateqnnlib"
     echo "  $0 run_testops"
@@ -945,6 +1020,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "build_debug" ]; then
         build_ggml_hexagon_debug
+        exit 0
+    elif [ "$1" == "build_qcom" ]; then
+        build_ggml_hexagon_qcom
         exit 0
     elif [ "$1" == "clean" ]; then
         remove_temp_dir

@@ -172,3 +172,5 @@ ggml/src/ggml-hexagon/kernels/ggmlop.h
 ggml/src/ggml-hexagon/kernels/ggmlop_skel.c
 ggml/src/ggml-hexagon/kernels/ggmlop_stub.c
 x86-build/
+refs/
+*.me

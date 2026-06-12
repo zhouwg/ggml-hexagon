@@ -1,23 +1,14 @@
 {
   "project": "ggml-hexagon",
   "local_workdir": "/home/zhouwg/develop/ggml-hexagon",
-  "remote_build_host": "zhouwg@192.168.0.200",
-  "remote_workdir": "/home/zhouwg/develop/ggml-hexagon",
   "scripts": {
-    "build": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build",
-    "ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testops",
-    "run_testop_add": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD",
-    "run_testop_mulmat": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop MUL_MAT",
-    "run_llamacli": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3",
-    "run_llamabench": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamabench 3"
-  },
-  "commands": {
-    "verify_build": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh build",
-    "run_ut": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testops",
-    "run_testop_add": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop ADD",
-    "run_testop_mulmat": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_testop MUL_MAT",
-    "run_llamacli": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamacli 3",
-    "run_llamabench": "cd /home/zhouwg/develop/ggml-hexagon/ && ./scripts/build-run-android.sh run_llamabench 3"
+    "build": "./scripts/build-run-android.sh build",
+    "run_testops": "./scripts/build-run-android.sh run_testops",
+    "run_testop_add": "./scripts/build-run-android.sh run_testop ADD",
+    "run_testop_mulmat": "./scripts/build-run-android.sh run_testop MUL_MAT",
+    "run_llamacli": "./scripts/build-run-android.sh run_llamacli 3",
+    "run_llamabench": "./scripts/build-run-android.sh run_llamabench 3",
+    "build_qcom": "./scripts/build-run-android.sh build_qcom"
   },
   "hexagon_backend_cdsp_index": 3,
   "build_rules": {
@@ -25,29 +16,29 @@
     "build_command": "./scripts/build-run-android.sh build",
     "build_forbidden": {
       "do_not_read": ["Makefile", "CMakeLists.txt", "cmake", "cmake/**/*"],
-      "do_not_run": ["make", "cmake", "ninja", "check_android_phone", "check_prebuilt_models"],
+      "do_not_run": ["make", "cmake", "ninja"],
       "reason": "Follow ONLY docs/how-to-build-ggmlhexagon.md. Ignore all toplevel build files."
     },
     "script_rules": {
       "allowed_function": "build (from build-run-android.sh)",
-      "forbidden_functions": ["check_android_phone", "check_prebuilt_models"],
-      "reason": "These functions are forbidden. Only run the main build flow."
+      "forbidden_functions": [],
+      "reason": "All functions are allowed for local execution."
     },
-    "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-android.sh accordingly",
+    "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-ggmlhexagon-android.sh accordingly",
     "if_unsure": "STOP. Do NOT use make/cmake. ONLY follow: docs/how-to-build-ggmlhexagon.md"
   },
   "do_not_modify": {
     "symlinks": [
-      "scripts/build-run-android.sh"
+      "scripts/build-run-ggmlhexagon-android.sh"
     ],
-    "reason": "These files are symbolic links. Modify the target file instead."
+    "reason": "These files are maintained as part of the project infrastructure. Modify with caution and follow project conventions."
   },
   "notes": {
     "execution_mode": "local (no ssh needed - project is on local filesystem)",
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
     "phone_connected_locally": "adb connects to the Android phone locally",
-    "default_verify_target": "source-built libggmldsp-skel.so (scripts/build-run-android.sh line 671: prepare_ggmldsp enabled)",
-    "compare_with_prebuilt": "To compare against prebuilt binary, comment out line 671 (prepare_ggmldsp) and enable line 668 (prepare_ggmldsp_prebuilt) in scripts/build-run-android.sh"
+    "default_verify_target": "source-built libggmldsp-skel.so, run ./scripts/build-run-ggmlhexagon-android.sh build",
+    "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom"
   },
   "hexagon_implementations": {
     "description": "Two ggml-hexagon implementations exist in this project",
@@ -75,12 +66,12 @@
     "ap_side_data_path_status": "ARM-AP side code path in ggml-hexagon.cpp is known good - it works correctly with the prebuilt libggmldsp-skel.so for both testops and inference."
   },
   "testing_rules": {
-    "description": "Test commands for different test types. All tests should be run remotely on 192.168.0.200, especially when the project is on CIFS filesystem.",
+    "description": "Test commands for different test types. All tests should be run locally.",
     "add_test": "./scripts/build-run-android.sh run_testop ADD",
     "mulmat_test": "./scripts/build-run-android.sh run_testop MUL_MAT",
     "inference_test": "./scripts/build-run-android.sh run_llamacli 3",
     "benchmark_test": "./scripts/build-run-android.sh run_llamabench 3",
-    "note": "All tests must be executed remotely on the remote build host (192.168.0.200). Do NOT run tests locally, especially when the project is on a CIFS file system."
+    "note": "All tests must be executed locally"
   },
   "log_viewing_rules": {
     "description": "How to view logs (execute locally on this machine)",
@@ -159,7 +150,7 @@
       "medium_case": "Small matrices (<1024) achieve good speedup (1.7-2.3x)",
       "limited_case": "Large matrices (>2048) have reduced speedup (1.2-1.5x), limited by memory bandwidth"
     },
-    "reminder": "All commands must be executed on remote host 192.168.0.200"
+    "reminder": "All commands must be executed locally"
   },
   "vec_dot_f32_hvx_performance_comparison": {
     "title": "vec_dot_f32_hvx_ai vs vec_dot_f32_hvx_me Performance Comparison",
