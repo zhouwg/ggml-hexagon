@@ -3,11 +3,16 @@
 # Copyright (c) 2024-2026 Jeff Zhou(https://github.com/zhouwg)
 #
 # 1. build llama.cpp + jz's ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
-#    this script will setup local dev envs automatically
+#    this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
+#    this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 2. verify prebuilt libggmldsp-skel.so on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 2. verify jz's prebuilt ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+
+# 3. verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+
+# 4. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 3. performance comparison of QNN-CPU,QNN-GPU,QNN-NPU,Hexagon-cDSP,ggml on Android phone equipped with Qualcomm Snapdragon mobile SoC
+# 5. performance comparison of QNN-CPU,QNN-GPU,QNN-NPU,Hexagon-cDSP,ggml on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
 #
 set -e
@@ -391,6 +396,8 @@ function build_idl()
 function build_arm64
 {
     build_idl
+    #make AI Agent happy
+    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
@@ -406,6 +413,8 @@ function build_arm64
 function build_arm64_debug
 {
     build_idl
+    #make AI Agent happy
+    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION}
     cd ${LOCAL_BUILD_DIR}
@@ -581,7 +590,6 @@ esac
 
 
 #for jz's prebuilt ggml-hexagon backend in branch self-build-jz
-#incompatible since 06(June)/11/2026
 function prepare_ggmldsp_prebuilt()
 {
     adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg

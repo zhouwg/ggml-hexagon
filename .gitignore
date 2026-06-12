@@ -173,4 +173,5 @@ ggml/src/ggml-hexagon/kernels/ggmlop_skel.c
 ggml/src/ggml-hexagon/kernels/ggmlop_stub.c
 x86-build/
 refs/
+ccache_dir/
 *.me
