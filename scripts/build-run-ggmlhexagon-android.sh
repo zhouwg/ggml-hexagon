@@ -491,7 +491,7 @@ function update_qnn_libs()
 
 function update_qnn_cfg()
 {
-    adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
+    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
 }
 
 
@@ -558,7 +558,7 @@ esac
 #for jz's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
 {
-    adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
     echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so"
 case "$HTP_ARCH_VERSION" in
     v75)
@@ -584,7 +584,7 @@ esac
 #incompatible since 06(June)/11/2026
 function prepare_ggmldsp_prebuilt()
 {
-    adb push ./scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
     echo "adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so"
 case "$HTP_ARCH_VERSION" in
     v69)
