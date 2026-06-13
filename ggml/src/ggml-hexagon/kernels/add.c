@@ -68,8 +68,12 @@ static inline void ggml_add_f32_hvx(const int n, float * GGML_RESTRICT z, const 
 
         #pragma unroll
         for (size_t j = 0; j < fetch_counts; j++) {
+#if __HEXAGON_ARCH__ >= 79
+            *vc++ = Q6_Vsf_vadd_VsfVsf(*va++, *vb++);
+#else
             qf32 = Q6_Vqf32_vadd_VsfVsf(*va++, *vb++);
             *vc++ = Q6_Vsf_equals_Vqf32(qf32);
+#endif
         }
     }
 #else
@@ -224,12 +228,17 @@ static int ggmlop_dsp_add_multithread(remote_handle64 h, const ggml_tensor * src
 
 int ggmlop_dsp_add(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
+    char tempbuf[256];
+    ggmlhexagon_get_opkey(GGML_OP_ADD, src0, src1, tempbuf, 256);
 
+    int64_t begin_time = ggml_time_us();
     if (ggmlop_get_thread_counts() > 1) {
         ggmlop_dsp_add_multithread(h, src0, src1, dst);
     } else {
         ggmlop_dsp_add_singlethread(h, src0, src1, dst);
     }
+    int64_t end_time = ggml_time_us();
+    GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
     GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
     return 0;
 }

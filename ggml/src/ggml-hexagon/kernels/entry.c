@@ -1,23 +1,26 @@
+#include <hexagon_types.h>
+#include <HAP_power.h>
+#include <HAP_dcvs.h>
+#include <HAP_mem.h>
+#include <HAP_compute_res.h>
 #include "ggml-dsp.h"
 #include "worker_pool.h"
-#include "HAP_compute_res.h"
-#include "HAP_power.h"
 
-static int g_thread_counts = 1;
-static int g_mulmat_algotype = 0;
-static void * g_work_data = NULL;
-static size_t g_work_size = 0;
+static int g_thread_counts                  = 1;
+static int g_mulmat_algotype                = 0;
+static void * g_work_data                   = NULL;
+static size_t g_work_size                   = 0;
 
-static void * g_vtcm_base = NULL;
-static size_t g_vtcm_size = 0;
-static unsigned int g_compute_res_ctx_id = 0;
-static int g_power_ctx = 0;
-static int g_hmx_available = 0;
+static void * g_vtcm_base                   = NULL;
+static size_t g_vtcm_size                   = 0;
+static unsigned int g_compute_res_ctx_id    = 0;
+static int g_power_ctx                      = 0;
+static int g_hmx_available                  = 0;
 
-void *                        g_hexagon_power_ctx       = NULL;
+void *  g_hexagon_power_ctx                 = NULL;
 
-#define MAX_WORK_SIZE (1024 * 1024 * 1024)
-#define DEFAULT_VTCM_SIZE (8 * 1024 * 1024)
+#define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
+#define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
 static int power_on_hvx_hmx(void) {
     HAP_power_request_t req;
@@ -47,6 +50,14 @@ static int power_on_hvx_hmx(void) {
     req.dcvs_v3.core_params.target_corner = HAP_DCVS_VCORNER_MAX;
     req.dcvs_v3.set_sleep_disable = 1;
     req.dcvs_v3.sleep_disable = 1;
+
+    GGMLHEXAGON_LOG_INFO("__HVX_ARCH__ = %d\n", __HVX_ARCH__);
+
+    // v79 architecture requires protected bus corners setting
+#if __HEXAGON_ARCH__ >= 79
+    HAP_set_dcvs_v3_protected_bus_corners(&req, 1);
+#endif
+
     if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set DCVS failed");
         return -2;
@@ -61,7 +72,24 @@ static int power_on_hvx_hmx(void) {
         return -3;
     }
 
-    /* Power up HMX */
+    /* Power up HMX with v2 settings for v75+ architecture */
+#if __HVX_ARCH__ >= 75
+    memset(&req, 0, sizeof(req));
+    req.type = HAP_power_set_HMX_v2;
+    req.hmx_v2.set_power = 1;
+    req.hmx_v2.power_up = 1;
+    req.hmx_v2.set_clock = 1;
+    req.hmx_v2.target_corner = HAP_DCVS_EXP_VCORNER_MAX;
+    req.hmx_v2.min_corner = HAP_DCVS_EXP_VCORNER_MAX;
+    req.hmx_v2.max_corner = HAP_DCVS_EXP_VCORNER_MAX;
+    req.hmx_v2.perf_mode = HAP_CLK_PERF_HIGH;
+    GGMLHEXAGON_LOG_INFO("Setting HMX clock with HMX_v2 for v75+ architecture");
+    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+        GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX_v2 failed, continuing without HMX");
+        return -4;
+    }
+#else
+    /* Power up HMX (legacy for older architectures) */
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_HMX;
     req.hmx.power_up = 1;
@@ -69,12 +97,11 @@ static int power_on_hvx_hmx(void) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX failed, continuing without HMX");
         return -4;
     }
+#endif
 
     GGMLHEXAGON_LOG_INFO("HAP_power_set for HVX and HMX succeeded");
     return 0;
 }
-
-
 
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     void * tptr = NULL;
@@ -159,6 +186,11 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
             g_vtcm_base = vtcm_ptr;
             g_vtcm_size = vtcm_ptr_size;
             GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_vtcm_size, g_vtcm_base);
+
+            //clear the VTCM region
+            // TEMPORARILY DISABLED FOR DEBUGGING - memset(g_vtcm_base, 0, g_vtcm_size);
+            // NOTE: HMX lock is managed per-operation in mulmat.c, not here
+            //HAP_compute_res_hmx_lock(g_compute_res_ctx_id);
         }
     }
 
@@ -177,7 +209,7 @@ int ggmlop_dsp_close(remote_handle64 handle) {
 
     if (g_compute_res_ctx_id != 0) {
         HAP_compute_res_release_cached(g_compute_res_ctx_id);
-        //Unlocks the HMX unit from the calling thread
+        // NOTE: HMX lock is managed per-operation in mulmat.c, not here
         // HAP_compute_res_hmx_unlock(g_compute_res_ctx_id);
 
         HAP_compute_res_release(g_compute_res_ctx_id);
@@ -195,9 +227,7 @@ int ggmlop_dsp_close(remote_handle64 handle) {
     return 0;
 }
 
-
-static AEEResult set_power_boost(remote_handle64 handle, uint32 on)
-{
+static AEEResult set_power_boost(remote_handle64 handle, uint32 on) {
     AEEResult res = AEE_SUCCESS;
     //Clear the structure to only update the selected fields
     HAP_power_request_t request = {0};
@@ -379,6 +409,23 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 
 
     g_hexagon_power_ctx = (void *)(handle);
 
+    // Test VTCM memory read/write
+    if (g_vtcm_base != NULL) {
+        uint8_t *weight = (uint8_t *)g_vtcm_base;
+        uint8_t *active = (uint8_t *)g_vtcm_base + 256;
+        // Write test patterns
+        memset(weight, 0xaa, 128);
+        memset(active, 0xbb, 128);
+        // Verify write
+        if (weight[0] == 0xaa && active[0] == 0xbb) {
+            GGMLHEXAGON_LOG_INFO("VTCM read/write test PASSED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+        } else {
+            GGMLHEXAGON_LOG_ERROR("VTCM read/write test FAILED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+        }
+    } else {
+        GGMLHEXAGON_LOG_WARN("VTCM not available, skipping VTCM test");
+    }
+
     hap_probe_dsp(handle);
 
     //set_power_boost(handle, 1);
@@ -428,12 +475,13 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     if (!src0 || !dst) {
+        GGMLHEXAGON_LOG_ERROR("invalid input: src0=%p, dst=%p", src0, dst);
         return AEE_EBADPARM;
     }
 
-    GGMLHEXAGON_LOG_DEBUG("executing op type %d", ggml_op);
+    GGMLHEXAGON_LOG_INFO("executing op type %d", ggml_op);
 
-    switch ((enum ggml_op)ggml_op) {
+    switch (ggml_op) {
         case GGML_OP_SUB:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SUB task");
             ggmlop_dsp_sub(h, src0, src1, dst);
@@ -446,7 +494,15 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL_MAT task");
             ggmlop_dsp_mulmat(h, src0, src1, dst);
             break;
+        case 168:  // Test HMX operation
+            GGMLHEXAGON_LOG_INFO("executing TEST_HMX task (op=168)");
+            GGMLHEXAGON_LOG_INFO("src0: data=%p, ne[0]=%d, ne[1]=%d", src0->data, src0->ne[0], src0->ne[1]);
+            GGMLHEXAGON_LOG_INFO("src1: data=%p, ne[0]=%d, ne[1]=%d", src1->data, src1->ne[0], src1->ne[1]);
+            ggmlop_dsp_test_hmx(h, src0, src1, dst);
+            GGMLHEXAGON_LOG_INFO("TEST_HMX task completed");
+            break;
         default:
+            GGMLHEXAGON_LOG_ERROR("unsupported op type: %d", ggml_op);
             return AEE_EUNSUPPORTED;
     }
 

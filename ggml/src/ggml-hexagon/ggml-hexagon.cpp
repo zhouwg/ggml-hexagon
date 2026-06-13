@@ -115,6 +115,9 @@ class  qnn_instance;
 class  hexagon_profiler;
 struct ggml_backend_hexagon_context;
 
+// Forward declaration for test function
+static int test_hmx_ap(ggml_backend_hexagon_context * ctx);
+
 #ifdef NDEBUG
 #define GGMLHEXAGON_DEBUG                               0
 #else
@@ -5452,7 +5455,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
         GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
         ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
+        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
         if (nullptr == ctx->rpc_mempool) {
             GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
             return 2;
@@ -5526,16 +5529,18 @@ static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
         //make llama-bench happy
         GGMLHEXAGON_LOG_VERBOSE("vtcm_count %d", vtcm_count);
         GGMLHEXAGON_LOG_VERBOSE("vtcm_page %d", vtcm_page);
-        GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d", hmx_depth);
-        GGMLHEXAGON_LOG_VERBOSE("hmx_spatial %d", hmx_spatial);
+        //TODO:here hmx infos in AP side will confuse AI Agent
+        //GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d", hmx_depth);
+        //GGMLHEXAGON_LOG_VERBOSE("hmx_spatial %d", hmx_spatial);
         GGMLHEXAGON_LOG_VERBOSE("hvx_support_128b %d", hvx_support_128b);
         GGMLHEXAGON_LOG_VERBOSE("unsigned pd supported %d", ggmlhexagon_get_unsignedpd_support());
         GGMLHEXAGON_LOG_VERBOSE("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
     } else {
         GGMLHEXAGON_LOG_INFO("vtcm_count %d", vtcm_count);
         GGMLHEXAGON_LOG_INFO("vtcm_page %d", vtcm_page);
-        GGMLHEXAGON_LOG_INFO("hmx_depth %d", hmx_depth);
-        GGMLHEXAGON_LOG_INFO("hmx_spatial %d", hmx_spatial);
+        //TODO:here hmx infos in AP side will confuse AI Agent
+        //GGMLHEXAGON_LOG_INFO("hmx_depth %d", hmx_depth);
+        //GGMLHEXAGON_LOG_INFO("hmx_spatial %d", hmx_spatial);
         GGMLHEXAGON_LOG_INFO("hvx_support_128b %d", hvx_support_128b);
         GGMLHEXAGON_LOG_INFO("unsigned pd supported %d", ggmlhexagon_get_unsignedpd_support());
         GGMLHEXAGON_LOG_INFO("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
@@ -5723,6 +5728,10 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
             GGMLHEXAGON_LOG_INFO("failed to init rpc mempool");
             goto bail;
         }
+
+        // Test HMX functionality after DSP initialization and rpc mempool setup
+        GGMLHEXAGON_LOG_INFO("Running HMX test...");
+        test_hmx_ap(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,
                              ggmlhexagon_get_dsp_name(domain_id));
@@ -7263,3 +7272,181 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
+
+// ==================== HMX Test Functions ====================
+
+// Test HMX matrix multiplication with known values
+// Uses RPC mempool to simulate real offload mulmat behavior
+// src0: MxK matrix, all values = 1.0f
+// src1: KxN matrix, all values = 2.0f
+// Expected result: dst = src0^T * src1, each element = K * 1.0 * 2.0 = 2*K
+static int test_hmx_ap(ggml_backend_hexagon_context * ctx) {
+    // Use 32x32x32 matrices for HMX test
+    // HMX requires all dimensions to be 32-aligned
+    int     sizex               = 32;  // K dimension
+    int     sizey               = 32;  // M dimension (rows of src0)
+    int     sizez               = 32;  // N dimension (rows of src1)
+
+    GGMLHEXAGON_LOG_INFO("DEBUG: sizex=%d, sizey=%d, sizez=%d\n", sizex, sizey, sizez);
+
+    // Calculate aligned sizes (128-byte alignment for RPC mempool)
+    size_t src0_size = sizex * sizey * sizeof(float);
+    size_t src1_size = sizex * sizez * sizeof(float);
+    size_t dst_size = sizey * sizez * sizeof(float);
+
+    size_t src0_size_aligned = ((src0_size + 127) / 128) * 128;
+    size_t src1_size_aligned = ((src1_size + 127) / 128) * 128;
+    size_t dst_size_aligned = ((dst_size + 127) / 128) * 128;
+
+    // Allocate from RPC mempool (simulating real offload behavior)
+    if (nullptr == ctx->rpc_mempool) {
+        GGMLHEXAGON_LOG_INFO("rpc_mempool not initialized, skipping HMX test\n");
+        return 2;
+    }
+
+    size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
+    if (aligned_offset + src0_size_aligned + src1_size_aligned + dst_size_aligned > ctx->rpc_mempool_len) {
+        GGMLHEXAGON_LOG_INFO("rpc_mempool exhausted, skipping HMX test\n");
+        return 2;
+    }
+
+    float * src0_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    aligned_offset += src0_size_aligned;
+    float * src1_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    aligned_offset += src1_size_aligned;
+    float * dst_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    ctx->rpc_mempool_usage = aligned_offset + dst_size_aligned;
+
+    GGMLHEXAGON_LOG_INFO("HMX test allocated from rpc_mempool: src0=%p, src1=%p, dst=%p\n",
+                         (void *)src0_data, (void *)src1_data, (void *)dst_data);
+
+    // Initialize tensors with known values
+    for (int i = 0; i < sizex * sizey; i++) {
+        src0_data[i] = 1.0f;
+    }
+    for (int i = 0; i < sizex * sizez; i++) {
+        src1_data[i] = 2.0f;
+    }
+    memset(dst_data, 0, dst_size);
+
+    GGMLHEXAGON_LOG_INFO("HMX test: src0(%dx%d), src1(%dx%d), dst(%dx%d)\n",
+                         sizex, sizey, sizex, sizez, sizez, sizey);
+    GGMLHEXAGON_LOG_INFO("src0 first 4 elements: %.2f %.2f %.2f %.2f\n",
+                         src0_data[0], src0_data[1], src0_data[2], src0_data[3]);
+    GGMLHEXAGON_LOG_INFO("src1 first 4 elements: %.2f %.2f %.2f %.2f\n",
+                         src1_data[0], src1_data[1], src1_data[2], src1_data[3]);
+
+    // Construct dsptensor structures
+    struct dsptensor dsptensor_0;
+    struct dsptensor dsptensor_1;
+    struct dsptensor dsptensor_2;
+
+    memset(&dsptensor_0, 0, sizeof(dsptensor_0));
+    dsptensor_0.data = (void *)src0_data;
+    dsptensor_0.data_len = src0_size;
+    dsptensor_0.type = GGML_TYPE_F32;
+    dsptensor_0.ne[0] = sizex;
+    dsptensor_0.ne[1] = sizey;
+    dsptensor_0.ne[2] = 1;
+    dsptensor_0.ne[3] = 1;
+    dsptensor_0.nb[0] = sizeof(float);
+    dsptensor_0.nb[1] = dsptensor_0.nb[0] * dsptensor_0.ne[0];
+    dsptensor_0.nb[2] = dsptensor_0.nb[1] * dsptensor_0.ne[1];
+    dsptensor_0.nb[3] = dsptensor_0.nb[2] * dsptensor_0.ne[2];
+
+    memset(&dsptensor_1, 0, sizeof(dsptensor_1));
+    dsptensor_1.data = (void *)src1_data;
+    dsptensor_1.data_len = src1_size;
+    dsptensor_1.type = GGML_TYPE_F32;
+    dsptensor_1.ne[0] = sizex;
+    dsptensor_1.ne[1] = sizez;
+    dsptensor_1.ne[2] = 1;
+    dsptensor_1.ne[3] = 1;
+    dsptensor_1.nb[0] = sizeof(float);
+    dsptensor_1.nb[1] = dsptensor_1.nb[0] * dsptensor_1.ne[0];
+    dsptensor_1.nb[2] = dsptensor_1.nb[1] * dsptensor_1.ne[1];
+    dsptensor_1.nb[3] = dsptensor_1.nb[2] * dsptensor_1.ne[2];
+
+    memset(&dsptensor_2, 0, sizeof(dsptensor_2));
+    dsptensor_2.data = (void *)dst_data;
+    dsptensor_2.data_len = dst_size;
+    dsptensor_2.type = GGML_TYPE_F32;
+    dsptensor_2.ne[0] = sizez;
+    dsptensor_2.ne[1] = sizey;
+    dsptensor_2.ne[2] = 1;
+    dsptensor_2.ne[3] = 1;
+    dsptensor_2.nb[0] = sizeof(float);
+    dsptensor_2.nb[1] = dsptensor_2.nb[0] * dsptensor_2.ne[0];
+    dsptensor_2.nb[2] = dsptensor_2.nb[1] * dsptensor_2.ne[1];
+    dsptensor_2.nb[3] = dsptensor_2.nb[2] * dsptensor_2.ne[2];
+
+    // Execute task on DSP using op_type = 168 (test HMX)
+    GGMLHEXAGON_LOG_INFO("calling ggmlop_dsp_execute_task with op_type=168\n");
+    int hexagon_error = ggmlop_dsp_execute_task(ctx->ggmlop_handle, 168, &dsptensor_0, &dsptensor_1, &dsptensor_2);
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_task failed: %d", hexagon_error);
+    }
+
+    // Dump result (first row)
+    GGMLHEXAGON_LOG_INFO("dst first row: ");
+    for (int j = 0; j < sizez; j++) {
+        GGMLHEXAGON_LOG_INFO("%.2f ", dst_data[j]);
+    }
+    GGMLHEXAGON_LOG_INFO("\n");
+
+    // Verify result: each element should be 32 * 2.0f = 64.0f
+    float expected = (float)sizex * 2.0f;  // 64.0f
+    int errors = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = 0; i < sizey * sizez; i++) {
+        float val = dst_data[i];
+
+        // Check for NaN
+        if (isnan(val)) {
+            if (nan_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = NaN", i);
+            }
+            nan_count++;
+            errors++;
+        }
+        // Check for Infinity
+        else if (isinf(val)) {
+            if (inf_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %s\n", i, val > 0 ? "Inf" : "-Inf");
+            }
+            inf_count++;
+            errors++;
+        }
+        // Check for value mismatch
+        else if (fabs(val - expected) > 0.01f) {
+            if (errors - nan_count - inf_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %.6f, expected %.6f (diff=%.6f)\n", i, val, expected, fabs(val - expected));
+            }
+            errors++;
+        }
+
+        if (errors >= 20) {
+            GGMLHEXAGON_LOG_INFO("... (more errors truncated)\n");
+            break;
+        }
+    }
+
+    if (errors == 0) {
+        GGMLHEXAGON_LOG_INFO("HMX test PASSED: all %d elements = %.2f\n", sizey * sizez, expected);
+    } else {
+        GGMLHEXAGON_LOG_INFO("HMX test FAILED: %d errors out of %d elements\n", errors, sizey * sizez);
+        if (nan_count > 0) {
+            GGMLHEXAGON_LOG_INFO("  - NaN count: %d\n", nan_count);
+        }
+        if (inf_count > 0) {
+            GGMLHEXAGON_LOG_INFO("  - Infinity count: %d\n", inf_count);
+        }
+        if (errors > nan_count + inf_count) {
+            GGMLHEXAGON_LOG_INFO("  - Value mismatch count: %d\n", errors - nan_count - inf_count);
+        }
+    }
+
+    return errors == 0 ? 0 : 1;
+}

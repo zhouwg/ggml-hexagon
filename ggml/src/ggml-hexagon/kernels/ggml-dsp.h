@@ -108,20 +108,23 @@ extern "C" {
 #define GGMLHEXAGON_DEBUG                                   1
 #endif
 
-#define GGMLDSP_LOG_DEBUG(...)                             ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLDSP_LOG_WARN(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLDSP_LOG_INFO(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_INFO, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-
 #define GGMLHEXAGON_LOGBUF_LEN                              4096
 #define GGMLHEXAGON_TMPBUF_LEN                              256
 #if GGMLHEXAGON_DEBUG
 #define GGMLHEXAGON_LOG_DEBUG(...)                          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_DEBUG(...)                              ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #else
 #define GGMLHEXAGON_LOG_DEBUG(...)
+#define GGMLDSP_LOG_DEBUG(...)
 #endif
 
-#define GGMLHEXAGON_LOG_INFO(...)                            ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_ERROR(...)                           ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_INFO(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_INFO, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_WARN(...)                              ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_ERROR(...)                             ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+
+#define GGMLHEXAGON_LOG_INFO(...)                          ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_WARN(...)                          ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)                         ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #define GGML_TENSOR_LOCALS_1(type, prefix, pointer, array) \
     const type prefix##0 = (pointer)->array[0]; \
@@ -162,11 +165,14 @@ extern "C" {
 enum ggmlhexagon_log_level {
     GGMLHEXAGON_LOG_LEVEL_NONE  = 0,
     GGMLHEXAGON_LOG_LEVEL_DEBUG = 1,
-    GGMLHEXAGON_LOG_LEVEL_INFO = 2,
+    GGMLHEXAGON_LOG_LEVEL_WARN  = 2,
+    GGMLHEXAGON_LOG_LEVEL_ERROR = 3,
+    GGMLHEXAGON_LOG_LEVEL_INFO  = 4,
 };
 
 enum ggml_op {
     GGML_OP_NONE = 0,
+
     GGML_OP_DUP,
     GGML_OP_ADD,
     GGML_OP_ADD_ID,
@@ -181,137 +187,69 @@ enum ggml_op {
     GGML_OP_SIN,
     GGML_OP_COS,
     GGML_OP_SUM,
+    GGML_OP_SUM_ROWS,
+    GGML_OP_CUMSUM,
     GGML_OP_MEAN,
-    GGML_OP_VAR,
-    GGML_OP_NORM,
+    GGML_OP_ARGMAX,
+    GGML_OP_COUNT_EQUAL,
+    GGML_OP_REPEAT,
+    GGML_OP_REPEAT_BACK,
+    GGML_OP_CONCAT,
+    GGML_OP_SILU_BACK,
+    GGML_OP_NORM, // normalize
     GGML_OP_RMS_NORM,
     GGML_OP_RMS_NORM_BACK,
     GGML_OP_GROUP_NORM,
     GGML_OP_L2_NORM,
+
     GGML_OP_MUL_MAT,
     GGML_OP_MUL_MAT_ID,
     GGML_OP_OUT_PROD,
+
     GGML_OP_SCALE,
     GGML_OP_SET,
     GGML_OP_CPY,
+    GGML_OP_CONT,
+    GGML_OP_RESHAPE,
     GGML_OP_VIEW,
-    GGML_OP_REShape,
     GGML_OP_PERMUTE,
     GGML_OP_TRANSPOSE,
     GGML_OP_GET_ROWS,
+    GGML_OP_GET_ROWS_BACK,
+    GGML_OP_SET_ROWS,
+    GGML_OP_DIAG,
     GGML_OP_DIAG_MASK_INF,
-    GGML_OP_CROP,
-    GGML_OP_PAD,
-    GGML_OP_REPEAT,
-    GGML_OP_EMBED,
-    GGML_OP_POS_EMBED,
-    GGML_OP_LAYER_NORM,
-    GGML_OP_LAYER_NORM_BACK,
+    GGML_OP_DIAG_MASK_ZERO,
+    GGML_OP_SOFT_MAX,
+    GGML_OP_SOFT_MAX_BACK,
     GGML_OP_ROPE,
-    GGML_OP_ALIBI,
-    GGML_OP_ATTENTION,
-    GGML_OP_FILL,
-    GGML_OP_SOFTMAX,
-    GGML_OP_SOFTMAX_BACK,
-    GGML_OP_GELU,
-    GGML_OP_GELU_BACK,
-    GGML_OP_SILU,
-    GGML_OP_SILU_BACK,
-    GGML_OP_SWISH,
-    GGML_OP_GLU,
-    GGML_OP_CONV_1D,
-    GGML_OP_CONV_2D,
-    GGML_OP_POOL_2D,
-    GGML_OP_MAX_POOL_2D,
-    GGML_OP_AVG_POOL_2D,
-    GGML_OP_UP_SAMPLE_2D,
-    GGML_OP_DOWNSAMPLE_2D,
-    GGML_OP_BATCH_NORM,
-    GGML_OP_INSTANCE_NORM,
-    GGML_OP_LRN,
-    GGML_OP_DROPOUT,
-    GGML_OP_ZERO,
+    GGML_OP_ROPE_BACK,
     GGML_OP_CLAMP,
-    GGML_OP_NEG,
-    GGML_OP_ABS,
-    GGML_OP_SIGN,
-    GGML_OP_RELU,
-    GGML_OP_LEAKY_RELU,
-    GGML_OP_PRELU,
-    GGML_OP_HARD_SIGMOID,
-    GGML_OP_HARD_SWISH,
-    GGML_OP_TANH,
-    GGML_OP_SIGMOID,
-    GGML_OP_GATHER,
-    GGML_OP_SCATTER,
-    GGML_OP_ARGMAX,
-    GGML_OP_ARGMAX_BACK,
+    GGML_OP_CONV_TRANSPOSE_1D,
+    GGML_OP_IM2COL,
+    GGML_OP_IM2COL_BACK,
+    GGML_OP_IM2COL_3D,
+    GGML_OP_CONV_2D,
+    GGML_OP_CONV_3D,
+    GGML_OP_CONV_2D_DW,
+    GGML_OP_CONV_TRANSPOSE_2D,
+    GGML_OP_POOL_1D,
+    GGML_OP_POOL_2D,
+    GGML_OP_POOL_2D_BACK,
+    GGML_OP_UPSCALE,
+    GGML_OP_PAD,
+    GGML_OP_PAD_REFLECT_1D,
+    GGML_OP_ROLL,
+    GGML_OP_ARANGE,
+    GGML_OP_TIMESTEP_EMBEDDING,
+    GGML_OP_ARGSORT,
     GGML_OP_TOP_K,
-    GGML_OP_SORT,
-    GGML_OP_UNIQUE,
-    GGML_OP_REDUCE_SUM,
-    GGML_OP_REDUCE_MAX,
-    GGML_OP_REDUCE_MIN,
-    GGML_OP_REDUCE_MEAN,
-    GGML_OP_REDUCE_PROD,
-    GGML_OP_CUM_SUM,
-    GGML_OP_CUM_PROD,
-    GGML_OP_REVERSE,
-    GGML_OP_FLIP,
-    GGML_OP_ROTATE,
-    GGML_OP_EXPAND_DIMS,
-    GGML_OP_SQUEEZE,
-    GGML_OP_BROADCAST_TO,
-    GGML_OP_TILE,
-    GGML_OP_CONCAT,
-    GGML_OP_SPLIT,
-    GGML_OP_STACK,
-    GGML_OP_UNSTACK,
-    GGML_OP_GATHER_ND,
-    GGML_OP_SCATTER_ND,
-    GGML_OP_REVERSE_SEQ,
-    GGML_OP_MASKED_FILL,
-    GGML_OP_MASKED_SELECT,
-    GGML_OP_MASKED_SCALE,
-    GGML_OP_MASKED_MEAN,
-    GGML_OP_SPARSE_TO_DENSE,
-    GGML_OP_DENSE_TO_SPARSE,
-    GGML_OP_BINC_COUNT,
-    GGML_OP_HISTOGRAM,
-    GGML_OP_EQUAL,
-    GGML_OP_NOT_EQUAL,
-    GGML_OP_LESS,
-    GGML_OP_LESS_EQUAL,
-    GGML_OP_GREATER,
-    GGML_OP_GREATER_EQUAL,
-    GGML_OP_LOGICAL_AND,
-    GGML_OP_LOGICAL_OR,
-    GGML_OP_LOGICAL_NOT,
-    GGML_OP_LOGICAL_XOR,
-    GGML_OP_SELECT,
-    GGML_OP_WHERE,
-    GGML_OP_NONZERO,
-    GGML_OP_INDEX_SELECT,
-    GGML_OP_NMS,
-    GGML_OP_BBOX_IOU,
-    GGML_OP_GRID_SAMPLE,
-    GGML_OP_WARP_PERSPECTIVE,
-    GGML_OP_PERSPECTIVE_TRANSFORM,
-    GGML_OP_AFFINE_GRID,
-    GGML_OP_GATHER_ELEMENTS,
-    GGML_OP_SCALAR_MUL,
-    GGML_OP_SCALAR_DIV,
-    GGML_OP_SCALAR_ADD,
-    GGML_OP_SCALAR_SUB,
-    GGML_OP_SCALAR_POW,
-    GGML_OP_SCALAR_MAX,
-    GGML_OP_SCALAR_MIN,
-    GGML_OP_SCALAR_EQ,
-    GGML_OP_SCALAR_NEQ,
-    GGML_OP_SCALAR_LT,
-    GGML_OP_SCALAR_LE,
-    GGML_OP_SCALAR_GT,
-    GGML_OP_SCALAR_GE,
+    GGML_OP_LEAKY_RELU,
+    GGML_OP_TRI,
+    GGML_OP_FILL,
+
+    GGML_OP_FLASH_ATTN_EXT,
+    GGML_OP_FLASH_ATTN_BACK,
     GGML_OP_SSM_CONV,
     GGML_OP_SSM_SCAN,
     GGML_OP_WIN_PART,
@@ -323,15 +261,22 @@ enum ggml_op {
     GGML_OP_RWKV_WKV7,
     GGML_OP_SOLVE_TRI,
     GGML_OP_GATED_DELTA_NET,
+
     GGML_OP_UNARY,
+
     GGML_OP_MAP_CUSTOM1,
     GGML_OP_MAP_CUSTOM2,
     GGML_OP_MAP_CUSTOM3,
+
     GGML_OP_CUSTOM,
+
     GGML_OP_CROSS_ENTROPY_LOSS,
     GGML_OP_CROSS_ENTROPY_LOSS_BACK,
     GGML_OP_OPT_STEP_ADAMW,
     GGML_OP_OPT_STEP_SGD,
+
+    GGML_OP_GLU,
+
     GGML_OP_COUNT,
 };
 
@@ -340,6 +285,8 @@ enum ggml_type {
     GGML_TYPE_F16     = 1,
     GGML_TYPE_Q4_0    = 2,
     GGML_TYPE_Q4_1    = 3,
+    // GGML_TYPE_Q4_2 = 4, support has been removed
+    // GGML_TYPE_Q4_3 = 5, support has been removed
     GGML_TYPE_Q5_0    = 6,
     GGML_TYPE_Q5_1    = 7,
     GGML_TYPE_Q8_0    = 8,
@@ -350,7 +297,20 @@ enum ggml_type {
     GGML_TYPE_Q5_K    = 13,
     GGML_TYPE_Q6_K    = 14,
     GGML_TYPE_Q8_K    = 15,
+    GGML_TYPE_IQ2_XXS = 16,
+    GGML_TYPE_IQ2_XS  = 17,
+    GGML_TYPE_IQ3_XXS = 18,
+    GGML_TYPE_IQ1_S   = 19,
+    GGML_TYPE_IQ4_NL  = 20,
+    GGML_TYPE_IQ3_S   = 21,
+    GGML_TYPE_IQ2_S   = 22,
+    GGML_TYPE_IQ4_XS  = 23,
     GGML_TYPE_I8      = 24,
+    GGML_TYPE_I16     = 25,
+    GGML_TYPE_I32     = 26,
+    GGML_TYPE_I64     = 27,
+    GGML_TYPE_F64     = 28,
+    GGML_TYPE_IQ1_M   = 29,
     GGML_TYPE_BF16    = 30,
     GGML_TYPE_MXFP4   = 39,
     GGML_TYPE_NVFP4   = 40,
@@ -384,6 +344,12 @@ GGML_API void * ggmlop_get_work_data(size_t size);
 GGML_API void * ggmlop_get_vtcm_pool(size_t * size);
 GGML_API uint16_t ggml_compute_fp32_to_fp16(float f);
 GGML_API float ggml_compute_fp16_to_fp32(uint16_t h);
+
+GGML_API const char * ggml_op_name(enum ggml_op op);
+GGML_API const char * ggml_get_ggml_type_name(enum ggml_type type);
+
+GGML_API size_t ggmlhexagon_get_op_index(const struct ggml_tensor * tensor);
+GGML_API void ggmlhexagon_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, const struct ggml_tensor * src1, char * buf, size_t buf_size);
 
 static inline int ggml_blck_size(enum ggml_type type) {
     switch (type) {

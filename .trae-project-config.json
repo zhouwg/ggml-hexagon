@@ -55,10 +55,25 @@
   },
   "development_rules": {
     "primary_target": "jz_implementation",
-    "active_development": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-    "active_kernels": "ggml/src/ggml-hexagon/kernels/",
-    "testing_focus": "jz_implementation",
-    "description": "All development and testing tasks should focus on JZ's implementation"
+    "jz_implementation": {
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/kernels/",
+      "build_command": "./scripts/build-run-android.sh build",
+      "description": "JZ's custom ggml-hexagon implementation (primary development target)"
+    },
+    "qualcomm_official_debug": {
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "build_command": "./scripts/build-run-android.sh build_qcom",
+      "description": "When debugging Qualcomm's official backend, modify ggml-hexagon-qcom.cpp and files under htp/ directory. The build script will automatically handle swapping files before building and restore them after.",
+      "note": "The build script (build_arm64_qcom function) automatically: 1) backs up jz's ggml-hexagon.cpp and CMakeLists.txt, 2) replaces them with qcom versions, 3) builds, 4) restores jz's files"
+    },
+    "ccache_usage": {
+      "description": "ccache is enabled for faster builds. For jz build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For qcom build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom. Do NOT disable ccache.",
+      "jz_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache",
+      "qcom_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache_qcom"
+    },
+    "testing_focus": "jz_implementation"
   },
   "cdsp_data_path_notes": {
     "idl_usage": "ggml/src/ggml-hexagon/kernels/ggmlop.idl is NOT actively used. The real artifacts are the customized skel.c, stub.c and skel.h generated/tailored from that IDL.",

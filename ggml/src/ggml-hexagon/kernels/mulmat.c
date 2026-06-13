@@ -1083,7 +1083,7 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const st
     }
 }
 
-static void transfer_activation_chunk_fp32_to_fp16(__fp16 *restrict vtcm_dst, const float *restrict src,
+void transfer_activation_chunk_fp32_to_fp16(__fp16 *restrict vtcm_dst, const float *restrict src,
                                                    int n_rows, int k, int row_stride) {
     const int n_tiles_per_row = (k + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
 
@@ -1169,7 +1169,7 @@ static void transfer_weight_chunk_f16_to_f16_tiles(__fp16 *restrict vtcm_dst, co
     }
 }
 
-static void core_dot_chunk_fp16(__fp16 *restrict output, const __fp16 *restrict activation,
+void core_dot_chunk_fp16(__fp16 *restrict output, const __fp16 *restrict activation,
                                 const __fp16 *restrict weight, const __fp16 *restrict scales,
                                 int n_row_tiles, int n_col_tiles, int n_dot_tiles) {
     __builtin_assume(n_row_tiles > 0);
@@ -1202,7 +1202,7 @@ static void core_dot_chunk_fp16(__fp16 *restrict output, const __fp16 *restrict 
     }
 }
 
-static void transfer_output_chunk_fp16_to_fp32(float *restrict dst, const __fp16 *restrict src,
+void transfer_output_chunk_fp16_to_fp32(float *restrict dst, const __fp16 *restrict src,
                                                 int n_rows, int n_cols, int row_stride) {
     const int n_row_tiles = (n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
     const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;

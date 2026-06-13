@@ -430,6 +430,9 @@ function build_arm64_debug
 #build qualcomm's official ggml-hexagon backend for performance comparison
 function build_arm64_qcom
 {
+    #make AI Agent happy
+    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom
+
     echo "before build_qcom(build_arm64_qcom), prepare files"
     /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
     /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp      ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp.me
@@ -449,6 +452,7 @@ function build_arm64_qcom
     /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt.me     ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt
 
     echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
+    echo "./scripts/build-run-android.sh run_testop MUL_MAT"
     echo "./scripts/build-run-android.sh run_testops"
     echo "./scripts/build-run-android.sh run_llamacli 3"
     echo "./scripts/build-run-android.sh run_llamabench 3"
