@@ -48,6 +48,8 @@ extern "C" {
 
 #define MIN(a, b)           ((a) < (b) ? (a) : (b))
 #define MAX(a, b)           ((a) > (b) ? (a) : (b))
+#define ggml_min(a, b)      ((a) < (b) ? (a) : (b))
+#define ggml_max(a, b)      ((a) > (b) ? (a) : (b))
 
 #if UINTPTR_MAX == 0xFFFFFFFF
 #define GGML_MEM_ALIGN      4

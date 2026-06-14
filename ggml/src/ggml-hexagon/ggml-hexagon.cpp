@@ -5455,7 +5455,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
         GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
         ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_FLAG_UNCACHED | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
+        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
         if (nullptr == ctx->rpc_mempool) {
             GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
             return 2;
@@ -5722,7 +5722,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         //ggmlop_dsp_setclocks(ctx->ggmlop_handle, HAP_DCVS_VCORNER_TURBO_PLUS, 40, 1, g_hexagon_appcfg.thread_counts);
         //backward compatible with previous codes on cDSP side
         ggmlop_dsp_setclocks(ctx->ggmlop_handle, HAP_DCVS_VCORNER_TURBO_PLUS, 40, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
-        ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_POLL_QOS, 100);
+        ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         int result = ggmlhexagon_init_rpcmempool(ctx);
         if (0 != result) {
             GGMLHEXAGON_LOG_INFO("failed to init rpc mempool");
@@ -5962,6 +5962,11 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
             if (!ggml_are_same_shape(src0, src1)) {
                 return false;
             }
+            if (ne00 < 1024) {
+                //fused ops via single FastRPC call is not supported at the moment,
+                //don't offload small matrix to reduce the overhead of FastRPC
+                return false;
+            }
             return ((src0->type == GGML_TYPE_F32) || (src0->type == GGML_TYPE_F16));
         }
         case GGML_OP_PERMUTE:
@@ -5975,6 +5980,12 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
             const int64_t k = src0->ne[0];
             const int64_t n = src1->ne[1];
             GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
+
+            if (ne00 < 1024) {
+                //fused ops via single FastRPC call is not supported at the moment,
+                //don't offload small matrix to reduce the overhead of FastRPC
+                return false;
+            }
 
             if (src0_rank != src1_rank) {
                 GGMLHEXAGON_LOG_DEBUG("MUL_MAT not supported: src0_rank(%d) != src1_rank(%d)", src0_rank, src1_rank);

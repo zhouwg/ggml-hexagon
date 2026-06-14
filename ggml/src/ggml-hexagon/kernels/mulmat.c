@@ -1070,17 +1070,25 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
 }
 
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
-    int mulmat_algo = ggmlop_get_mulmat_algotype();
+    int  ret = 0;
+    char tempbuf[256];
+    int  mulmat_algo = ggmlop_get_mulmat_algotype();
+    ggmlhexagon_get_opkey(GGML_OP_ADD, src0, src1, tempbuf, 256);
+    int64_t begin_time = ggml_time_us();
     if (mulmat_algo == 32) {
         GGMLHEXAGON_LOG_DEBUG("mulmat using VTCM+HMX mode");
-        return ggmlop_dsp_mulmat_vtcm_hmx(h, src0, src1, dst);
+        ret = ggmlop_dsp_mulmat_vtcm_hmx(h, src0, src1, dst);
     } else if (ggmlop_get_thread_counts() > 1) {
         GGMLHEXAGON_LOG_DEBUG("mulmat using multithread mode");
-        return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
+        ret= ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
     } else {
         GGMLHEXAGON_LOG_DEBUG("mulmat using singlethread mode");
-        return ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
+        ret = ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
     }
+    int64_t end_time = ggml_time_us();
+    GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
+    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
+    return ret;
 }
 
 void transfer_activation_chunk_fp32_to_fp16(__fp16 *restrict vtcm_dst, const float *restrict src,

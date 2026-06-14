@@ -181,9 +181,17 @@ static int ggmlop_dsp_add_multithread(remote_handle64 h, const ggml_tensor * src
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
 
     const int64_t n = ggml_nelements(src0);
-    const int num_threads = num_workers;
+    int num_threads = num_workers;
 
-    if (num_threads <= 1 || n < num_threads) {
+    if (src0->type == GGML_TYPE_F32) {
+        num_threads = 2; //best for large matrix, got it via scripts/test_add_perf.py
+    } else if (src0->type == GGML_TYPE_F16) {
+        num_threads = ggml_min(num_workers, 6);
+    } else {
+        num_threads = num_workers;
+    }
+
+    if (num_threads <= 1 || n < num_threads * 512) {
         return ggmlop_dsp_add_singlethread(h, src0, src1, dst);
     }
 
@@ -191,11 +199,14 @@ static int ggmlop_dsp_add_multithread(remote_handle64 h, const ggml_tensor * src
     worker_pool_synctoken_init(&synctoken, num_threads - 1);
 
     add_thread_data_t tdata[num_threads];
-    const int64_t ne_per_thread = n / num_threads;
+    const int64_t ne_per_thread = ((n + num_threads - 1) / num_threads + 127) & ~127;
     int64_t start_idx = 0;
 
     for (int i = 0; i < num_threads - 1; ++i) {
         int64_t end_idx = start_idx + ne_per_thread;
+        if (end_idx > n)
+            end_idx = n;
+
         tdata[i].src0 = src0;
         tdata[i].src1 = src1;
         tdata[i].dst = dst;
