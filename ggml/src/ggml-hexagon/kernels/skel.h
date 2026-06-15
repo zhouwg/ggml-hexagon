@@ -244,6 +244,36 @@ struct dsptensor {
    void* data;
    int data_len;
 };
+
+typedef struct dsp_tensor_desc dsp_tensor_desc;
+struct dsp_tensor_desc {
+   int32_t type;
+   int32_t ne[4];
+   int32_t nb[4];
+   int64_t va;
+   int32_t fd;
+   int32_t size;
+};
+
+typedef struct dsp_op_desc dsp_op_desc;
+struct dsp_op_desc {
+   int32_t opcode;
+   int32_t params[16];
+   int32_t src0_idx;
+   int32_t src1_idx;
+   int32_t dst_idx;
+};
+
+typedef struct dsp_opbatch_req dsp_opbatch_req;
+struct dsp_opbatch_req {
+   int32_t n_tensors;
+   int32_t n_ops;
+   dsp_tensor_desc* tensors;
+   int tensorsLen;
+   dsp_op_desc* ops;
+   int opsLen;
+};
+
 /**
     * Opens the handle in the specified domain.  If this is the first
     * handle, this creates the session.  Typically this means opening
@@ -278,6 +308,7 @@ __QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_setclocks)(remote_handle
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_add)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_mulmat)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_execute_task)(remote_handle64 _h, int32 ggml_op_type, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
+__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_execute_batch)(remote_handle64 _h, const dsp_opbatch_req* req) __QAIC_HEADER_ATTRIBUTE;
 #ifndef ggmlop_URI
 #define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"
 #endif /*ggmlop_URI*/

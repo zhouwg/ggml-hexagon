@@ -558,3 +558,10 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
     return AEE_SUCCESS;
 }
+
+
+AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req) {
+    GGMLHEXAGON_LOG_INFO("enter %s", __func__);
+    GGMLHEXAGON_LOG_INFO("leave %s", __func__);
+    return AEE_SUCCESS;
+}
