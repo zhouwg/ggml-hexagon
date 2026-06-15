@@ -344,6 +344,7 @@ GGML_API unsigned int ggmlop_get_compute_res_ctx_id(void);
 GGML_API int ggmlop_is_hmx_available(void);
 GGML_API void * ggmlop_get_work_data(size_t size);
 GGML_API void * ggmlop_get_vtcm_pool(size_t * size);
+GGML_API int ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
 GGML_API uint16_t ggml_compute_fp32_to_fp16(float f);
 GGML_API float ggml_compute_fp16_to_fp32(uint16_t h);
 

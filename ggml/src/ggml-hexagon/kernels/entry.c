@@ -16,6 +16,8 @@ static size_t g_vtcm_size                   = 0;
 static unsigned int g_compute_res_ctx_id    = 0;
 static int g_power_ctx                      = 0;
 static int g_hmx_available                  = 0;
+static volatile int g_vtcm_needs_release    = 0;  // For cache mode VTCM management
+static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently valid/available
 
 void *  g_hexagon_power_ctx                 = NULL;
 
@@ -103,6 +105,13 @@ static int power_on_hvx_hmx(void) {
     return 0;
 }
 
+
+static int vtcm_release_callback(unsigned int rctx, void * state) {
+    g_vtcm_needs_release = 1;
+    g_vtcm_valid = 0;
+    return 0;
+}
+
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     void * tptr = NULL;
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
@@ -157,13 +166,15 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
 
     /* Step 3: Acquire compute resources (including VTCM and HMX) */
     compute_res_attr_t attr;
-    HAP_compute_res_attr_init(&attr);
-
     unsigned int vtcm_size_to_use = (DEFAULT_VTCM_SIZE < vtcm_size_query) ? DEFAULT_VTCM_SIZE : vtcm_size_query;
-    HAP_compute_res_attr_set_vtcm_param(&attr, vtcm_size_to_use, 1);
+    HAP_compute_res_attr_init(&attr);
+    HAP_compute_res_attr_set_serialize(&attr, 0);
+    HAP_compute_res_attr_set_cache_mode(&attr, 1);  // Enable cache mode (matching official implementation)
+    HAP_compute_res_attr_set_vtcm_param_v2(&attr, vtcm_size_to_use, vtcm_size_to_use, vtcm_size_to_use); // single page (matching official implementation)
+    HAP_compute_res_attr_set_release_callback(&attr, vtcm_release_callback, NULL);  // Enable release callback for cache mode
     HAP_compute_res_attr_set_hmx_param(&attr, 1);
-
-    g_compute_res_ctx_id = HAP_compute_res_acquire(&attr, 100000);
+    // Allocate VTCM for scratch pads
+    g_compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
     if (g_compute_res_ctx_id == 0) {
         GGMLHEXAGON_LOG_INFO("HAP_compute_res_acquire failed, falling back to HAP_request_VTCM\n");
         /* Fallback to legacy VTCM allocation */
@@ -409,18 +420,23 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 
 
     g_hexagon_power_ctx = (void *)(handle);
 
-    // Test VTCM memory read/write
+    // Test VTCM memory read/write (must ensure VTCM is available in cache mode)
     if (g_vtcm_base != NULL) {
-        uint8_t *weight = (uint8_t *)g_vtcm_base;
-        uint8_t *active = (uint8_t *)g_vtcm_base + 256;
-        // Write test patterns
-        memset(weight, 0xaa, 128);
-        memset(active, 0xbb, 128);
-        // Verify write
-        if (weight[0] == 0xaa && active[0] == 0xbb) {
-            GGMLHEXAGON_LOG_INFO("VTCM read/write test PASSED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+        // Ensure VTCM resource is available before accessing
+        if (ggmlop_ensure_vtcm_available() == 0) {
+            uint8_t *weight = (uint8_t *)g_vtcm_base;
+            uint8_t *active = (uint8_t *)g_vtcm_base + 256;
+            // Write test patterns
+            memset(weight, 0xaa, 128);
+            memset(active, 0xbb, 128);
+            // Verify write
+            if (weight[0] == 0xaa && active[0] == 0xbb) {
+                GGMLHEXAGON_LOG_INFO("VTCM read/write test PASSED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+            } else {
+                GGMLHEXAGON_LOG_ERROR("VTCM read/write test FAILED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+            }
         } else {
-            GGMLHEXAGON_LOG_ERROR("VTCM read/write test FAILED: weight[0]=0x%02x, active[0]=0x%02x", weight[0], active[0]);
+            GGMLHEXAGON_LOG_WARN("VTCM not available (cache mode), skipping VTCM test");
         }
     } else {
         GGMLHEXAGON_LOG_WARN("VTCM not available, skipping VTCM test");
@@ -469,6 +485,39 @@ void * ggmlop_get_vtcm_pool(size_t * size) {
         *size = g_vtcm_size;
     }
     return g_vtcm_base;
+}
+
+// Ensure VTCM resource is available (for cache mode)
+// Must be called before using VTCM in each operation
+int ggmlop_ensure_vtcm_available(void) {
+    if (g_compute_res_ctx_id == 0) {
+        // Not using compute_res, VTCM is always available
+        return 0;
+    }
+
+    // In cache mode, VTCM needs to be acquired before each use
+    if (!g_vtcm_valid || g_vtcm_needs_release) {
+        // VTCM needs to be acquired
+        if (g_vtcm_needs_release) {
+            GGMLHEXAGON_LOG_INFO("VTCM needs re-acquire (cache mode)");
+            g_vtcm_needs_release = 0;
+            // Release cached VTCM first
+            HAP_compute_res_release_cached(g_compute_res_ctx_id);
+        } else {
+            GGMLHEXAGON_LOG_INFO("VTCM first acquire (cache mode)");
+        }
+
+        // Acquire VTCM with timeout
+        int err = HAP_compute_res_acquire_cached(g_compute_res_ctx_id, 1000000);
+        if (err != 0) {
+            GGMLHEXAGON_LOG_ERROR("Failed to acquire VTCM: 0x%08x", err);
+            return -1;
+        }
+        g_vtcm_valid = 1;
+        GGMLHEXAGON_LOG_INFO("VTCM acquired successfully");
+    }
+
+    return 0;
 }
 
 int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) {
