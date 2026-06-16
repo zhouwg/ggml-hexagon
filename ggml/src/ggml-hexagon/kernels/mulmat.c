@@ -805,6 +805,7 @@ typedef struct {
     int32_t ir1_end;
     uint8_t *vtcm_buf;
     size_t vtcm_size;
+    dma_queue *dma;
     worker_synctoken_t *synctoken;
 } mulmat_thread_data_vtcm_t;
 
@@ -814,7 +815,8 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                                                     const int32_t num_rows_per_vec_dot,
                                                     const int32_t ir0_start, const int32_t ir0_end,
                                                     const int32_t ir1_start, const int32_t ir1_end,
-                                                    uint8_t *vtcm_buf, size_t vtcm_size) {
+                                                    uint8_t *vtcm_buf, size_t vtcm_size,
+                                                    dma_queue *dma) {
     const bool src1_cont = ggml_is_contiguous(src1);
 
     const int32_t ne00 = src0->ne[0];
@@ -922,7 +924,15 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                     const int32_t block_rows = MIN(iir0 + blck_0, iir0_end) - iir0;
                     const size_t copy_size = block_rows * nb01;
 
-                    memcpy(vtcm_buf, src0_row + iir0 * nb01, copy_size);
+                    // Use DMA for src0 row copy from DDR to VTCM
+                    if (dma) {
+                        dma_queue_push_ddr_to_vtcm(dma,
+                            dma_make_ptr(vtcm_buf, src0_row + iir0 * nb01),
+                            nb01, nb01, block_rows);
+                        dma_queue_pop(dma);
+                    } else {
+                        memcpy(vtcm_buf, src0_row + iir0 * nb01, copy_size);
+                    }
 
                     for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
                         const int32_t row_idx = ir0 - iir0;
@@ -967,7 +977,8 @@ static void mulmat_thread_func_vtcm(void * data) {
         tdata->type, tdata->num_rows_per_vec_dot,
         tdata->ir0_start, tdata->ir0_end,
         tdata->ir1_start, tdata->ir1_end,
-        tdata->vtcm_buf, tdata->vtcm_size
+        tdata->vtcm_buf, tdata->vtcm_size,
+        tdata->dma
     );
 
     if (tdata->synctoken != NULL) {
@@ -1011,6 +1022,12 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
 
     const int32_t rows_per_thread = (nr1 + n_threads - 1) / n_threads;
 
+    // Create DMA queues for each thread
+    dma_queue *dma_queues[MAX_NUM_WORKERS];
+    for (unsigned int t = 0; t < n_threads; t++) {
+        dma_queues[t] = dma_queue_create(16);
+    }
+
     mulmat_thread_data_vtcm_t thread_data[MAX_NUM_WORKERS];
     worker_synctoken_t synctoken;
 
@@ -1031,6 +1048,7 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
         thread_data[t].ir1_end = ir1_end;
         thread_data[t].vtcm_buf = (uint8_t *)vtcm_base + t * vtcm_per_thread;
         thread_data[t].vtcm_size = vtcm_per_thread;
+        thread_data[t].dma = dma_queues[t];
         thread_data[t].synctoken = (t == 0) ? NULL : &synctoken;
 
         if (t == 0) {
@@ -1044,6 +1062,12 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
     }
 
     worker_pool_synctoken_wait(&synctoken);
+
+    // Flush and delete DMA queues
+    for (unsigned int t = 0; t < n_threads; t++) {
+        dma_queue_flush(dma_queues[t]);
+        dma_queue_delete(dma_queues[t]);
+    }
 
     HAP_release_VTCM(vtcm_base);
 
