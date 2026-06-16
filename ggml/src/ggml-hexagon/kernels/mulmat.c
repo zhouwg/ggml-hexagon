@@ -1,6 +1,7 @@
 #include "ggml-dsp.h"
 #include "worker_pool.h"
 #include "../htp/hvx-base.h"  // for official hvx_vec_f32_to_f16 with vdeal
+#include "../htp/hex-dma.h"   // for official DMA async transfers
 
 union ui32f { int32_t i; float f; };
 
@@ -9,7 +10,7 @@ union ui32f { int32_t i; float f; };
 #define HMX_FP16_TILE_N_ELMS 1024
 #define HMX_FP16_TILE_SIZE (HMX_FP16_TILE_N_ELMS * sizeof(__fp16))
 
-// Forward declaration for ggmlop_dsp_mulmat_vtcm_hmx
+// Forward declarations
 int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst);
 
 static HVX_INLINE_ALWAYS void l2fetch(const void * p, uint32_t stride,
@@ -1500,6 +1501,393 @@ static void dequantize_q8_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
     }
 }
 
+// ============================================================
+// Parallel data conversion helpers for VTCM+HMX
+// ============================================================
+
+// Range-aware output writeback: only processes rows [start_row, end_row)
+static void transfer_output_chunk_fp16_to_fp32_range(float *restrict dst, const __fp16 *restrict src,
+                                                      int n_rows, int n_cols, int col_stride,
+                                                      int start_row, int end_row) {
+    const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;
+
+    // Round start_row down to even for row-pair alignment
+    int sr = start_row & ~1;
+    for (int r = sr; r < end_row; r += 2) {
+        if (r < start_row) continue;
+        int r0 = r / HMX_FP16_TILE_N_ROWS;
+        int intra_tile_row = r % HMX_FP16_TILE_N_ROWS;
+        int row_pair = intra_tile_row / 2;
+
+        for (int c = 0; c < n_cols; c += HMX_FP16_TILE_N_COLS) {
+            int c0 = c / HMX_FP16_TILE_N_COLS;
+            int tile_idx = r0 * n_col_tiles + c0;
+            const __fp16 *tile = src + tile_idx * HMX_FP16_TILE_N_ELMS;
+
+            if (r >= start_row) {
+                for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                    dst[(c + j) + r * col_stride] = (float)tile[row_pair * 64 + j * 2];
+                }
+            }
+            if (r + 1 < end_row && r + 1 >= start_row && r + 1 < n_rows) {
+                for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                    dst[(c + j) + (r + 1) * col_stride] = (float)tile[row_pair * 64 + j * 2 + 1];
+                }
+            }
+        }
+    }
+}
+
+// Range-aware activation fp32->fp16: only processes rows [start_row, end_row)
+// start_row and end_row must be even and tile-aligned (multiples of 32)
+static void transfer_activation_chunk_fp32_to_fp16_range(__fp16 *restrict vtcm_dst, const float *restrict src,
+                                                          int n_rows, int n_cols, int row_stride,
+                                                          int start_row, int end_row) {
+    const int n_rows_tiled  = (n_rows / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+    const int n_tiles_per_row = n_cols / HMX_FP16_TILE_N_COLS;
+
+    int r = start_row;
+
+    // HVX path for tiled rows in range
+    if (r < n_rows_tiled) {
+        int hvx_end = (end_row < n_rows_tiled) ? end_row : n_rows_tiled;
+        #pragma unroll(2)
+        for (; r < hvx_end; r += 2) {
+            int r0 = r / HMX_FP16_TILE_N_ROWS;
+            int r1 = r % HMX_FP16_TILE_N_ROWS;
+
+            const HVX_Vector *pv_in0 = (const HVX_Vector *) (src + (r + 0) * row_stride);
+            const HVX_Vector *pv_in1 = (const HVX_Vector *) (src + (r + 1) * row_stride);
+            for (int c = 0; c < n_cols; c += 32) {
+                HVX_Vector v0 = *pv_in0++;
+                HVX_Vector v1 = *pv_in1++;
+
+                HVX_Vector v_out = hvx_vec_f32_to_f16_shuff(v0, v1);
+
+                int c0       = c / HMX_FP16_TILE_N_COLS;
+                int tile_idx = r0 * n_tiles_per_row + c0;
+
+                __fp16 *tile_base = vtcm_dst + tile_idx * HMX_FP16_TILE_N_ELMS;
+                HVX_Vector *tile_hvx = (HVX_Vector *)tile_base;
+                tile_hvx[r1 / 2] = v_out;
+            }
+        }
+    }
+
+    // Scalar path for remaining padded rows in range
+    const int n_rows_padded = ((n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+    if (r < end_row && r >= n_rows_tiled) {
+        int scalar_end = (end_row < n_rows_padded) ? end_row : n_rows_padded;
+        for (; r < scalar_end; r += 2) {
+            int r0 = r / HMX_FP16_TILE_N_ROWS;
+            int r1 = r % HMX_FP16_TILE_N_ROWS;
+
+            const bool row0_valid = r       < n_rows;
+            const bool row1_valid = (r + 1) < n_rows;
+
+            const float *src_row0 = row0_valid ? src + (r + 0) * row_stride : NULL;
+            const float *src_row1 = row1_valid ? src + (r + 1) * row_stride : NULL;
+
+            for (int c = 0; c < n_cols; c += HMX_FP16_TILE_N_COLS) {
+                int c0 = c / HMX_FP16_TILE_N_COLS;
+                int tile_idx = r0 * n_tiles_per_row + c0;
+
+                __fp16 *tile_base = vtcm_dst + tile_idx * HMX_FP16_TILE_N_ELMS;
+
+                for (int i = 0; i < HMX_FP16_TILE_N_COLS; ++i) {
+                    tile_base[(r1 / 2) * 64 + i * 2] =
+                        (src_row0) ? (__fp16)src_row0[c + i] : (__fp16)0;
+                }
+                for (int i = 0; i < HMX_FP16_TILE_N_COLS; ++i) {
+                    tile_base[(r1 / 2) * 64 + i * 2 + 1] =
+                        (src_row1) ? (__fp16)src_row1[c + i] : (__fp16)0;
+                }
+            }
+        }
+    }
+}
+
+// Range-aware activation f16->f16 tiles: only processes rows [start_row, end_row)
+static void transfer_activation_chunk_f16_to_f16_tiles_range(__fp16 *restrict vtcm_dst, const __fp16 *restrict src,
+                                                              int n_rows, int k, int row_stride,
+                                                              int start_row, int end_row) {
+    const int n_rows_padded = ((n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+    const int n_tiles_per_row = k / HMX_FP16_TILE_N_COLS;
+
+    int sr = start_row & ~1;  // round down to even
+    int er = (end_row + 1) & ~1;  // round up to even
+    if (er > n_rows_padded) er = n_rows_padded;
+
+    for (int r = sr; r < er; r += 2) {
+        if (r < start_row) continue;
+        int r0 = r / HMX_FP16_TILE_N_ROWS;
+        int r1 = r % HMX_FP16_TILE_N_ROWS;
+
+        const __fp16 *src_row0 = (r < n_rows) ? src + (r + 0) * row_stride : NULL;
+        const __fp16 *src_row1 = (r + 1 < n_rows) ? src + (r + 1) * row_stride : NULL;
+
+        for (int c = 0; c < k; c += HMX_FP16_TILE_N_COLS) {
+            int c0 = c / HMX_FP16_TILE_N_COLS;
+            int tile_idx = r0 * n_tiles_per_row + c0;
+
+            __fp16 *tile_base = vtcm_dst + tile_idx * HMX_FP16_TILE_N_ELMS;
+
+            for (int i = 0; i < HMX_FP16_TILE_N_COLS; ++i) {
+                tile_base[(r1 / 2) * 64 + i * 2] =
+                    (src_row0 && (c + i) < k) ? src_row0[c + i] : (__fp16)0;
+            }
+            for (int i = 0; i < HMX_FP16_TILE_N_COLS; ++i) {
+                tile_base[(r1 / 2) * 64 + i * 2 + 1] =
+                    (src_row1 && (c + i) < k) ? src_row1[c + i] : (__fp16)0;
+            }
+        }
+    }
+}
+
+// Worker for parallel memcpy of fp32 rows (activation or weight)
+typedef struct {
+    float       *dst;
+    const float *src;
+    int          k;             // elements per row
+    int          src_stride;    // source row stride (in float elements)
+    int          start_row;
+    int          end_row;
+    worker_synctoken_t *synctoken;
+} memcpy_rows_task_t;
+
+static void memcpy_rows_worker(void *data) {
+    memcpy_rows_task_t *t = (memcpy_rows_task_t *)data;
+    for (int i = t->start_row; i < t->end_row; i++) {
+        memcpy(t->dst + i * t->k, t->src + i * t->src_stride, t->k * sizeof(float));
+    }
+    __asm__ __volatile__("" ::: "memory");
+    if (t->synctoken) worker_pool_synctoken_jobdone(t->synctoken);
+}
+
+// Worker for parallel output writeback
+typedef struct {
+    float        *dst;
+    const __fp16 *src;
+    int           n_rows;
+    int           n_cols;
+    int           col_stride;
+    int           start_row;
+    int           end_row;
+    worker_synctoken_t *synctoken;
+} output_wb_task_t;
+
+static void output_wb_worker(void *data) {
+    output_wb_task_t *t = (output_wb_task_t *)data;
+    transfer_output_chunk_fp16_to_fp32_range(
+        t->dst, t->src, t->n_rows, t->n_cols, t->col_stride,
+        t->start_row, t->end_row);
+    if (t->synctoken) worker_pool_synctoken_jobdone(t->synctoken);
+}
+
+// Worker for parallel activation fp32->fp16 conversion
+typedef struct {
+    __fp16       *vtcm_dst;
+    const float  *src;
+    int           n_rows;
+    int           n_cols;
+    int           row_stride;
+    int           start_row;
+    int           end_row;
+    worker_synctoken_t *synctoken;
+} act_convert_task_t;
+
+static void act_convert_worker(void *data) {
+    act_convert_task_t *t = (act_convert_task_t *)data;
+    transfer_activation_chunk_fp32_to_fp16_range(
+        t->vtcm_dst, t->src, t->n_rows, t->n_cols, t->row_stride,
+        t->start_row, t->end_row);
+    if (t->synctoken) worker_pool_synctoken_jobdone(t->synctoken);
+}
+
+// Worker for parallel activation f16->f16 tiles conversion
+typedef struct {
+    __fp16       *vtcm_dst;
+    const __fp16 *src;
+    int           n_rows;
+    int           k;
+    int           row_stride;
+    int           start_row;
+    int           end_row;
+    worker_synctoken_t *synctoken;
+} act_f16_convert_task_t;
+
+static void act_f16_convert_worker(void *data) {
+    act_f16_convert_task_t *t = (act_f16_convert_task_t *)data;
+    transfer_activation_chunk_f16_to_f16_tiles_range(
+        t->vtcm_dst, t->src, t->n_rows, t->k, t->row_stride,
+        t->start_row, t->end_row);
+    if (t->synctoken) worker_pool_synctoken_jobdone(t->synctoken);
+}
+
+// Helper: split tile-aligned rows across workers
+static void split_tile_rows(int total_rows, int n_threads,
+                            int start_rows[], int end_rows[]) {
+    const int tile_rows = HMX_FP16_TILE_N_ROWS;
+    int total_tiles = (total_rows + tile_rows - 1) / tile_rows;
+    int tiles_per_thread = (total_tiles + n_threads - 1) / n_threads;
+    for (int t = 0; t < n_threads; t++) {
+        int tile_start = t * tiles_per_thread;
+        int tile_end   = MIN((t + 1) * tiles_per_thread, total_tiles);
+        start_rows[t] = tile_start * tile_rows;
+        end_rows[t]   = MIN(tile_end * tile_rows, total_rows);
+    }
+}
+
+// Helper: submit parallel memcpy of fp32 rows and wait
+static void parallel_memcpy_rows(float *dst, const float *src,
+                                 int n_rows, int k, int src_stride,
+                                 int n_threads) {
+    if (n_rows <= 0 || n_threads <= 1) {
+        for (int i = 0; i < n_rows; i++) {
+            memcpy(dst + i * k, src + i * src_stride, k * sizeof(float));
+        }
+        __asm__ __volatile__("" ::: "memory");
+        return;
+    }
+
+    int sr[MAX_NUM_WORKERS], er[MAX_NUM_WORKERS];
+    split_tile_rows(n_rows, n_threads, sr, er);
+
+    memcpy_rows_task_t tasks[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (int t = 0; t < n_threads; t++) {
+        if (sr[t] >= er[t]) {
+            if (t > 0) worker_pool_synctoken_jobdone(&synctoken);
+            continue;
+        }
+        tasks[t] = (memcpy_rows_task_t){
+            .dst = dst, .src = src, .k = k, .src_stride = src_stride,
+            .start_row = sr[t], .end_row = er[t],
+            .synctoken = (t == 0) ? NULL : &synctoken,
+        };
+        if (t == 0) {
+            memcpy_rows_worker(&tasks[t]);
+        } else {
+            worker_pool_job_t job = { memcpy_rows_worker, &tasks[t] };
+            worker_pool_submit(NULL, job);
+        }
+    }
+    worker_pool_synctoken_wait(&synctoken);
+}
+
+// Helper: submit parallel activation fp32->fp16 conversion and wait
+static void parallel_act_convert_fp32(__fp16 *vtcm_dst, const float *src,
+                                      int n_rows, int n_cols, int row_stride,
+                                      int n_threads) {
+    if (n_rows <= 0 || n_threads <= 1) {
+        transfer_activation_chunk_fp32_to_fp16(vtcm_dst, src, n_rows, n_cols, row_stride);
+        return;
+    }
+
+    int sr[MAX_NUM_WORKERS], er[MAX_NUM_WORKERS];
+    split_tile_rows(n_rows, n_threads, sr, er);
+
+    act_convert_task_t tasks[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (int t = 0; t < n_threads; t++) {
+        if (sr[t] >= er[t]) {
+            if (t > 0) worker_pool_synctoken_jobdone(&synctoken);
+            continue;
+        }
+        tasks[t] = (act_convert_task_t){
+            .vtcm_dst = vtcm_dst, .src = src,
+            .n_rows = n_rows, .n_cols = n_cols, .row_stride = row_stride,
+            .start_row = sr[t], .end_row = er[t],
+            .synctoken = (t == 0) ? NULL : &synctoken,
+        };
+        if (t == 0) {
+            act_convert_worker(&tasks[t]);
+        } else {
+            worker_pool_job_t job = { act_convert_worker, &tasks[t] };
+            worker_pool_submit(NULL, job);
+        }
+    }
+    worker_pool_synctoken_wait(&synctoken);
+}
+
+// Helper: submit parallel activation f16->f16 tiles conversion and wait
+static void parallel_act_convert_f16(__fp16 *vtcm_dst, const __fp16 *src,
+                                     int n_rows, int k, int row_stride,
+                                     int n_threads) {
+    if (n_rows <= 0 || n_threads <= 1) {
+        transfer_activation_chunk_f16_to_f16_tiles(vtcm_dst, src, n_rows, k, row_stride);
+        return;
+    }
+
+    int sr[MAX_NUM_WORKERS], er[MAX_NUM_WORKERS];
+    split_tile_rows(n_rows, n_threads, sr, er);
+
+    act_f16_convert_task_t tasks[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (int t = 0; t < n_threads; t++) {
+        if (sr[t] >= er[t]) {
+            if (t > 0) worker_pool_synctoken_jobdone(&synctoken);
+            continue;
+        }
+        tasks[t] = (act_f16_convert_task_t){
+            .vtcm_dst = vtcm_dst, .src = src,
+            .n_rows = n_rows, .k = k, .row_stride = row_stride,
+            .start_row = sr[t], .end_row = er[t],
+            .synctoken = (t == 0) ? NULL : &synctoken,
+        };
+        if (t == 0) {
+            act_f16_convert_worker(&tasks[t]);
+        } else {
+            worker_pool_job_t job = { act_f16_convert_worker, &tasks[t] };
+            worker_pool_submit(NULL, job);
+        }
+    }
+    worker_pool_synctoken_wait(&synctoken);
+}
+
+// Helper: submit parallel output writeback and wait
+static void parallel_output_writeback(float *dst, const __fp16 *src,
+                                      int n_rows, int n_cols, int col_stride,
+                                      int n_threads) {
+    if (n_rows <= 0 || n_threads <= 1) {
+        transfer_output_chunk_fp16_to_fp32(dst, src, n_rows, n_cols, col_stride);
+        return;
+    }
+
+    int sr[MAX_NUM_WORKERS], er[MAX_NUM_WORKERS];
+    split_tile_rows(n_rows, n_threads, sr, er);
+
+    output_wb_task_t tasks[MAX_NUM_WORKERS];
+    worker_synctoken_t synctoken;
+    worker_pool_synctoken_init(&synctoken, n_threads - 1);
+
+    for (int t = 0; t < n_threads; t++) {
+        if (sr[t] >= er[t]) {
+            if (t > 0) worker_pool_synctoken_jobdone(&synctoken);
+            continue;
+        }
+        tasks[t] = (output_wb_task_t){
+            .dst = dst, .src = src,
+            .n_rows = n_rows, .n_cols = n_cols, .col_stride = col_stride,
+            .start_row = sr[t], .end_row = er[t],
+            .synctoken = (t == 0) ? NULL : &synctoken,
+        };
+        if (t == 0) {
+            output_wb_worker(&tasks[t]);
+        } else {
+            worker_pool_job_t job = { output_wb_worker, &tasks[t] };
+            worker_pool_submit(NULL, job);
+        }
+    }
+    worker_pool_synctoken_wait(&synctoken);
+}
+
 int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
     int hmx_locked = 0;
@@ -1680,7 +2068,6 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
     reusable_buf.fp32 = (float *) vtcm_ptr;
     reusable_buf.fp16 = (__fp16 *) vtcm_ptr;
     vtcm_ptr += reusable_buf_size;
-    // Weight fp32 buffer: needed for HVX vscatter to work correctly
     float *vtcm_weight_fp32_buf = (float *) vtcm_ptr;
     vtcm_ptr += weight_fp32_buf_size;
     __fp16 *vtcm_scales = (__fp16 *) vtcm_ptr;
@@ -1698,8 +2085,9 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
     const size_t src0_row_stride = src0->nb[1];  // weight stride
     const size_t src1_row_stride = src1->nb[1];  // activation stride
 
-    // CRITICAL FIX: Align with ggml_mul_mat definition
-    // src0 = weight [K, M], src1 = activation [K, N], dst = [M, N]
+    // Create DMA queue for async data transfers
+    dma_queue *dma = dma_queue_create(16);
+
     // Outer loop: iterate over M (weight columns)
     // Inner loop: iterate over N (activation columns)
     // Weight uses column-pair interleaved format, Activation uses row-pair interleaved format
@@ -1708,35 +2096,21 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
         const size_t M_cols = (M - mc) > M_chunk_n_cols ? M_chunk_n_cols : (M - mc);
         const size_t M_col_tiles = M_cols / HMX_FP16_TILE_N_COLS;
 
-        //GGMLHEXAGON_LOG_INFO("Processing weight chunk: mc=%zu, M_cols=%zu, M_col_tiles=%zu",\
-                             mc, M_cols, M_col_tiles);
-
         // Convert weight chunk (src0) to fp16 tiles using interleaved format
         if (src0_is_f16) {
             const __fp16 *weight_chunk = (const __fp16 *)((const char *)src0->data + mc * src0_row_stride);
             transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
         } else if (src0->type == GGML_TYPE_F32) {
             const float *weight_chunk = (const float *)((const char *)src0->data + mc * src0_row_stride);
-            //GGMLHEXAGON_LOG_INFO("weight_chunk (src0) first 4 elements: %.2f %.2f %.2f %.2f",\
-                                 weight_chunk[0], weight_chunk[1], weight_chunk[2], weight_chunk[3]);\
 
-            // Copy weight data from RPC memory to VTCM fp32 buffer
-            const size_t src0_stride_elements = src0_row_stride / sizeof(float);
-            for (size_t i = 0; i < M_cols; ++i) {
-                memcpy(vtcm_weight_fp32_buf + i * K, weight_chunk + i * src0_stride_elements, K * sizeof(float));
-            }
-            __asm__ __volatile__("" ::: "memory");
-
-            //GGMLHEXAGON_LOG_INFO("vtcm_weight_fp32_buf[0..3]: %.2f %.2f %.2f %.2f",\
-                                 vtcm_weight_fp32_buf[0], vtcm_weight_fp32_buf[1],\
-                                 vtcm_weight_fp32_buf[2], vtcm_weight_fp32_buf[3]);
+            // DMA async: push weight fp32 rows from DDR to VTCM
+            dma_queue_push_ddr_to_vtcm(dma,
+                dma_make_ptr(vtcm_weight_fp32_buf, weight_chunk),
+                K * sizeof(float), src0_row_stride, M_cols);
+            dma_queue_pop(dma);  // wait for DMA completion
 
             // Convert from VTCM fp32 buffer to fp16 tiles (interleaved format)
             convert_weight_f32_to_fp16_tiles(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
-
-            //GGMLHEXAGON_LOG_INFO("vtcm_weight first 4 fp16 elements: %.2f %.2f %.2f %.2f",\
-                                 (float)vtcm_weight[0], (float)vtcm_weight[1],\
-                                 (float)vtcm_weight[2], (float)vtcm_weight[3]);
         } else if (src0->type == GGML_TYPE_Q4_0) {
             const block_q4_0 *weight_chunk = (const block_q4_0 *)((const char *)src0->data + mc * src0_row_stride);
             dequantize_q4_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
@@ -1748,69 +2122,59 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
             dequantize_q8_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
         }
 
+        // Pipeline: use DMA to prefetch next activation while HMX computes current
+        // For the first N-chunk, we must prepare activation synchronously
+        bool act_dma_pending = false;
+
         for (size_t nr = 0; nr < N; nr += N_chunk_n_rows) {
             const size_t N_rows = (N - nr) > N_chunk_n_rows ? N_chunk_n_rows : (N - nr);
             const size_t N_row_tiles = ((N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS);
 
-            //GGMLHEXAGON_LOG_INFO("Processing activation chunk: nr=%zu, N_rows=%zu, N_row_tiles=%zu",\
-                                 nr, N_rows, N_row_tiles);
-
-            // Convert activation chunk (src1) to fp16 tiles using row-pair interleaved format
+            // Convert activation chunk (src1) to fp16 tiles
             if (src1_is_f16) {
                 const __fp16 *act_chunk = (const __fp16 *)((const char *)src1->data + nr * src1_row_stride);
                 transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
             } else if (src1->type == GGML_TYPE_F32) {
-                const float *act_chunk = (const float *)((const char *)src1->data + nr * src1_row_stride);
-                //GGMLHEXAGON_LOG_INFO("act_chunk (src1) first 4 elements: %.2f %.2f %.2f %.2f",\
-                                     act_chunk[0], act_chunk[1], act_chunk[2], act_chunk[3]);
-
-                // Copy activation data from RPC memory to reusable_buf (fp32)
-                const size_t src1_stride_elements = src1_row_stride / sizeof(float);
-                for (size_t i = 0; i < N_rows; ++i) {
-                    memcpy(reusable_buf.fp32 + i * K, act_chunk + i * src1_stride_elements, K * sizeof(float));
+                // Wait for pending DMA (from previous iteration's prefetch) or do sync copy
+                if (act_dma_pending) {
+                    dma_queue_pop(dma);  // wait for DMA completion
+                    act_dma_pending = false;
+                } else {
+                    // First chunk: DMA push and wait immediately
+                    const float *act_chunk = (const float *)((const char *)src1->data + nr * src1_row_stride);
+                    dma_queue_push_ddr_to_vtcm(dma,
+                        dma_make_ptr(reusable_buf.fp32, act_chunk),
+                        K * sizeof(float), src1_row_stride, N_rows);
+                    dma_queue_pop(dma);
                 }
-                __asm__ __volatile__("" ::: "memory");
-
-                //GGMLHEXAGON_LOG_INFO("reusable_buf fp32 first 4 elements: %.2f %.2f %.2f %.2f",\
-                                     reusable_buf.fp32[0], reusable_buf.fp32[1],\
-                                     reusable_buf.fp32[2], reusable_buf.fp32[3]);
 
                 // Convert from fp32 buffer to fp16 tiles (row-pair interleaved format)
                 transfer_activation_chunk_fp32_to_fp16(vtcm_activation, reusable_buf.fp32, N_rows, K, K);
-
-                //GGMLHEXAGON_LOG_INFO("vtcm_activation first 4 fp16 elements: %.2f %.2f %.2f %.2f",\
-                                     (float)vtcm_activation[0], (float)vtcm_activation[1],\
-                                     (float)vtcm_activation[2], (float)vtcm_activation[3]);
             }
 
             // HMX computation
-            // NOTE: reusable_buf is now used as fp16 output buffer
             core_dot_chunk_fp16(reusable_buf.fp16, vtcm_activation, vtcm_weight, vtcm_scales, N_row_tiles, M_col_tiles, n_dot_tiles);
 
-            //GGMLHEXAGON_LOG_INFO("HMX output tile[0..3]: %.2f %.2f %.2f %.2f",\
-                                 (float)reusable_buf.fp16[0], (float)reusable_buf.fp16[1],\
-                                 (float)reusable_buf.fp16[2], (float)reusable_buf.fp16[3]);
-
-            // Copy output to dst
-            // CRITICAL FIX: ggml uses row-major format: dst->data[row + col * M] = dst[row, col]
-            // where row is M dimension index (0 to M-1), col is N dimension index (0 to N-1)
-            // 
-            // HMX output_tile layout: rows = N dimension, cols = M dimension
-            // output_tile[row=r, col=c] corresponds to dst[row=mc+c, col=nr+r]
-            // 
-            // We need to map: output_tile[row=r, col=c+i] -> dst[row=mc+c+i, col=nr+r]
-            // dst[mc+c+i, nr+r] = dst->data[(mc+c+i) + (nr+r) * M]
-            // 
-            // output_chunk should point to dst[mc, nr] (row=mc, col=nr)
-            // dst[mc, nr] = dst->data[mc + nr * M]
-            // offset = mc * nb[0] + nr * nb[1] = mc * 4 + nr * 4 * M
+            // Copy output to dst (must complete before DMA prefetch overwrites reusable_buf)
             float *output_chunk = (float *)((char *)dst->data + mc * dst->nb[0] + nr * dst->nb[1]);
             transfer_output_chunk_fp16_to_fp32(output_chunk, reusable_buf.fp16, N_rows, M_cols, M);
 
-            //GGMLHEXAGON_LOG_INFO("final output first 4 elements: %.2f %.2f %.2f %.2f",\
-                                 output_chunk[0], output_chunk[1], output_chunk[2], output_chunk[3]);
+            // Prefetch next activation chunk via DMA (overlaps with next iteration's compute)
+            // NOTE: this must be after output writeback since reusable_buf is shared
+            size_t nr_next = nr + N_chunk_n_rows;
+            if (nr_next < N && !src1_is_f16) {
+                const float *act_chunk_next = (const float *)((const char *)src1->data + nr_next * src1_row_stride);
+                dma_queue_push_ddr_to_vtcm(dma,
+                    dma_make_ptr(reusable_buf.fp32, act_chunk_next),
+                    K * sizeof(float), src1_row_stride,
+                    (N - nr_next) > N_chunk_n_rows ? N_chunk_n_rows : (N - nr_next));
+                act_dma_pending = true;
+            }
         }
     }
+
+    dma_queue_flush(dma);
+    dma_queue_delete(dma);
 
     if (hmx_locked) {
         HAP_compute_res_hmx_unlock(compute_res_ctx_id);
