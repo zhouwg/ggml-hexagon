@@ -5728,9 +5728,6 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // Test HMX functionality after DSP initialization and rpc mempool setup
         GGMLHEXAGON_LOG_INFO("Running HMX test...");
         test_hmx_ap(ctx);
-        // Test HMX instruction flow (single tile) - temporarily disabled due to segfault
-        // GGMLHEXAGON_LOG_INFO("Running HMX instruction flow test...");
-        // test_hmx_instruction_flow_ap(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,
                              ggmlhexagon_get_dsp_name(domain_id));

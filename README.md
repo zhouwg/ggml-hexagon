@@ -1,6 +1,6 @@
 # llama.cpp
 
-![llama](https://user-images.githubusercontent.com/1991296/230134379-7181e485-c521-4d23-a0d6-f7b3b61ba524.png)
+![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/ggml-org/llama.cpp)](https://github.com/ggml-org/llama.cpp/releases)
@@ -37,7 +37,7 @@ LLM inference in C/C++
 
 Getting started with llama.cpp is straightforward. Here are several ways to install it on your machine:
 
-- Install `llama.cpp` using [brew, nix or winget](docs/install.md)
+- Install `llama.cpp` using [brew, nix, winget, or conda-forge](docs/install.md)
 - Run with Docker - see our [Docker documentation](docs/docker.md)
 - Download pre-built binaries from the [releases page](https://github.com/ggml-org/llama.cpp/releases)
 - Build from source by cloning this repository - check out [our build guide](docs/build.md)
@@ -609,7 +609,14 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - self-build
   https://github.com/zhouwg/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
 - self-build-jz
-  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch. Why is jz's ggml-hexagon backend still meaningful? because jz's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends. the implementation of the prebuilt libggmldsp-skel.so is complicated&dirty, so the open-source code of libggmldsp-skel.so can be found in this branch.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
+
+## Why jz's ggml-hexagon backend is still meaningful?
+- JZ's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends. The implementation of the prebuilt libggmldsp-skel.so is complicated&dirty(I ported a fully ggml-dsp to Qualcomm's NPU side and supports fully quantized&none-quantized mulmat op, theoretically supports all ggml ops), so the open-source code of libggmldsp-skel.so can be found in this branch.
+- [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
+- Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a simple solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native FastRPC mechanism</b>, this simple solution will also reduce FastRPC overhead observably. Now we know [how to use Qualcomm's HMX(Hexagon Matrix eXtension) instructions in ggml correctly](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/ggml/src/ggml-hexagon/kernels/test-hmx.c), we can find that the performance of PP(Prompt Processing) in Qualcomm's official ggml-hexagon backend is much faster than the performance of PP in JZ's ggml-hexagonbackend, AI experts and domain tech experts' help for this <simple solution> in branch self-build-jz is greatly welcomed.
+- I learnt/got too much from open source community and many/sincerely thanks to all contributors of the great open source community, especially all original authors and all contributors of the great Linux & Android & FFmpeg & llama.cpp and other excellent projects. Hope this ggml-hexagon project is a little useful for open source community.
+
 
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
