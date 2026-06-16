@@ -115,9 +115,6 @@ class  qnn_instance;
 class  hexagon_profiler;
 struct ggml_backend_hexagon_context;
 
-// Forward declaration for test function
-static int test_hmx_ap(ggml_backend_hexagon_context * ctx);
-
 #ifdef NDEBUG
 #define GGMLHEXAGON_DEBUG                               0
 #else
@@ -155,6 +152,9 @@ static int test_hmx_ap(ggml_backend_hexagon_context * ctx);
 #define RPCMEM_HEAP_ID_SYSTEM                           25
 #define SIZE_IN_MB                                      (1 << 20)
 #define STATUS_CONTEXT                                  0x12345678
+
+#define GGMLHEXAGON_MAX_OPS_PER_TASK                    16
+#define GGMLHEXAGON_MAX_TENSORS_PER_TASK                32
 
 #if !defined (_WINDOWS)
 #pragma weak remote_system_request
@@ -205,8 +205,9 @@ using qnn_singlenode_res_t                      = std::tuple<Qnn_GraphHandle_t, 
 typedef void (* ggmlqnn_op_func_t)(ggml_backend_hexagon_context * ctx, ggml_tensor * op);
 typedef int  (* notify_callback_fn)(void * context, int domain, int session, remote_rpc_status_flags_t status);
 typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor * src0, const dsptensor * src1, dsptensor * dst);
-#define GGMLHEXAGON_MAX_OPS_PER_TASK 16
-#define GGMLHEXAGON_MAX_TENSORS_PER_TASK 32
+
+// Forward declaration for test function
+static int  test_hmx_ap(ggml_backend_hexagon_context * ctx);
 
 struct ggmlhexagon_task {
     int32 op_type;
@@ -353,6 +354,7 @@ struct hexagon_appcfg_t {
     int profiler_counts;        // threshold of counts in profiler
     int thread_counts;          // thread_counts on cDSP side
     int mulmat_algotype;        // algorithm type of mulmat on cDSP side
+    int enable_offload_cgraph;  // enable/disable offload cgraph or multiple op to cDSP directly
     const char * cfgfilename;
     const char * runtime_libpath;
     char ggml_hexagon_version[GGMLHEXAGON_TMPBUF_LEN];
@@ -378,6 +380,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .profiler_counts        = 100,
         .thread_counts          = 4,
         .mulmat_algotype        = 0,
+        .enable_offload_cgraph  = 0,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
     #if defined(STANDARD_ANDROID_APP)
@@ -2029,6 +2032,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "enable_all_q_mulmat", g_hexagon_appcfg.enable_all_q_mulmat, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 4);
     hexagoncfg_instance.get_intvalue("cdsp", "mulmat_algotype", g_hexagon_appcfg.mulmat_algotype, 0);
+    hexagoncfg_instance.get_intvalue("cdsp", "enable_offload_cgraph", g_hexagon_appcfg.enable_offload_cgraph, 0);
 
     memcpy(g_hexagon_appcfg.ggml_dsp_version, ggmldsp_version.c_str(), strlen(ggmldsp_version.c_str()));
 
@@ -2178,6 +2182,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
         GGMLHEXAGON_LOG_INFO("using rpc ion memory pool:        %s", g_hexagon_appcfg.enable_rpc_ion_mempool ? "YES" : "NO");
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_CDSP:  %d", g_hexagon_appcfg.thread_counts);
         GGMLHEXAGON_LOG_INFO("mulmat algo type on cDSP:         %d", g_hexagon_appcfg.mulmat_algotype);
+        GGMLHEXAGON_LOG_INFO("offload cgraph:                   %s", g_hexagon_appcfg.enable_offload_cgraph ? "YES" : "NO");
         ggmlhexagon_probe_dspinfo(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_QNN:   %d", g_hexagon_appcfg.hvx_threads);
@@ -5725,9 +5730,9 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
             goto bail;
         }
 
-        // Test HMX functionality after DSP initialization and rpc mempool setup
-        GGMLHEXAGON_LOG_INFO("Running HMX test...");
-        test_hmx_ap(ctx);
+        //Test HMX functionality after DSP initialization and rpc mempool setup
+        //GGMLHEXAGON_LOG_INFO("Running HMX test...");
+        //test_hmx_ap(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,
                              ggmlhexagon_get_dsp_name(domain_id));
@@ -5917,7 +5922,7 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
 
         hexagon_error = ggmlhexagon_task_execute(ctx, &task);
         if (AEE_SUCCESS != hexagon_error) {
-            GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via batch task", ggml_op_name(op->op));
+            GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via dsp task", ggml_op_name(op->op));
         }
     } else {
         GGMLHEXAGON_LOG_DEBUG("op GGML_OP_%s not supported on cDSP", ggml_op_name(op->op));
@@ -6638,11 +6643,54 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
         }
     }
 
-    //TODO
-    //1.Qualcomm's dspqueue is a highlevel wrapper of the native FastRPC and it's complicated.
-    //2.LLM inference is essentially synchronous.
-    //3.ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side.
-    //according to 1+2+3, we can implement a simple solution for purose of offload multiple op(a fully single cgraph) to NPU via ggmlop_dsp_execute_batch, this simple solution will also reduce FastRPC overhead observably.
+    return result;
+}
+
+//TODO
+//1.Qualcomm's dspqueue is a highlevel wrapper of the native FastRPC and it's complicated.
+//2.LLM inference is essentially synchronous.
+//3.ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side.
+//according to 1+2+3, we can implement a simple solution for purose of offload multiple op(a fully single cgraph) to NPU via ggmlop_dsp_execute_batch, this simple solution will also reduce FastRPC overhead observably.
+static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+
+    enum ggml_status result         = GGML_STATUS_SUCCESS;
+    ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
+    GGML_UNUSED(ctx);
+
+    ggml_tensor * src0;
+    ggml_tensor * src1;
+    ggml_tensor * dst;
+    struct ggmlhexagon_task task;
+
+    //FIXME: due to limited supported op on cDSP side, calling ggmlop_dsp_execute_task for every supported op
+    //this is not real implementation of "offload cgraph/multiple op to cDSP directly"
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
+        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
+            || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
+            || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+            continue;
+        }
+
+        src0  = node->src[0];
+        src1  = node->src[1];
+        dst   = node;
+
+        if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
+            ggmlhexagon_task_init(&task);
+            int ret = ggmlhexagon_task_add_op(&task, node->op, src0, src1, dst);
+            if (ret != 0) {
+                GGMLHEXAGON_LOG_WARN("failed to add node to task");
+                return GGML_STATUS_FAILED;
+            }
+
+            int hexagon_error = ggmlhexagon_task_execute(ctx, &task);
+            if (AEE_SUCCESS != hexagon_error) {
+                GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via batch task", ggml_op_name(node->op));
+            }
+        }
+    }
+    //TODO: offload cgraph or multiple op via ggmlop_dsp_execute_batch
 
     return result;
 }
@@ -7177,7 +7225,13 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
         if (nullptr == instance)
             return nullptr;
     }
-    ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
+    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (1 == g_hexagon_appcfg.enable_offload_cgraph)) {
+        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special");
+        ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special;
+    } else {
+        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_general");
+        ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
+    }
     ggml_backend_t hexagon_backend = new ggml_backend{
             /* .guid      = */ ggml_backend_hexagon_guid(),
             /* .iface     = */ ggml_backend_hexagon_interface,
