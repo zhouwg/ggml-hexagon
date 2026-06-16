@@ -15,16 +15,6 @@ struct dsptensor {
     sequence<float> data;
 };
 
-// Tensor descriptor
-struct dsp_tensor_desc {
-    int32_t type;          // data type
-    int32_t ne[4];         // dimensions
-    int32_t nb[4];         // strides in bytes
-    int64_t va;            // AP-side virtual address
-    int32_t fd;            // ION file descriptor
-    int32_t size;          // data size in bytes
-};
-
 // Op descriptor
 struct dsp_op_desc {
     int32_t opcode;        // GGML_OP type
@@ -38,7 +28,7 @@ struct dsp_op_desc {
 struct dsp_opbatch_req {
     int32_t n_tensors;     // number of tensors
     int32_t n_ops;         // number of ops
-    sequence<dsp_tensor_desc> tensors;
+    sequence<dsptensor> tensors;
     sequence<dsp_op_desc> ops;
 };
 

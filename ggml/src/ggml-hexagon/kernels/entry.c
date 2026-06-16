@@ -19,7 +19,8 @@ static int g_hmx_available                  = 0;
 static volatile int g_vtcm_needs_release    = 0;  // For cache mode VTCM management
 static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently valid/available
 
-void *  g_hexagon_power_ctx                 = NULL;
+static void * g_hexagon_power_ctx           = NULL;
+static void * g_ion_dsp_base                = NULL;
 
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
@@ -487,6 +488,7 @@ void * ggmlop_get_vtcm_pool(size_t * size) {
     return g_vtcm_base;
 }
 
+
 // Ensure VTCM resource is available (for cache mode)
 // Must be called before using VTCM in each operation
 int ggmlop_ensure_vtcm_available(void) {
@@ -530,6 +532,32 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
     GGMLHEXAGON_LOG_INFO("executing op type %d", ggml_op);
 
+    // GGML_OP_NONE: register ION mempool base VA from AP side.
+    // FastRPC has already translated src0->data to DSP VA.
+    // src1 contains metadata: meta_data[0]=fd, [1..3]=size (low32, high32, size_mb)
+    if (ggml_op == GGML_OP_NONE) {
+        if (src0 && src0->data) {
+            g_ion_dsp_base = src0->data;
+            int32_t data_len = src0->data_len;
+
+            int32_t fd = 0;
+            uint64_t size_bytes = 0;
+            int32_t size_in_mb = 0;
+            if (src1 && src1->data) {
+                uint32_t * meta_data = (uint32_t *)src1->data;
+                fd = (int32_t)meta_data[0];
+                uint32_t size_low  = meta_data[1];
+                uint32_t size_high = meta_data[2];
+                size_bytes = ((uint64_t)size_high << 32) | (uint64_t)size_low;
+                size_in_mb = meta_data[3];
+            }
+
+            GGMLHEXAGON_LOG_INFO("registered ION DSP base: %p, data_len=%d, fd=%d, size=%llubytes(%dMB)",
+                                 g_ion_dsp_base, data_len, fd, (unsigned long long)size_bytes, size_in_mb);
+        }
+        return AEE_SUCCESS;
+    }
+
     switch (ggml_op) {
         case GGML_OP_SUB:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SUB task");
@@ -561,7 +589,57 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
 
 AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req) {
-    GGMLHEXAGON_LOG_INFO("enter %s", __func__);
-    GGMLHEXAGON_LOG_INFO("leave %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
+
+    if (!req) {
+        GGMLHEXAGON_LOG_ERROR("invalid input: req=%p", req);
+        return AEE_EBADPARM;
+    }
+
+    if (req->n_tensors == 0 || req->n_ops == 0) {
+        GGMLHEXAGON_LOG_ERROR("empty batch: n_tensors=%d, n_ops=%d", req->n_tensors, req->n_ops);
+        return AEE_EBADPARM;
+    }
+
+    // req->tensors[] are dsptensor structs with data pointers already
+    // translated from AP VA to DSP VA by FastRPC (same as per-op path).
+    // No need for manual base+offset calculation or fd lookup.
+    GGMLHEXAGON_LOG_INFO("batch: %d tensors, %d ops", req->n_tensors, req->n_ops);
+
+    // dispatch each op using pre-translated dsptensor pointers
+    for (int i = 0; i < req->n_ops; i++) {
+        const dsp_op_desc * op = &req->ops[i];
+
+        if (op->src0_idx < 0 || op->src0_idx >= req->n_tensors ||
+            op->dst_idx < 0  || op->dst_idx >= req->n_tensors) {
+            GGMLHEXAGON_LOG_ERROR("op %d: invalid tensor indices src0=%d src1=%d dst=%d",
+                                  i, op->src0_idx, op->src1_idx, op->dst_idx);
+            return AEE_EBADPARM;
+        }
+
+        const dsptensor * src0 = &req->tensors[op->src0_idx];
+        const dsptensor * src1 = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
+        const dsptensor * dst  = &req->tensors[op->dst_idx];
+
+        GGMLHEXAGON_LOG_INFO("batch op %d: opcode=%d, src0.data=%p, dst.data=%p",
+                             i, op->opcode, src0->data, dst->data);
+
+        switch (op->opcode) {
+            case GGML_OP_SUB:
+                ggmlop_dsp_sub(h, src0, src1, dst);
+                break;
+            case GGML_OP_ADD:
+                ggmlop_dsp_add(h, src0, src1, dst);
+                break;
+            case GGML_OP_MUL_MAT:
+                ggmlop_dsp_mulmat(h, src0, src1, dst);
+                break;
+            default:
+                GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
+                return AEE_EUNSUPPORTED;
+        }
+    }
+
+    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
     return AEE_SUCCESS;
 }

@@ -244,17 +244,6 @@ struct dsptensor {
    void* data;
    int data_len;
 };
-
-typedef struct dsp_tensor_desc dsp_tensor_desc;
-struct dsp_tensor_desc {
-   int32_t type;
-   int32_t ne[4];
-   int32_t nb[4];
-   int64_t va;
-   int32_t fd;
-   int32_t size;
-};
-
 typedef struct dsp_op_desc dsp_op_desc;
 struct dsp_op_desc {
    int32_t opcode;
@@ -263,17 +252,15 @@ struct dsp_op_desc {
    int32_t src1_idx;
    int32_t dst_idx;
 };
-
 typedef struct dsp_opbatch_req dsp_opbatch_req;
 struct dsp_opbatch_req {
    int32_t n_tensors;
    int32_t n_ops;
-   dsp_tensor_desc* tensors;
-   int tensorsLen;
+   dsptensor* tensors;
+   int tensors_len;
    dsp_op_desc* ops;
-   int opsLen;
+   int ops_len;
 };
-
 /**
     * Opens the handle in the specified domain.  If this is the first
     * handle, this creates the session.  Typically this means opening

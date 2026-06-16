@@ -594,6 +594,7 @@ esac
 
 
 #for jz's prebuilt ggml-hexagon backend in branch self-build-jz
+#incompatible and obsolete since 06/16/2026
 function prepare_ggmldsp_prebuilt()
 {
     adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
@@ -745,6 +746,7 @@ function prepare_run_on_phone()
 
 
     #for verify jz's prebuilt libggmldsp-skel.so, built from the reference/self-develop source codes in this project
+    #incompatible and obsolete since 06/16/2026
     #prepare_ggmldsp_prebuilt
 
     #for verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch

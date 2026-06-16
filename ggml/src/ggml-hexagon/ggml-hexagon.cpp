@@ -5466,8 +5466,51 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                                   ctx->rpc_mempool_len / SIZE_IN_MB);
         }
         ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_DEBUG("rpc mempool handle %d", ctx->rpc_mempool_handle);
+        GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", ctx->rpc_mempool_handle);
+        GGMLHEXAGON_LOG_INFO("rpc mempool addr 0x%p", ctx->rpc_mempool);
+        GGMLHEXAGON_LOG_INFO("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
         remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
+
+        // Register ION pool base address on DSP side
+        // FastRPC translates dsptensor.data from AP VA to DSP VA automatically
+        // Use src1 to pass fd and size information as a special "metadata" tensor
+        {
+            struct dsptensor ion_base_tensor;
+            struct dsptensor ion_meta_tensor;  // metadata tensor for fd and size
+            struct dsptensor ion_dst_dummy;
+            int32_t dummy = 0;
+            int32_t meta_data[16] = {0};  // metadata array
+
+            memset(&ion_base_tensor, 0, sizeof(ion_base_tensor));
+            memset(&ion_meta_tensor, 0, sizeof(ion_meta_tensor));
+            memset(&ion_dst_dummy, 0, sizeof(ion_dst_dummy));
+
+            // Main tensor: ION buffer base address
+            // For remote_register_buf'd ION buffers, FastRPC translates the pointer
+            // (not copy data). data_len tells FastRPC how many bytes to validate/map.
+            // Must be > sizeof(float) to get real pointer translation, but small enough
+            // that stub-layer allocation doesn't fail (data_len * sizeof(float) must fit).
+            ion_base_tensor.data = ctx->rpc_mempool;
+            ion_base_tensor.data_len = (int)(64 * 1024);  // 64KB: enough for pointer translation, safe for allocation
+            ion_base_tensor.type = 0;
+
+            // Metadata tensor: contains fd and size
+            // Use a small buffer on stack, FastRPC will copy it to DSP
+            meta_data[0] = ctx->rpc_mempool_handle;  // fd
+            meta_data[1] = (int32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);  // size lower 32 bits
+            meta_data[2] = (int32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);  // size upper 32 bits
+            meta_data[3] = (int32_t)(ctx->rpc_mempool_len >> 20);  // size in MB
+            ion_meta_tensor.data = meta_data;
+            ion_meta_tensor.data_len = sizeof(meta_data);
+            ion_meta_tensor.type = 0;
+
+            ion_dst_dummy.data = &dummy;
+            ion_dst_dummy.data_len = sizeof(dummy);
+
+            ggmlop_dsp_execute_task(ctx->ggmlop_handle, GGML_OP_NONE, &ion_base_tensor, &ion_meta_tensor, &ion_dst_dummy);
+            GGMLHEXAGON_LOG_INFO("registered ION DSP base, AP VA 0x%p, size=%lldMB, fd=%d",
+                                 ctx->rpc_mempool, ctx->rpc_mempool_len / SIZE_IN_MB, ctx->rpc_mempool_handle);
+        }
     }
 
     return 0;
@@ -6646,7 +6689,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
     return result;
 }
 
-//TODO
 //1.Qualcomm's dspqueue is a highlevel wrapper of the native FastRPC and it's complicated.
 //2.LLM inference is essentially synchronous.
 //3.ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side.
@@ -6655,15 +6697,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
 
     enum ggml_status result         = GGML_STATUS_SUCCESS;
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
-    GGML_UNUSED(ctx);
 
-    ggml_tensor * src0;
-    ggml_tensor * src1;
-    ggml_tensor * dst;
-    struct ggmlhexagon_task task;
-
-    //FIXME: due to limited supported op on cDSP side, calling ggmlop_dsp_execute_task for every supported op
-    //this is not real implementation of "offload cgraph/multiple op to cDSP directly"
+    // collect supported ops
+    std::vector<ggml_tensor *> supported_nodes;
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
@@ -6671,26 +6707,100 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
-
-        src0  = node->src[0];
-        src1  = node->src[1];
-        dst   = node;
-
+        //TODO: only support limited op on NPU side at the moment
         if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
+            supported_nodes.push_back(node);
+        }
+    }
+
+    if (supported_nodes.empty()) {
+        return result;
+    }
+
+    // deduplicate tensors by data pointer and build tensor list (dsptensor)
+    // FastRPC will translate each dsptensor.data pointer from AP VA to DSP VA
+    // map: tensor data pointer -> index in tensors array
+    std::unordered_map<void *, int32_t> tensor_index_map;
+    std::vector<dsptensor> tensor_list;
+
+    auto get_or_add_tensor = [&](ggml_tensor * t) -> int32_t {
+        if (!t) return -1;
+        auto it = tensor_index_map.find(t->data);
+        if (it != tensor_index_map.end()) {
+            return it->second;
+        }
+        int32_t idx = (int32_t)tensor_list.size();
+        tensor_index_map[t->data] = idx;
+
+        dsptensor dt;
+        memset(&dt, 0, sizeof(dt));
+        dt.type     = t->type;
+        dt.ne[0]    = t->ne[0];
+        dt.ne[1]    = t->ne[1];
+        dt.ne[2]    = t->ne[2];
+        dt.ne[3]    = t->ne[3];
+        dt.nb[0]    = t->nb[0];
+        dt.nb[1]    = t->nb[1];
+        dt.nb[2]    = t->nb[2];
+        dt.nb[3]    = t->nb[3];
+        dt.data     = t->data;          // AP VA, FastRPC translates to DSP VA
+        dt.data_len = (int)ggml_nbytes(t);
+        memcpy(dt.op_params, t->op_params, sizeof(dt.op_params));
+        tensor_list.push_back(dt);
+        GGMLHEXAGON_LOG_WARN("tensor %d: data=%p, data_len=%d, type=%d(%s), op(%s,%s)", \
+                             idx, t->data, dt.data_len, t->type, ggml_type_name(t->type), ggml_op_name(t->op), ggml_op_symbol(t->op));
+        return idx;
+    };
+
+    // build op desc list
+    std::vector<dsp_op_desc> op_descs;
+    for (auto * node : supported_nodes) {
+        dsp_op_desc op;
+        memset(&op, 0, sizeof(op));
+        op.opcode = node->op;
+        memcpy(op.params, node->op_params, sizeof(op.params));
+        op.src0_idx = get_or_add_tensor(node->src[0]);
+        op.src1_idx = get_or_add_tensor(node->src[1]);
+        op.dst_idx  = get_or_add_tensor(node);
+        op_descs.push_back(op);
+    }
+
+    // build batch request and submit via single FastRPC call
+    dsp_opbatch_req req;
+    memset(&req, 0, sizeof(req));
+    req.n_tensors = (int32_t)tensor_list.size();
+    req.n_ops     = (int32_t)op_descs.size();
+    req.tensors   = tensor_list.data();
+    req.tensors_len = (int32_t)tensor_list.size();
+    req.ops       = op_descs.data();
+    req.ops_len   = (int32_t)op_descs.size();
+
+    int hexagon_error = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, &req);
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch failed: 0x%x", hexagon_error);
+#if 0
+        // fallback to per-op path: execute each supported op individually
+        for (auto * node : supported_nodes) {
+            ggml_tensor * src0 = node->src[0];
+            ggml_tensor * src1 = node->src[1];
+            ggml_tensor * dst  = node;
+
+            struct ggmlhexagon_task task;
             ggmlhexagon_task_init(&task);
             int ret = ggmlhexagon_task_add_op(&task, node->op, src0, src1, dst);
             if (ret != 0) {
                 GGMLHEXAGON_LOG_WARN("failed to add node to task");
-                return GGML_STATUS_FAILED;
+                result = GGML_STATUS_FAILED;
+                continue;
             }
 
-            int hexagon_error = ggmlhexagon_task_execute(ctx, &task);
-            if (AEE_SUCCESS != hexagon_error) {
-                GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via batch task", ggml_op_name(node->op));
+            int err = ggmlhexagon_task_execute(ctx, &task);
+            if (AEE_SUCCESS != err) {
+                GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via fallback task", ggml_op_name(node->op));
             }
         }
+#endif
     }
-    //TODO: offload cgraph or multiple op via ggmlop_dsp_execute_batch
 
     return result;
 }
