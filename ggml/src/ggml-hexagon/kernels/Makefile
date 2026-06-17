@@ -22,7 +22,7 @@ CFLAGS+=-DGGMLDSP_VERSION="0.99.0"
 LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB_SECURE_FLAG=2 -Wl,--no-threads -fpic -shared -Wl,-Bsymbolic -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=realloc -Wl,--wrap=memalign -lc -Wl,-soname=${TARGET}
 
 #SRCS = $(wildcard *.c)
-SRCS = ggml-dsp.c skel.c entry.c add.c mul.c sub.c mulmat.c test-hmx.c rmsnorm.c rope.c softmax.c ../htp/hex-dma.c
+SRCS = ggml-dsp.c skel.c entry.c add.c mul.c div.c sub.c mulmat.c test-hmx.c rmsnorm.c rope.c softmax.c ../htp/hex-dma.c
 OBJS = $(patsubst %.c, %.o, $(SRCS))
 OBJS += dot.o
 OBJS += worker_pool.o

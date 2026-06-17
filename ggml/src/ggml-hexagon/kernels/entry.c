@@ -571,6 +571,10 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL task");
             ggmlop_dsp_mul(h, src0, src1, dst);
             break;
+        case GGML_OP_DIV:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_DIV task");
+            ggmlop_dsp_div(h, src0, src1, dst);
+            break;
         case GGML_OP_MUL_MAT:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL_MAT task");
             ggmlop_dsp_mulmat(h, src0, src1, dst);
@@ -671,6 +675,9 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 break;
             case GGML_OP_MUL:
                 ggmlop_dsp_mul(h, src0, src1, dst);
+                break;
+            case GGML_OP_DIV:
+                ggmlop_dsp_div(h, src0, src1, dst);
                 break;
             case GGML_OP_MUL_MAT:
                 ggmlop_dsp_mulmat(h, src0, src1, dst);
