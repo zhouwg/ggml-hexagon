@@ -820,8 +820,8 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD_ID,   0, nullptr, nullptr},
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
-    {false, GGML_OP_SUB,      0, nullptr, nullptr},
-    {false, GGML_OP_MUL,      0, nullptr, nullptr},
+    {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
+    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
     {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
@@ -6223,6 +6223,21 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
             if (!ggml_can_repeat(src1, src0) || ggml_is_permuted(src1)) {
                 return false;
             }
+            return true;
+        }
+        case GGML_OP_MUL:
+        {
+            // Binary element-wise: same rules as ADD/SUB
+            if (src0->type == GGML_TYPE_F32) {
+                if (!src1 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+                    return false;
+            } else if (src0->type == GGML_TYPE_F16) {
+                if (!src1 || src1->type != GGML_TYPE_F16 || dst->type != GGML_TYPE_F16)
+                    return false;
+            } else return false;
+            if (!ggml_are_same_shape(src0, dst)) return false;
+            if (!ggml_can_repeat(src1, src0) || ggml_is_permuted(src1))
+                return false;
             return true;
         }
         case GGML_OP_MUL_MAT:
