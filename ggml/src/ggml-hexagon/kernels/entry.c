@@ -585,7 +585,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             break;
         case GGML_OP_ROPE:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_ROPE task");
-            ggmlop_dsp_rope(h, src0, src1, dst);
+            ggmlop_dsp_rope(h, src0, src1, NULL, dst);
             break;
         case GGML_OP_SOFT_MAX:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SOFT_MAX task");
@@ -651,6 +651,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
 
         const dsptensor * src0 = &req->tensors[op->src0_idx];
         const dsptensor * src1 = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
+        const dsptensor * src2 = (op->src2_idx >= 0) ? &req->tensors[op->src2_idx] : NULL;
         const dsptensor * dst  = &req->tensors[op->dst_idx];
 
         // log tensor details and sample data for debugging
@@ -665,6 +666,12 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                                  op->src1_idx, src1->data,
                                  src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
                                  src1->type, src1->data_len);
+        }
+        if (src2) {
+            GGMLHEXAGON_LOG_INFO("  src2[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
+                                 op->src2_idx, src2->data,
+                                 src2->ne[0], src2->ne[1], src2->ne[2], src2->ne[3],
+                                 src2->type, src2->data_len);
         }
         GGMLHEXAGON_LOG_INFO("  dst[t%d]  data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
                              op->dst_idx, dst->data,
@@ -698,7 +705,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 ggmlop_dsp_rmsnorm(h, src0, src1, dst);
                 break;
             case GGML_OP_ROPE:
-                ggmlop_dsp_rope(h, src0, src1, dst);
+                ggmlop_dsp_rope(h, src0, src1, src2, dst);
                 break;
             case GGML_OP_SOFT_MAX:
                 ggmlop_dsp_softmax(h, src0, src1, dst);

@@ -241,7 +241,7 @@ struct dsptensor {
    int32_t op;
    int32_t op_params[16];
    int32_t flags;
-   void* data;
+   void * data;
    int data_len;
 };
 typedef struct dsp_op_desc dsp_op_desc;
@@ -250,6 +250,7 @@ struct dsp_op_desc {
    int32_t params[16];
    int32_t src0_idx;
    int32_t src1_idx;
+   int32_t src2_idx;
    int32_t dst_idx;
 };
 typedef struct dsp_opbatch_req dsp_opbatch_req;

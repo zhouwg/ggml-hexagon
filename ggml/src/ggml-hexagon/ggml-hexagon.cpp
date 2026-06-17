@@ -6284,8 +6284,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         }
         case GGML_OP_ROPE:
         {
-            // Ternary: src0(f32 input), src1(i32 positions), dst(f32)
-            if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+            // Ternary: src0(f32/f16 input), src1(i32 positions), dst(f32/f16)
+            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
+                return false;
+            if (dst->type != GGML_TYPE_F32 && dst->type != GGML_TYPE_F16)
                 return false;
             if (!src1 || src1->type != GGML_TYPE_I32)
                 return false;
@@ -7073,7 +7075,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         op.opcode = node->op;
         memcpy(op.params, node->op_params, sizeof(op.params));
         op.src0_idx = get_or_add_tensor(node->src[0]);
-        op.src1_idx = get_or_add_tensor(node->src[1]);
+        op.src1_idx = (node->src[1]) ? get_or_add_tensor(node->src[1]) : -1;
+        op.src2_idx = (node->src[2]) ? get_or_add_tensor(node->src[2]) : -1;
         op.dst_idx  = get_or_add_tensor(node);
         op_descs.push_back(op);
     }
@@ -7084,10 +7087,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         const dsptensor & t0 = tensor_list[o.src0_idx];
         const dsptensor & td = tensor_list[o.dst_idx];
         const char * s1_name = (o.src1_idx >= 0) ? ggml_type_name((enum ggml_type)tensor_list[o.src1_idx].type) : "null";
-        GGMLHEXAGON_LOG_WARN("  op[%zu] %s: src0[t%d] %s[%lld] src1[t%d] %s dst[t%d] %s[%lld]",
+        const char * s2_name = (o.src2_idx >= 0) ? ggml_type_name((enum ggml_type)tensor_list[o.src2_idx].type) : "null";
+        GGMLHEXAGON_LOG_WARN("  op[%zu] %s: src0[t%d] %s[%lld] src1[t%d] %s src2[t%d] %s dst[t%d] %s[%lld]",
                               i, ggml_op_name((ggml_op)o.opcode),
                               o.src0_idx, ggml_type_name((enum ggml_type)t0.type), (long long)t0.ne[0],
                               o.src1_idx, s1_name,
+                              o.src2_idx, s2_name,
                               o.dst_idx, ggml_type_name((enum ggml_type)td.type), (long long)td.ne[0]);
     }
 
