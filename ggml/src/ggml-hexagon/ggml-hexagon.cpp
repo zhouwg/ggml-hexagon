@@ -6557,7 +6557,16 @@ struct ggml_backend_hexagon_buffer_context {
     ~ggml_backend_hexagon_buffer_context() {
         if (buffer) {
             if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
-                //do nothing here because rpc mempool was used for HWACCEL_CDSP
+                // Rewind bump allocator when an ION-pool buffer is freed (LIFO only).
+                if (backend_ctx && backend_ctx->rpc_mempool) {
+                    const char * buf_ptr = (const char *)buffer;
+                    const char * pool_base = (const char *)backend_ctx->rpc_mempool;
+                    size_t buf_end = (size_t)(buf_ptr - pool_base) + buffer_size;
+                    if (buf_ptr >= pool_base && buf_end == backend_ctx->rpc_mempool_usage) {
+                        backend_ctx->rpc_mempool_usage = (size_t)(buf_ptr - pool_base);
+                    }
+                }
+                // do not call rpcmem_free: buffer was bump-allocated from mempool
             } else {
                 ggml_aligned_free(buffer, 0);
             }
@@ -6793,10 +6802,11 @@ static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_ty
 
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
            ggml_backend_buffer_type_t buft, size_t size) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
+    GGMLHEXAGON_LOG_WARN("[ALLOC] ENTER size=%zu bytes (%.2f MiB)", size, (double)size / (1024.0 * 1024.0));
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
     ggml_backend_hexagon_buffer_context * buffer_ctx = new ggml_backend_hexagon_buffer_context;
+    buffer_ctx->backend_ctx = ctx;
 
     size_t size_page = 0;
 #if defined(__ANDROID__) || defined(__linux__)
@@ -6814,7 +6824,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
     if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
         GGMLHEXAGON_LOG_DEBUG("device %d(%s)", ctx->device, ggml_backend_hexagon_get_devname(ctx->device));
         GGML_ASSERT(nullptr != ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_DEBUG("size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
+        GGMLHEXAGON_LOG_WARN("size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
                               size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
                               ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
 
@@ -6842,7 +6852,23 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
     } else {
         //GGMLHEXAGON_LOG_DEBUG("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
     }
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
+    // Report allocation result and current mempool state
+    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
+        const char * mem_type = "heap";
+        const char * data_ptr = (const char *)buffer_ctx->buffer;
+        const char * ion_base = (const char *)ctx->rpc_mempool;
+        const char * ion_end  = ion_base + ctx->rpc_mempool_len;
+        if (data_ptr >= ion_base && data_ptr < ion_end) {
+            mem_type = "ION-pool";
+        }
+        GGMLHEXAGON_LOG_WARN("[ALLOC] LEAVE size=%zu (%.2f MiB) -> %s, pool_used=%zu/%zu (%.2f%%)",
+                             size, (double)size / (1024.0 * 1024.0),
+                             mem_type,
+                             ctx->rpc_mempool_usage, ctx->rpc_mempool_len,
+                             ctx->rpc_mempool_len > 0 ? (double)ctx->rpc_mempool_usage * 100.0 / ctx->rpc_mempool_len : 0.0);
+    } else {
+        GGMLHEXAGON_LOG_WARN("[ALLOC] LEAVE size=%zu (%.2f MiB) -> heap", size, (double)size / (1024.0 * 1024.0));
+    }
     return ggml_backend_buffer_init(buft, ggml_backend_hexagon_buffer_interface, buffer_ctx, size);
 }
 
@@ -7237,6 +7263,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         // no rpcmem_free needed: mirror was bump-allocated from ctx->rpc_mempool
         }
         t_perf_restore = ggml_time_us() - _t2;
+    }
+
+    // Rewind bump allocator: release mirror space back to pool after restore.
+    // Mirrors were allocated in LIFO order during Phase-1, so safe to rewind.
+    if (!mirrors.empty() && ctx->rpc_mempool) {
+        size_t total_mirror_size = 0;
+        for (const auto & m : mirrors) {
+            total_mirror_size += m.data_len;
+        }
+        ctx->rpc_mempool_usage -= total_mirror_size;
+        GGMLHEXAGON_LOG_DEBUG("[MIRROR] rewound %zu bytes (%.2f MiB), pool now %zu/%zu",
+                              total_mirror_size, (double)total_mirror_size / (1024.0 * 1024.0),
+                              ctx->rpc_mempool_usage, ctx->rpc_mempool_len);
     }
 
     // [Plan-C timing] summary
