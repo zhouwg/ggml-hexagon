@@ -496,30 +496,32 @@ void ggmlhexagon_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, con
         strncat(buf, src0_dims, buf_size - len - 1);
     }
 
-    // Get src1 type and dimensions
-    const char * src1_type_name = ggml_get_ggml_type_name((enum ggml_type)src1->type);
-    len = strlen(buf);
-    if (len < buf_size) {
-        strncat(buf, src1_type_name, buf_size - len - 1);
-    }
+    // Get src1 type and dimensions (src1 can be NULL for unary ops like CPY/SCALE/SILU)
+    if (src1 != NULL) {
+        const char * src1_type_name = ggml_get_ggml_type_name((enum ggml_type)src1->type);
+        len = strlen(buf);
+        if (len < buf_size) {
+            strncat(buf, src1_type_name, buf_size - len - 1);
+        }
 
-    char src1_dims[GGMLHEXAGON_TMPBUF_LEN] = {0};
-    ndims = ggml_n_dims(src1);
-    if (ndims == 1) {
-        snprintf(src1_dims, sizeof(src1_dims), "%ldx1", (long)src1->ne[0]);
-    } else if (ndims == 2) {
-        snprintf(src1_dims, sizeof(src1_dims), "%ldx%ld", (long)src1->ne[0], (long)src1->ne[1]);
-    } else if (ndims == 3) {
-        snprintf(src1_dims, sizeof(src1_dims), "%ldx%ldx%ld", (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2]);
-    } else {
-        snprintf(src1_dims, sizeof(src1_dims), "%ldx%ldx%ldx%ld", (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3]);
-    }
-    len = strlen(buf);
-    if (len < buf_size) {
-        strncat(buf, "_", buf_size - len - 1);
-    }
-    len = strlen(buf);
-    if (len < buf_size) {
-        strncat(buf, src1_dims, buf_size - len - 1);
+        char src1_dims[GGMLHEXAGON_TMPBUF_LEN] = {0};
+        ndims = ggml_n_dims(src1);
+        if (ndims == 1) {
+            snprintf(src1_dims, sizeof(src1_dims), "%ldx1", (long)src1->ne[0]);
+        } else if (ndims == 2) {
+            snprintf(src1_dims, sizeof(src1_dims), "%ldx%ld", (long)src1->ne[0], (long)src1->ne[1]);
+        } else if (ndims == 3) {
+            snprintf(src1_dims, sizeof(src1_dims), "%ldx%ldx%ld", (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2]);
+        } else {
+            snprintf(src1_dims, sizeof(src1_dims), "%ldx%ldx%ldx%ld", (long)src1->ne[0], (long)src1->ne[1], (long)src1->ne[2], (long)src1->ne[3]);
+        }
+        len = strlen(buf);
+        if (len < buf_size) {
+            strncat(buf, "_", buf_size - len - 1);
+        }
+        len = strlen(buf);
+        if (len < buf_size) {
+            strncat(buf, src1_dims, buf_size - len - 1);
+        }
     }
 }

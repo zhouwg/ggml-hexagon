@@ -847,9 +847,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     // ... all others false until DSP kernels are validated ...
     {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-    {false, GGML_OP_SCALE,    0, nullptr, nullptr},
+    {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",    nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
-    {false, GGML_OP_CPY,      0, nullptr, nullptr},
+    {true,  GGML_OP_CPY,      1, "ggmlop_dsp_cpy",      nullptr},
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
     {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
@@ -901,7 +901,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {false, GGML_OP_UNARY,    0, nullptr, nullptr},
+    {true,  GGML_OP_UNARY,    1, "ggmlop_dsp_silu",     nullptr},
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -6298,6 +6298,35 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
             if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
                 return false;
             if (src1 != nullptr) return false; // mask not supported yet
+            return true;
+        }
+        case GGML_OP_UNARY:
+        {
+            // Unary ops: SILU, RELU, SIGMOID, GELU, etc.
+            // The specific unary operation is stored in op_params[0] as ggml_unary_op
+            const int unary_op = (int)dst->op_params[0];
+            if (unary_op != GGML_UNARY_OP_SILU)
+                return false; // only support SILU for now
+            if (src0->type != dst->type) return false;
+            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
+                return false;
+            return true;
+        }
+        case GGML_OP_SCALE:
+        {
+            // Unary scale: src0 -> dst (same type), scale in op_params[0]
+            if (src0->type != dst->type) return false;
+            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
+                return false;
+            return true;
+        }
+        case GGML_OP_CPY:
+        {
+            // Copy: src0 -> dst (may involve type conversion f16<->f32)
+            if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32)
+                return false;
+            if (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)
+                return false;
             return true;
         }
         default:

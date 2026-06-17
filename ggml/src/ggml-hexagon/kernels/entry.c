@@ -591,6 +591,18 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SOFT_MAX task");
             ggmlop_dsp_softmax(h, src0, src1, dst);
             break;
+        case GGML_OP_UNARY:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_UNARY (SILU) task");
+            ggmlop_dsp_silu(h, src0, src1, dst);
+            break;
+        case GGML_OP_SCALE:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SCALE task");
+            ggmlop_dsp_scale(h, src0, dst);
+            break;
+        case GGML_OP_CPY:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_CPY task");
+            ggmlop_dsp_cpy(h, src0, src1, dst);
+            break;
         case 168:  // Test HMX operation
             GGMLHEXAGON_LOG_INFO("executing TEST_HMX task (op=168)");
             GGMLHEXAGON_LOG_INFO("src0: data=%p, ne[0]=%d, ne[1]=%d", src0->data, src0->ne[0], src0->ne[1]);
@@ -690,6 +702,15 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 break;
             case GGML_OP_SOFT_MAX:
                 ggmlop_dsp_softmax(h, src0, src1, dst);
+                break;
+            case GGML_OP_UNARY:
+                ggmlop_dsp_silu(h, src0, src1, dst);
+                break;
+            case GGML_OP_SCALE:
+                ggmlop_dsp_scale(h, src0, dst);
+                break;
+            case GGML_OP_CPY:
+                ggmlop_dsp_cpy(h, src0, src1, dst);
                 break;
             default:
                 GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
