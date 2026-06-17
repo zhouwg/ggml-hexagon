@@ -6700,6 +6700,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
 
     // collect supported ops
     std::vector<ggml_tensor *> supported_nodes;
+    std::vector<ggml_tensor *> unsupported_nodes;
+    GGMLHEXAGON_LOG_WARN("special: cgraph has %d total nodes", cgraph->n_nodes);
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
@@ -6710,6 +6712,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         //TODO: only support limited op on NPU side at the moment
         if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
             supported_nodes.push_back(node);
+        } else {
+            unsupported_nodes.push_back(node);
+        }
+    }
+
+    if (!unsupported_nodes.empty()) {
+        GGMLHEXAGON_LOG_WARN("special: %d unsupported ops skipped:", (int)unsupported_nodes.size());
+        for (auto * n : unsupported_nodes) {
+            GGMLHEXAGON_LOG_WARN("  node[%s] op=%s(%d), src0=%p src1=%p dst=%p",
+                                  n->name ? n->name : "?", ggml_op_name(n->op), n->op,
+                                  n->src[0] ? n->src[0]->data : nullptr,
+                                  n->src[1] ? n->src[1]->data : nullptr,
+                                  n->data);
         }
     }
 
@@ -6747,8 +6762,24 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         dt.data_len = (int)ggml_nbytes(t);
         memcpy(dt.op_params, t->op_params, sizeof(dt.op_params));
         tensor_list.push_back(dt);
-        GGMLHEXAGON_LOG_WARN("tensor %d: data=%p, data_len=%d, type=%d(%s), op(%s,%s)", \
-                             idx, t->data, dt.data_len, t->type, ggml_type_name(t->type), ggml_op_name(t->op), ggml_op_symbol(t->op));
+        // [Diag] check if tensor data resides in ION shared memory or heap
+        {
+            const char * mem_type = "heap";
+            if (ctx->rpc_mempool && ctx->rpc_mempool_len > 0) {
+                const char * data_ptr = (const char *)t->data;
+                const char * ion_base = (const char *)ctx->rpc_mempool;
+                const char * ion_end  = ion_base + ctx->rpc_mempool_len;
+                if (data_ptr >= ion_base && data_ptr < ion_end) {
+                    mem_type = "ION";
+                }
+            }
+            const char * buft_name = "unknown";
+            if (t->buffer) {
+                buft_name = "(has buffer)";
+            }
+            GGMLHEXAGON_LOG_WARN("tensor %d: data=%p %s buf=%s, data_len=%d, type=%d(%s), op(%s,%s)", \
+                                 idx, t->data, mem_type, buft_name, dt.data_len, t->type, ggml_type_name(t->type), ggml_op_name(t->op), ggml_op_symbol(t->op));
+        }
         return idx;
     };
 
@@ -6765,6 +6796,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         op_descs.push_back(op);
     }
 
+    GGMLHEXAGON_LOG_WARN("special: batching %d ops (%d unique tensors):", (int)op_descs.size(), (int)tensor_list.size());
+    for (size_t i = 0; i < op_descs.size(); i++) {
+        const dsp_op_desc & o = op_descs[i];
+        const dsptensor & t0 = tensor_list[o.src0_idx];
+        const dsptensor & td = tensor_list[o.dst_idx];
+        const char * s1_name = (o.src1_idx >= 0) ? ggml_type_name((enum ggml_type)tensor_list[o.src1_idx].type) : "null";
+        GGMLHEXAGON_LOG_WARN("  op[%zu] %s: src0[t%d] %s[%lld] src1[t%d] %s dst[t%d] %s[%lld]",
+                              i, ggml_op_name((ggml_op)o.opcode),
+                              o.src0_idx, ggml_type_name((enum ggml_type)t0.type), (long long)t0.ne[0],
+                              o.src1_idx, s1_name,
+                              o.dst_idx, ggml_type_name((enum ggml_type)td.type), (long long)td.ne[0]);
+    }
+
     // build batch request and submit via single FastRPC call
     dsp_opbatch_req req;
     memset(&req, 0, sizeof(req));
@@ -6775,7 +6819,109 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
     req.ops       = op_descs.data();
     req.ops_len   = (int32_t)op_descs.size();
 
-    int hexagon_error = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, &req);
+    // [Fix-B] Heap->ION mirror for DSP-writable tensors
+    // Root cause: dsp_execute_batch(in req) has NO 'rout' marker, so FastRPC does NOT
+    // copy modified data back from DSP to AP for heap-allocated tensors. Only ION
+    // shared memory is physically visible on both sides. Tensors produced by CPU
+    // backend's fallback path (e.g., RMS_NORM output) live in heap memory -- DSP
+    // writes to them are lost without explicit copy-back.
+    // Fix: mirror heap tensors into临时 ION buffers before the call, copy back after.
+    struct ion_mirror {
+        int32_t tensor_idx;
+        void *  original_data;
+        void *  ion_buffer;
+        int     data_len;
+    };
+    std::vector<ion_mirror> mirrors;
+
+    // [Plan-C timing] Phase-1: mirror-in (heap->ION)
+    int64_t t_perf_start = ggml_time_us();
+    int64_t t_perf_mirror_in = 0;
+    {
+        int64_t _t0 = ggml_time_us();
+
+        // collect all tensor indices that DSP will WRITE (dst of any op, plus ADD in-place src0)
+        std::set<int32_t> written_indices;
+        for (const auto & op : op_descs) {
+            if (op.dst_idx >= 0)  written_indices.insert(op.dst_idx);
+            // ADD is an in-place operation: src0 is also modified
+            if (op.opcode == GGML_OP_ADD && op.src0_idx >= 0) written_indices.insert(op.src0_idx);
+        }
+
+        if (ctx->rpc_mempool && ctx->rpc_mempool_len > 0) {
+            const char * ion_base = (const char *)ctx->rpc_mempool;
+            const char * ion_end  = ion_base + ctx->rpc_mempool_len;
+
+            for (int32_t tidx : written_indices) {
+                if (tidx < 0 || tidx >= (int32_t)tensor_list.size()) continue;
+                dsptensor & dt = tensor_list[tidx];
+                if (!dt.data || dt.data_len <= 0) continue;
+
+                const char * data_ptr = (const char *)dt.data;
+                if (data_ptr >= ion_base && data_ptr < ion_end) {
+                    continue; // already in ION pool, no mirror needed
+                }
+
+                // allocate mirror space from existing ION mempool (same fd=17)
+                // NOT via rpcmem_alloc2 which creates a separate fd causing
+                // FastRPC address translation conflict (error 0xe)
+                size_t mirror_size = (size_t)dt.data_len;
+                size_t mirror_align = 128;
+                size_t aligned_mirror_offset = ((ctx->rpc_mempool_usage + mirror_align - 1) / mirror_align) * mirror_align;
+
+                if (aligned_mirror_offset + mirror_size > ctx->rpc_mempool_len) {
+                    GGMLHEXAGON_LOG_WARN("Fix-B: mempool full, cannot mirror tensor[%d] (%d bytes, need %ld at offset %ld)",
+                                         tidx, dt.data_len, mirror_size, aligned_mirror_offset);
+                    continue;
+                }
+
+                void * ion_buf = (char *)ctx->rpc_mempool + aligned_mirror_offset;
+                ctx->rpc_mempool_usage = aligned_mirror_offset + mirror_size;
+
+                // copy original heap data -> ION buffer (input correctness)
+                memcpy(ion_buf, dt.data, dt.data_len);
+
+                // record mirror for post-call restore
+                ion_mirror m;
+                m.tensor_idx    = tidx;
+                m.original_data = dt.data;
+                m.ion_buffer    = ion_buf;
+                m.data_len      = dt.data_len;
+                mirrors.push_back(m);
+
+                // swap: DSP will now write into ION buffer (physically shared)
+                dt.data = ion_buf;
+                GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] heap=%p -> mempool=%p (%d bytes, offset %ld)",
+                                     tidx, m.original_data, ion_buf, dt.data_len, aligned_mirror_offset);
+            }
+        }
+        t_perf_mirror_in = ggml_time_us() - _t0;
+    }
+
+    // [Direction-1 debug] sample key tensors BEFORE batch call to verify CPU->DSP data integrity
+    if (tensor_list.size() >= 4) {
+        const dsptensor & dt0 = tensor_list[0];  // ADD src0/dst
+        const dsptensor & dt3 = tensor_list[3];  // MUL_MAT dst
+        if (dt0.data && dt0.data_len >= 16) {
+            const float * p0 = (const float *)dt0.data;
+            GGMLHEXAGON_LOG_WARN("BEFORE BATCH: t0(data=%p)=[%f, %f, %f, %f]",
+                                 dt0.data, p0[0], p0[1], p0[2], p0[3]);
+        }
+        if (dt3.data && dt3.data_len >= 16) {
+            const float * p3 = (const float *)dt3.data;
+            GGMLHEXAGON_LOG_WARN("BEFORE BATCH: t3(data=%p)=[%f, %f, %f, %f]",
+                                 dt3.data, p3[0], p3[1], p3[2], p3[3]);
+        }
+    }
+
+    // [Plan-C timing] Phase-2: FastRPC batch call
+    int hexagon_error = AEE_SUCCESS;
+    int64_t t_perf_fastrpc = 0;
+    {
+        int64_t _t1 = ggml_time_us();
+        hexagon_error = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, &req);
+        t_perf_fastrpc = ggml_time_us() - _t1;
+    }
     if (AEE_SUCCESS != hexagon_error) {
         GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch failed: 0x%x", hexagon_error);
 #if 0
@@ -6801,6 +6947,46 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         }
 #endif
     }
+
+    // [Direction-1 debug] sample key tensors AFTER batch call to verify DSP->CPU writeback
+    if (tensor_list.size() >= 4 && hexagon_error == AEE_SUCCESS) {
+        const dsptensor & dt0 = tensor_list[0];  // ADD src0/dst (should be modified by ADD)
+        const dsptensor & dt3 = tensor_list[3];  // MUL_MAT dst (output)
+        if (dt0.data && dt0.data_len >= 16) {
+            const float * p0 = (const float *)dt0.data;
+            GGMLHEXAGON_LOG_WARN("AFTER BATCH:  t0(data=%p)=[%f, %f, %f, %f]",
+                                 dt0.data, p0[0], p0[1], p0[2], p0[3]);
+        }
+        if (dt3.data && dt3.data_len >= 16) {
+            const float * p3 = (const float *)dt3.data;
+            GGMLHEXAGON_LOG_WARN("AFTER BATCH:  t3(data=%p)=[%f, %f, %f, %f]",
+                                 dt3.data, p3[0], p3[1], p3[2], p3[3]);
+        }
+    }
+
+    // [Fix-B] restore: copy ION mirror data back to original heap locations (only on success)
+    // [Plan-C timing] Phase-3: mirror-out (ION->heap)
+    int64_t t_perf_restore = 0;
+    {
+        int64_t _t2 = ggml_time_us();
+        for (const auto & m : mirrors) {
+        if (hexagon_error == AEE_SUCCESS) {
+            memcpy(m.original_data, m.ion_buffer, m.data_len);
+            GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] restored ION=%p -> heap=%p (%d bytes)",
+                                 m.tensor_idx, m.ion_buffer, m.original_data, m.data_len);
+        } else {
+            GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] skip restore (batch error 0x%x), ION %p",
+                                 m.tensor_idx, hexagon_error, m.ion_buffer);
+        }
+        // no rpcmem_free needed: mirror was bump-allocated from ctx->rpc_mempool
+        }
+        t_perf_restore = ggml_time_us() - _t2;
+    }
+
+    // [Plan-C timing] summary
+    int64_t t_perf_total = ggml_time_us() - t_perf_start;
+    GGMLHEXAGON_LOG_WARN("[Plan-C] perf: mirror_in=%lld us, fastrpc=%lld us, restore=%lld us, total=%lld us (mirrors=%zu)",
+                         t_perf_mirror_in, t_perf_fastrpc, t_perf_restore, t_perf_total, mirrors.size());
 
     return result;
 }

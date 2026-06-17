@@ -621,8 +621,30 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
         const dsptensor * src1 = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
         const dsptensor * dst  = &req->tensors[op->dst_idx];
 
-        GGMLHEXAGON_LOG_INFO("batch op %d: opcode=%d, src0.data=%p, dst.data=%p",
-                             i, op->opcode, src0->data, dst->data);
+        // log tensor details and sample data for debugging
+        GGMLHEXAGON_LOG_INFO("batch op %d: opcode=%d(%s), src0[t%d] data=%p ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] type=%d len=%d",
+                             i, op->opcode, ggml_op_name(op->opcode),
+                             op->src0_idx, src0->data,
+                             src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
+                             src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
+                             src0->type, src0->data_len);
+        if (src1) {
+            GGMLHEXAGON_LOG_INFO("  src1[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
+                                 op->src1_idx, src1->data,
+                                 src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
+                                 src1->type, src1->data_len);
+        }
+        GGMLHEXAGON_LOG_INFO("  dst[t%d]  data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
+                             op->dst_idx, dst->data,
+                             dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
+                             dst->type, dst->data_len);
+
+        // sample first few float values from src0 (for f32/f16 tensors)
+        if (src0->data && src0->data_len >= 16) {
+            const float * fdata = (const float *)src0->data;
+            GGMLHEXAGON_LOG_INFO("  src0 sample before: [%f, %f, %f, %f]",
+                                 fdata[0], fdata[1], fdata[2], fdata[3]);
+        }
 
         switch (op->opcode) {
             case GGML_OP_SUB:
@@ -638,7 +660,27 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
                 return AEE_EUNSUPPORTED;
         }
+
+        // sample dst after op execution
+        if (dst->data && dst->data_len >= 16) {
+            const float * fdata = (const float *)dst->data;
+            GGMLHEXAGON_LOG_INFO("  dst sample after: [%f, %f, %f, %f]",
+                                 fdata[0], fdata[1], fdata[2], fdata[3]);
+        }
     }
+
+    // [Direction-3 debug] ensure all DSP memory writes (especially HMX/DMA) are visible
+    // before returning to FastRPC, which will copy data back to AP side.
+    // Use same pattern as test-hmx.c: compiler barrier + volatile read to flush stores.
+    __asm__ __volatile__("" ::: "memory");
+    // force a volatile read on dst of last op to ensure writeback is committed
+    if (req->n_ops > 0 && req->ops[req->n_ops - 1].dst_idx >= 0) {
+        const dsptensor * last_dst = &req->tensors[req->ops[req->n_ops - 1].dst_idx];
+        if (last_dst->data && last_dst->data_len >= 4) {
+            (void) *(volatile const int *)(last_dst->data);
+        }
+    }
+    __asm__ __volatile__("" ::: "memory");
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
     return AEE_SUCCESS;
