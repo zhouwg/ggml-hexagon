@@ -809,6 +809,110 @@ static_assert(ggmlhexagon_k_op_caps[GGML_OP_MUL_MAT].supported,  "GGML_OP_MUL_MA
 static_assert(std::size(ggmlhexagon_k_op_caps) == (static_cast<size_t>(GGML_OP_COUNT)),
               "pls check ggmlhexagon_k_op_caps and ensure is corresponding to latest ggml.h");
 
+// Batch-op relaxed caps table for cgraph offload mode (enable_offload_cgraph==1).
+// Only checks op type support — no shape/size/type restrictions.
+// This allows larger subgraphs to be formed, reducing FastRPC call count.
+// Start with minimal set (ADD + MUL_MAT) for validation, expand incrementally.
+static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
+    {true,  GGML_OP_NONE,     0, nullptr, nullptr},
+    {false, GGML_OP_DUP,      0, nullptr, nullptr},
+    {true,  GGML_OP_ADD,      2, "ggmlop_dsp_add",     ggmlop_dsp_add},
+    {false, GGML_OP_ADD_ID,   0, nullptr, nullptr},
+    {false, GGML_OP_ADD1,     0, nullptr, nullptr},
+    {false, GGML_OP_ACC,      0, nullptr, nullptr},
+    {false, GGML_OP_SUB,      0, nullptr, nullptr},
+    {false, GGML_OP_MUL,      0, nullptr, nullptr},
+    {false, GGML_OP_DIV,      0, nullptr, nullptr},
+    {false, GGML_OP_SQR,      0, nullptr, nullptr},
+    {false, GGML_OP_SQRT,     0, nullptr, nullptr},
+    {false, GGML_OP_LOG,      0, nullptr, nullptr},
+    {false, GGML_OP_SIN,      0, nullptr, nullptr},
+    {false, GGML_OP_COS,      0, nullptr, nullptr},
+    {false, GGML_OP_SUM,      0, nullptr, nullptr},
+    {false, GGML_OP_SUM_ROWS, 0, nullptr, nullptr},
+    {false, GGML_OP_CUMSUM,   0, nullptr, nullptr},
+    {false, GGML_OP_MEAN,     0, nullptr, nullptr},
+    {false, GGML_OP_ARGMAX,   0, nullptr, nullptr},
+    {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
+    {false, GGML_OP_REPEAT,   0, nullptr, nullptr},
+    {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
+    {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_NORM,     0, nullptr, nullptr},
+    {true,  GGML_OP_RMS_NORM, 1, "ggmlop_dsp_rmsnorm", nullptr},
+    {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
+    {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
+    {true,  GGML_OP_MUL_MAT,  2, "ggmlop_dsp_mulmat",   ggmlop_dsp_mulmat},
+    // ... all others false until DSP kernels are validated ...
+    {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
+    {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
+    {false, GGML_OP_SCALE,    0, nullptr, nullptr},
+    {false, GGML_OP_SET,      0, nullptr, nullptr},
+    {false, GGML_OP_CPY,      0, nullptr, nullptr},
+    {false, GGML_OP_CONT,     0, nullptr, nullptr},
+    {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
+    {false, GGML_OP_VIEW,     0, nullptr, nullptr},
+    {false, GGML_OP_PERMUTE,  0, nullptr, nullptr},
+    {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
+    {false, GGML_OP_GET_ROWS, 0, nullptr, nullptr},
+    {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
+    {false, GGML_OP_DIAG,     0, nullptr, nullptr},
+    {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
+    {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
+    {true,  GGML_OP_SOFT_MAX, 1, "ggmlop_dsp_softmax",  nullptr},
+    {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
+    {true,  GGML_OP_ROPE,     2, "ggmlop_dsp_rope",     nullptr},
+    {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_CLAMP,    0, nullptr, nullptr},
+    {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
+    {false, GGML_OP_IM2COL,   0, nullptr, nullptr},
+    {false, GGML_OP_IM2COL_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_IM2COL_3D, 0, nullptr, nullptr},
+    {false, GGML_OP_CONV_2D,  0, nullptr, nullptr},
+    {false, GGML_OP_CONV_3D,  0, nullptr, nullptr},
+    {false, GGML_OP_CONV_2D_DW, 0, nullptr, nullptr},
+    {false, GGML_OP_CONV_TRANSPOSE_2D, 0, nullptr, nullptr},
+    {false, GGML_OP_POOL_1D,  0, nullptr, nullptr},
+    {false, GGML_OP_POOL_2D,  0, nullptr, nullptr},
+    {false, GGML_OP_POOL_2D_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_UPSCALE,  0, nullptr, nullptr},
+    {false, GGML_OP_PAD,      0, nullptr, nullptr},
+    {false, GGML_OP_PAD_REFLECT_1D, 0, nullptr, nullptr},
+    {false, GGML_OP_ROLL,     0, nullptr, nullptr},
+    {false, GGML_OP_ARANGE,   0, nullptr, nullptr},
+    {false, GGML_OP_TIMESTEP_EMBEDDING, 0, nullptr, nullptr},
+    {false, GGML_OP_ARGSORT,  0, nullptr, nullptr},
+    {false, GGML_OP_TOP_K,    0, nullptr, nullptr},
+    {false, GGML_OP_LEAKY_RELU, 0, nullptr, nullptr},
+    {false, GGML_OP_TRI,      0, nullptr, nullptr},
+    {false, GGML_OP_FILL,     0, nullptr, nullptr},
+    {false, GGML_OP_FLASH_ATTN_EXT, 0, nullptr, nullptr},
+    {false, GGML_OP_FLASH_ATTN_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_SSM_CONV, 0, nullptr, nullptr},
+    {false, GGML_OP_SSM_SCAN, 0, nullptr, nullptr},
+    {false, GGML_OP_WIN_PART, 0, nullptr, nullptr},
+    {false, GGML_OP_WIN_UNPART, 0, nullptr, nullptr},
+    {false, GGML_OP_GET_REL_POS, 0, nullptr, nullptr},
+    {false, GGML_OP_ADD_REL_POS, 0, nullptr, nullptr},
+    {false, GGML_OP_RWKV_WKV6, 0, nullptr, nullptr},
+    {false, GGML_OP_GATED_LINEAR_ATTN, 0, nullptr, nullptr},
+    {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
+    {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
+    {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
+    {false, GGML_OP_UNARY,    0, nullptr, nullptr},
+    {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
+    {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
+    {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
+    {false, GGML_OP_CUSTOM,   0, nullptr, nullptr},
+    {false, GGML_OP_CROSS_ENTROPY_LOSS, 0, nullptr, nullptr},
+    {false, GGML_OP_CROSS_ENTROPY_LOSS_BACK, 0, nullptr, nullptr},
+    {false, GGML_OP_OPT_STEP_ADAMW, 0, nullptr, nullptr},
+    {false, GGML_OP_OPT_STEP_SGD, 0, nullptr, nullptr},
+    {false, GGML_OP_GLU,      0, nullptr, nullptr},
+};
+
 static int32_t g_qnntensor_idx = 0; //ensure every QNN tensor name is unique
 static int32_t g_qnnopcfg_idx  = 0; //ensure every QNN opconfig name is unique
 
@@ -6078,6 +6182,99 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
     return false;
 }
 
+// Relaxed supports_op for cgraph offload mode (enable_offload_cgraph==1).
+// Uses op-type-specific validation (type consistency, broadcast support, contiguity)
+// but omits the strict size threshold (ne00 >= 1024) that limits per-op granularity.
+// This allows the scheduler to form larger subgraphs with more ops per batch,
+// reducing FastRPC call overhead (the dominant cost).
+static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+    GGML_UNUSED(dev);
+    if (op_tensor->op == GGML_OP_NONE) {
+        return true;
+    }
+
+    if (!ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(op_tensor)].supported) {
+        return false;
+    }
+
+    const ggml_tensor * src0 = op_tensor->src[0];
+    const ggml_tensor * src1 = (op_tensor->src[1] != nullptr) ? op_tensor->src[1] : nullptr;
+    const ggml_tensor * dst  = op_tensor;
+
+    switch (op_tensor->op) {
+        case GGML_OP_ADD:
+        case GGML_OP_SUB:
+        {
+            // Type consistency: all operands must be same type (f32 or f16)
+            if (src0->type == GGML_TYPE_F32) {
+                if (!src1 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+                    return false;
+            } else if (src0->type == GGML_TYPE_F16) {
+                if (!src1 || src1->type != GGML_TYPE_F16 || dst->type != GGML_TYPE_F16)
+                    return false;
+            } else {
+                return false;
+            }
+            // dst shape must match src0
+            if (!ggml_are_same_shape(src0, dst)) {
+                return false;
+            }
+            // Allow broadcasting of src1 into src0, but reject permuted src1
+            if (!ggml_can_repeat(src1, src0) || ggml_is_permuted(src1)) {
+                return false;
+            }
+            return true;
+        }
+        case GGML_OP_MUL_MAT:
+        {
+            // Same as strict version's MUL_MAT checks (no size threshold)
+            const int64_t k = src0->ne[0];
+            if ((src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16) ||
+                (src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32)) {
+                return (k % 128 == 0);
+            }
+            if (src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1 ||
+                src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q5_1 ||
+                src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_Q2_K ||
+                src0->type == GGML_TYPE_Q3_K || src0->type == GGML_TYPE_Q4_K ||
+                src0->type == GGML_TYPE_Q5_K || src0->type == GGML_TYPE_Q6_K ||
+                src0->type == GGML_TYPE_IQ2_XS || src0->type == GGML_TYPE_IQ2_S ||
+                src0->type == GGML_TYPE_IQ3_XXS || src0->type == GGML_TYPE_IQ1_S || src0->type == GGML_TYPE_IQ4_NL ||
+                src0->type == GGML_TYPE_IQ4_XS) {
+                return (k % 64 == 0) && (src1->type == GGML_TYPE_F16);
+            }
+            return false;
+        }
+        case GGML_OP_RMS_NORM:
+        {
+            // Unary op: src0 -> dst, eps in op_params[0]
+            if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_ROPE:
+        {
+            // Ternary: src0(f32 input), src1(i32 positions), dst(f32)
+            if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+                return false;
+            if (!src1 || src1->type != GGML_TYPE_I32)
+                return false;
+            return true;
+        }
+        case GGML_OP_SOFT_MAX:
+        {
+            // Unary (with optional mask src1): src0(f32) -> dst(f32)
+            // Mask (src1 != NULL) not yet supported on DSP
+            if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
+                return false;
+            if (src1 != nullptr) return false; // mask not supported yet
+            return true;
+        }
+        default:
+            return true; // other ops in table: trust the table entry
+    }
+}
+
 static bool ggmlhexagon_can_handle_op_through_qnn(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
     if (op_tensor->op == GGML_OP_NONE) {
@@ -6709,8 +6906,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
-        //TODO: only support limited op on NPU side at the moment
-        if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
+        //TODO: use relaxed batch table to maximize batching
+        if (ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(node)].supported) {
             supported_nodes.push_back(node);
         } else {
             unsupported_nodes.push_back(node);
@@ -7386,7 +7583,13 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
             for (int i = 0; i < ggml_backend_hexagon_get_device_count(); i++) {
                 if (HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) {
-                    ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp;
+                    if (1 == g_hexagon_appcfg.enable_offload_cgraph) {
+                        // cgraph offload: use relaxed supports_op (batch mode)
+                        ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp_special;
+                    } else {
+                        // per-op mode: use strict supports_op with shape/type checks
+                        ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp;
+                    }
                 } else {
                     ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_qnn;
                 }

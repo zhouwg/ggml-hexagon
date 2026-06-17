@@ -571,6 +571,18 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL_MAT task");
             ggmlop_dsp_mulmat(h, src0, src1, dst);
             break;
+        case GGML_OP_RMS_NORM:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_RMS_NORM task");
+            ggmlop_dsp_rmsnorm(h, src0, src1, dst);
+            break;
+        case GGML_OP_ROPE:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_ROPE task");
+            ggmlop_dsp_rope(h, src0, src1, dst);
+            break;
+        case GGML_OP_SOFT_MAX:
+            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SOFT_MAX task");
+            ggmlop_dsp_softmax(h, src0, src1, dst);
+            break;
         case 168:  // Test HMX operation
             GGMLHEXAGON_LOG_INFO("executing TEST_HMX task (op=168)");
             GGMLHEXAGON_LOG_INFO("src0: data=%p, ne[0]=%d, ne[1]=%d", src0->data, src0->ne[0], src0->ne[1]);
@@ -655,6 +667,15 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 break;
             case GGML_OP_MUL_MAT:
                 ggmlop_dsp_mulmat(h, src0, src1, dst);
+                break;
+            case GGML_OP_RMS_NORM:
+                ggmlop_dsp_rmsnorm(h, src0, src1, dst);
+                break;
+            case GGML_OP_ROPE:
+                ggmlop_dsp_rope(h, src0, src1, dst);
+                break;
+            case GGML_OP_SOFT_MAX:
+                ggmlop_dsp_softmax(h, src0, src1, dst);
                 break;
             default:
                 GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
