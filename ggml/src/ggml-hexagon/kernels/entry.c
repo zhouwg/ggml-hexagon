@@ -649,84 +649,89 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
             return AEE_EBADPARM;
         }
 
-        const dsptensor * src0 = &req->tensors[op->src0_idx];
-        const dsptensor * src1 = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
-        const dsptensor * src2 = (op->src2_idx >= 0) ? &req->tensors[op->src2_idx] : NULL;
-        const dsptensor * dst  = &req->tensors[op->dst_idx];
+        const dsptensor * src0_dt = &req->tensors[op->src0_idx];
+        const dsptensor * src1_dt = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
+        const dsptensor * src2_dt = (op->src2_idx >= 0) ? &req->tensors[op->src2_idx] : NULL;
+        const dsptensor * dst_dt  = &req->tensors[op->dst_idx];
 
         // log tensor details and sample data for debugging
         GGMLHEXAGON_LOG_INFO("batch op %d: opcode=%d(%s), src0[t%d] data=%p ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] type=%d len=%d",
                              i, op->opcode, ggml_op_name(op->opcode),
-                             op->src0_idx, src0->data,
-                             src0->ne[0], src0->ne[1], src0->ne[2], src0->ne[3],
-                             src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
-                             src0->type, src0->data_len);
-        if (src1) {
+                             op->src0_idx, src0_dt->data,
+                             src0_dt->ne[0], src0_dt->ne[1], src0_dt->ne[2], src0_dt->ne[3],
+                             src0_dt->nb[0], src0_dt->nb[1], src0_dt->nb[2], src0_dt->nb[3],
+                             src0_dt->type, src0_dt->data_len);
+        if (src1_dt) {
             GGMLHEXAGON_LOG_INFO("  src1[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                                 op->src1_idx, src1->data,
-                                 src1->ne[0], src1->ne[1], src1->ne[2], src1->ne[3],
-                                 src1->type, src1->data_len);
+                                 op->src1_idx, src1_dt->data,
+                                 src1_dt->ne[0], src1_dt->ne[1], src1_dt->ne[2], src1_dt->ne[3],
+                                 src1_dt->type, src1_dt->data_len);
         }
-        if (src2) {
+        if (src2_dt) {
             GGMLHEXAGON_LOG_INFO("  src2[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                                 op->src2_idx, src2->data,
-                                 src2->ne[0], src2->ne[1], src2->ne[2], src2->ne[3],
-                                 src2->type, src2->data_len);
+                                 op->src2_idx, src2_dt->data,
+                                 src2_dt->ne[0], src2_dt->ne[1], src2_dt->ne[2], src2_dt->ne[3],
+                                 src2_dt->type, src2_dt->data_len);
         }
         GGMLHEXAGON_LOG_INFO("  dst[t%d]  data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                             op->dst_idx, dst->data,
-                             dst->ne[0], dst->ne[1], dst->ne[2], dst->ne[3],
-                             dst->type, dst->data_len);
+                             op->dst_idx, dst_dt->data,
+                             dst_dt->ne[0], dst_dt->ne[1], dst_dt->ne[2], dst_dt->ne[3],
+                             dst_dt->type, dst_dt->data_len);
 
         // sample first few float values from src0 (for f32/f16 tensors)
-        if (src0->data && src0->data_len >= 16) {
-            const float * fdata = (const float *)src0->data;
+        if (src0_dt->data && src0_dt->data_len >= 16) {
+            const float * fdata = (const float *)src0_dt->data;
             GGMLHEXAGON_LOG_INFO("  src0 sample before: [%f, %f, %f, %f]",
                                  fdata[0], fdata[1], fdata[2], fdata[3]);
         }
 
+        int op_ret = 0;
         switch (op->opcode) {
             case GGML_OP_SUB:
-                ggmlop_dsp_sub(h, src0, src1, dst);
+                ggmlop_dsp_sub(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_ADD:
-                ggmlop_dsp_add(h, src0, src1, dst);
+                ggmlop_dsp_add(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_MUL:
-                ggmlop_dsp_mul(h, src0, src1, dst);
+                ggmlop_dsp_mul(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_DIV:
-                ggmlop_dsp_div(h, src0, src1, dst);
+                ggmlop_dsp_div(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_MUL_MAT:
-                ggmlop_dsp_mulmat(h, src0, src1, dst);
+                op_ret = ggmlop_dsp_mulmat(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_RMS_NORM:
-                ggmlop_dsp_rmsnorm(h, src0, src1, dst);
+                op_ret = ggmlop_dsp_rmsnorm(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_ROPE:
-                ggmlop_dsp_rope(h, src0, src1, src2, dst);
+                op_ret = ggmlop_dsp_rope(h, src0_dt, src1_dt, src2_dt, dst_dt);
                 break;
             case GGML_OP_SOFT_MAX:
-                ggmlop_dsp_softmax(h, src0, src1, dst);
+                op_ret = ggmlop_dsp_softmax(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_UNARY:
-                ggmlop_dsp_silu(h, src0, src1, dst);
+                op_ret = ggmlop_dsp_silu(h, src0_dt, src1_dt, dst_dt);
                 break;
             case GGML_OP_SCALE:
-                ggmlop_dsp_scale(h, src0, dst);
+                op_ret = ggmlop_dsp_scale(h, src0_dt, dst_dt);
                 break;
             case GGML_OP_CPY:
-                ggmlop_dsp_cpy(h, src0, src1, dst);
+                op_ret = ggmlop_dsp_cpy(h, src0_dt, src1_dt, dst_dt);
                 break;
             default:
                 GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
                 return AEE_EUNSUPPORTED;
         }
+        if (op_ret != 0) {
+            GGMLHEXAGON_LOG_ERROR("batch op %d (%s) failed with ret=%d", i, ggml_op_name(op->opcode), op_ret);
+            return op_ret;
+        }
 
         // sample dst after op execution
-        if (dst->data && dst->data_len >= 16) {
-            const float * fdata = (const float *)dst->data;
+        if (dst_dt->data && dst_dt->data_len >= 16) {
+            const float * fdata = (const float *)dst_dt->data;
             GGMLHEXAGON_LOG_INFO("  dst sample after: [%f, %f, %f, %f]",
                                  fdata[0], fdata[1], fdata[2], fdata[3]);
         }

@@ -11,7 +11,11 @@ static inline void rmsnorm_f32_scalar(const int n, float * y, const float * x, f
         sum_sq += (double)(x[i] * x[i]);
     }
     float mean_sq = (float)(sum_sq / n);
-    float scale = 1.0f / sqrtf(mean_sq + eps);
+    // Guard against NaN when input is all-zero and eps is very small:
+    // scale = 1/sqrt(mean_sq + eps); if mean_sq=0 and eps≈0, scale→inf,
+    // then y[i]=0*inf = NaN per IEEE 754.
+    float denom = mean_sq + eps;
+    float scale = (denom > 0.0f) ? (1.0f / sqrtf(denom)) : 0.0f;
 
     for (int i = 0; i < n; ++i) {
         y[i] = x[i] * scale;

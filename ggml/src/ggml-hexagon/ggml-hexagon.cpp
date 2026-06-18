@@ -821,8 +821,8 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
     {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
-    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
-    {true,  GGML_OP_DIV,      2, "ggmlop_dsp_div",      nullptr},
+    {false, GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
+    {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
     {false, GGML_OP_LOG,      0, nullptr, nullptr},
@@ -839,7 +839,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
-    {true,  GGML_OP_RMS_NORM, 1, "ggmlop_dsp_rmsnorm", nullptr},
+    {false, GGML_OP_RMS_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
@@ -847,9 +847,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     // ... all others false until DSP kernels are validated ...
     {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-    {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",    nullptr},
+    {false, GGML_OP_SCALE,    0, nullptr, nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
-    {true,  GGML_OP_CPY,      1, "ggmlop_dsp_cpy",      nullptr},
+    {false, GGML_OP_CPY,      0, nullptr, nullptr},
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
     {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
@@ -861,9 +861,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_DIAG,     0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-    {true,  GGML_OP_SOFT_MAX, 1, "ggmlop_dsp_softmax",  nullptr},
+    {false, GGML_OP_SOFT_MAX, 0, nullptr, nullptr},
     {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-    {true,  GGML_OP_ROPE,     2, "ggmlop_dsp_rope",     nullptr},
+    {false, GGML_OP_ROPE,     0, nullptr, nullptr},
     {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_CLAMP,    0, nullptr, nullptr},
     {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
@@ -901,7 +901,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {true,  GGML_OP_UNARY,    1, "ggmlop_dsp_silu",     nullptr},
+    {false, GGML_OP_UNARY,    0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -7185,6 +7185,24 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         t_perf_mirror_in = ggml_time_us() - _t0;
     }
 
+    // Workaround: if total mirror size exceeds threshold, FastRPC scatter-gather
+    // may fail with error 0xe (AEE_EUNSUPPORTED). Fall back to CPU execution.
+    size_t total_mirror_size = 0;
+    {
+        for (const auto & m : mirrors) {
+            total_mirror_size += m.data_len;
+        }
+        static constexpr size_t k_max_safe_mirror = 256 * 1024; // 256 KB safety limit
+        if (total_mirror_size > k_max_safe_mirror) {
+            GGMLHEXAGON_LOG_WARN("[MIRROR] skip batch: mirror=%zu bytes > %zu bytes limit, fallback to CPU",
+                                 total_mirror_size, k_max_safe_mirror);
+            // Rewind bump allocator before returning
+            ctx->rpc_mempool_usage -= total_mirror_size;
+            mirrors.clear();
+            return GGML_STATUS_SUCCESS; // skip DSP batch, let scheduler use CPU fallback
+        }
+    }
+
     // [Direction-1 debug] sample key tensors BEFORE batch call to verify CPU->DSP data integrity
     if (tensor_list.size() >= 4) {
         const dsptensor & dt0 = tensor_list[0];  // ADD src0/dst
@@ -7210,29 +7228,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         t_perf_fastrpc = ggml_time_us() - _t1;
     }
     if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch failed: 0x%x", hexagon_error);
-#if 0
-        // fallback to per-op path: execute each supported op individually
-        for (auto * node : supported_nodes) {
-            ggml_tensor * src0 = node->src[0];
-            ggml_tensor * src1 = node->src[1];
-            ggml_tensor * dst  = node;
-
-            struct ggmlhexagon_task task;
-            ggmlhexagon_task_init(&task);
-            int ret = ggmlhexagon_task_add_op(&task, node->op, src0, src1, dst);
-            if (ret != 0) {
-                GGMLHEXAGON_LOG_WARN("failed to add node to task");
-                result = GGML_STATUS_FAILED;
-                continue;
-            }
-
-            int err = ggmlhexagon_task_execute(ctx, &task);
-            if (AEE_SUCCESS != err) {
-                GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp via fallback task", ggml_op_name(node->op));
-            }
-        }
-#endif
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch failed: 0x%x, batch not executed", hexagon_error);
     }
 
     // [Direction-1 debug] sample key tensors AFTER batch call to verify DSP->CPU writeback
