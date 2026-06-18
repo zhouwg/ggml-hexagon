@@ -23,6 +23,25 @@ static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently 
 static void * g_hexagon_power_ctx           = NULL;
 static void * g_ion_dsp_base                = NULL;
 
+/* Cache line size for Hexagon DSP L2 cache */
+#define DSP_CACHE_LINE_SIZE  128
+
+/*
+ * Flush/invalidate DSP cache for a range of non-coherent ION memory.
+ * Must be called after DSP writes (so AP can read) and before DSP reads
+ * (so AP writes are visible). Uses Q6_dccleaninva_A per cache line.
+ */
+static void dsp_cache_flush_range(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    /* Align start down to cache line boundary */
+    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        Q6_dccleaninva_A(p);
+    }
+}
+
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
@@ -826,6 +845,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         src0_dt.data     = (void *)(base + t0->data_offset);
         src0_dt.data_len = t0->data_len;
 
+        /* DSP-side DIAG: dump first 4 f32 values from src0 data */
+        if (src0_dt.data && src0_dt.data_len >= 16) {
+            const float * fv = (const float *)src0_dt.data;
+            GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+                                 i, t0->data_offset, src0_dt.data, fv[0], fv[1], fv[2], fv[3]);
+        }
+
         if (op->src1_idx >= 0) {
             const hex_tensor_desc * t1 = &tens[op->src1_idx];
             memset(&src1_dt_buf, 0, sizeof(src1_dt_buf));
@@ -861,6 +887,11 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         dst_dt.data     = (void *)(base + td->data_offset);
         dst_dt.data_len = td->data_len;
 
+        /* Cache maintenance for non-coherent ION memory:
+         * - Invalidate DSP cache before reading src (AP wrote data into ION) */
+        dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
+        if (src1_dt_ptr) dsp_cache_flush_range(src1_dt_buf.data, src1_dt_buf.data_len);
+
         int op_ret = 0;
         switch (op->opcode) {
             case GGML_OP_SUB:
@@ -890,6 +921,9 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
                 return AEE_EUNSUPPORTED;
         }
         if (op_ret != 0) return op_ret;
+
+        /* Flush DSP cache after writing dst (so AP can read from DRAM) */
+        dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
     }
 
     __asm__ __volatile__("" ::: "memory");

@@ -67,7 +67,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
-#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <cerrno>
 #include <stdatomic.h>
 #endif
 
@@ -988,6 +991,79 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
         }
         va_end(args);
     }
+}
+
+// ---- ARM64 Cache Maintenance for Non-Coherent ION ----
+#define ION_IOC_SYNC_FLAGS_CACHED   0
+#define ION_IOC_SYNC_FLAGS_READ     2
+#define ION_IOC_SYNC_FLAGS_WRITE    4
+
+static int ion_sync_for_direction(int fd, int direction) {
+#if defined(__ANDROID__) || defined(__linux__)
+    if (fd <= 0) return -1;
+    struct ion_sync_data { int fd; unsigned int flags; unsigned int pad; };
+    { struct ion_sync_data sync = { .fd = fd, .flags = (unsigned int)(ION_IOC_SYNC_FLAGS_CACHED | direction) };
+      int r = ioctl(fd, _IOWR('I', 7, struct ion_sync_data), &sync);
+      if (r == 0) return 0; }
+    { struct dma_buf_sync_t { uint64_t flags; };
+      static const uint64_t DMA_BUF_SYNC_START = (1u << 0), DMA_BUF_SYNC_END = (1u << 1);
+      static const uint64_t DMA_BUF_SYNC_READ = (1u << 2), DMA_BUF_SYNC_WRITE = (1u << 3);
+      uint64_t rw = (direction == ION_IOC_SYNC_FLAGS_WRITE) ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ;
+      struct dma_buf_sync_t s = { .flags = DMA_BUF_SYNC_START | rw };
+      if (ioctl(fd, 0x63406300u, &s) == 0) {
+          s.flags = DMA_BUF_SYNC_END | rw;
+          ioctl(fd, 0x63406300u, &s); return 0;
+      }
+    }
+#endif
+    return -1;
+}
+
+static inline void cpu_dcache_flush_range(const void * p, size_t size) {
+    __builtin___clear_cache((char *)p, (char *)((char *)p + size));
+}
+
+static inline void cpu_dcache_inval_range(int ion_fd, const void * p, size_t size) {
+    // Phase 7.5: invalidate CPU cache so AP reads DSP-written data from DRAM.
+    //
+    // Everything tried so far has FAILED for ION via fastrpc_mmap(DELAYED):
+    //   ION_IOC_SYNC        -> ENOTTY (not a real ION fd)
+    //   DMA_BUF_IOCTL_SYNC  -> ENOTTY (same)
+    //   msync(MS_INVALIDATE) -> silently no-op
+    //   MADV_DONTNEED        -> silently no-op
+    //   mprotect(NONE->RW)   -> ENOMEM (errno=12)
+    //   dc ivac inline asm   -> SIGILL (EL0 blocked)
+    //   __builtin_clear_cache-> DC CVAC (flushes STALE data TO DRAM!)
+    //
+    // Solution: cacheflush() syscall - Android-specific, runs in kernel (EL1),
+    // can execute DC IVAC which user-space cannot.
+    if (size == 0) return;
+
+#if defined(__ANDROID__) || defined(__linux__)
+#if defined(__aarch64__)
+    // On ARM64 Android: use cacheflush() syscall (__NR_cacheflush = 238 on arm64)
+    // flags=0: flush (DC CVAC), flags=1: invalidate (DC IVAC) -- we need INVALIDATE
+    static const int CFINVAL = 1; /* cache flush flag: invalidate */
+    long ret = syscall(238 /*__NR_cacheflush*/, (long)p, (long)((char *)p + size), CFINVAL);
+    if (ret == 0) {
+        GGMLHEXAGON_LOG_DEBUG("ion-batch: post-DSP: cacheflush(INVAL) OK (%zu bytes)", size);
+        return;
+    }
+    GGMLHEXAGON_LOG_WARN("ion-batch: post-DSP: cacheflush(INVAL) failed ret=%ld errno=%d", ret, errno);
+#elif defined(__arm__)
+    // On ARM32 Android: cacheflush syscall number differs
+    static const int CFINVAL = 1;
+    long ret = syscall(0xf0002 /*__NR_cacheflush*/, (long)p, (long)((char *)p + size), CFINVAL);
+    if (ret == 0) {
+        GGMLHEXAGON_LOG_DEBUG("ion-batch: post-DSP: cacheflush(INVAL) OK (%zu bytes)", size);
+        return;
+    }
+#endif
+#endif
+
+    // Absolute fallback
+    __builtin___clear_cache((char *)p, (char *)((char *)p + size));
+    GGMLHEXAGON_LOG_WARN("ion-batch: post-DSP: FALLBACK DC CVAC (may be stale!)");
 }
 
 static void ggmlhexagon_get_processname(char * p_name) {
@@ -2292,7 +2368,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
         GGMLHEXAGON_LOG_INFO("using rpc ion memory pool:        %s", g_hexagon_appcfg.enable_rpc_ion_mempool ? "YES" : "NO");
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_CDSP:  %d", g_hexagon_appcfg.thread_counts);
         GGMLHEXAGON_LOG_INFO("mulmat algo type on cDSP:         %d", g_hexagon_appcfg.mulmat_algotype);
-        GGMLHEXAGON_LOG_INFO("offload cgraph:                   %s", g_hexagon_appcfg.enable_offload_cgraph ? "YES" : "NO");
+        GGMLHEXAGON_LOG_INFO("offload cgraph mode:              %d", g_hexagon_appcfg.enable_offload_cgraph);
         ggmlhexagon_probe_dspinfo(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_QNN:   %d", g_hexagon_appcfg.hvx_threads);
@@ -4517,13 +4593,13 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
         uint32_t K = src0->ne[0];               // Inner dimension
         uint32_t M = src0->ne[1];               // Rows of src0
         uint32_t N = src1->ne[1];               // Columns of src1
-        uint32_t B0 = src0->ne[2] * src0->ne[3]; // src0 batch
-        uint32_t B1 = src1->ne[2] * src1->ne[3]; // src1 batch (drives output)
+        uint32_t batch0 = src0->ne[2] * src0->ne[3]; // src0 batch
+        uint32_t batch1 = src1->ne[2] * src1->ne[3]; // src1 batch (drives output)
 
         // Validate K only
         GGML_ASSERT(src0->ne[0] == src1->ne[0]); // K must match
 
-        // src0: [K, M, H0, B0] -> QNN: [B0, H0, M, K]
+        // src0: [K, M, H0, batch0] -> QNN: [batch0, H0, M, K]
         uint32_t src0_dims[] = {static_cast<uint32_t>(src0->ne[3]), static_cast<uint32_t>(src0->ne[2]),
                                 static_cast<uint32_t>(src0->ne[1]), static_cast<uint32_t>(src0->ne[0])
         };
@@ -4531,8 +4607,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
                                                   src0_dims, nullptr, 0);
 
-        // Reshape src0 to [B0, M, K]
-        uint32_t reshape0_out_dims[] = {B0, M, K};
+        // Reshape src0 to [batch0, M, K]
+        uint32_t reshape0_out_dims[] = {batch0, M, K};
         p_reshape0_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "reshape0_out",
                                                        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                        reshape0_out_dims, nullptr, 0);
@@ -4544,13 +4620,13 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    reshape0_inputs, 1, reshape0_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape0_op));
 
-        // Tile src0 to match B1: [B0, M, K] -> [B1, M, K]
-        uint32_t tile0_out_dims[] = {B1, M, K};
+        // Tile src0 to match batch1: [batch0, M, K] -> [batch1, M, K]
+        uint32_t tile0_out_dims[] = {batch1, M, K};
         p_tile0_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "tile0_out",
                                                     QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                     tile0_out_dims, nullptr, 0);
 
-        uint32_t tile_multiples[] = {B1 / B0, 1, 1};
+        uint32_t tile_multiples[] = {batch1 / batch0, 1, 1};
         uint32_t tile_dims[] = {3};
         Qnn_Tensor_t * p_tile_multiples = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "tile_multiples",
                                                                         QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, 1,
@@ -4564,7 +4640,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    tile0_inputs, 1, tile0_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, tile0_op));
 
-        // src1: [N, K, H1, B1] -> QNN: [B1, H1, N, K]
+        // src1: [N, K, H1, batch1] -> QNN: [batch1, H1, N, K]
         uint32_t src1_dims[] = {static_cast<uint32_t>(src1->ne[3]), static_cast<uint32_t>(src1->ne[2]),
                                 static_cast<uint32_t>(src1->ne[1]), static_cast<uint32_t>(src1->ne[0])
         };
@@ -4573,7 +4649,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                   src1_dims, nullptr, 0);
 
 
-        // Permute src1 to [B1, H1, K, N]
+        // Permute src1 to [batch1, H1, K, N]
         uint32_t perm_data[] = {0, 1, 3, 2};
         uint32_t perm_dims[] = {4};
         Qnn_Tensor_t * p_perm = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "perm",
@@ -4595,8 +4671,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    permute1_inputs, 1, permute1_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, permute1_op));
 
-        // Reshape src1 to [B1, K, N]
-        uint32_t reshape1_out_dims[] = {B1, K, N};
+        // Reshape src1 to [batch1, K, N]
+        uint32_t reshape1_out_dims[] = {batch1, K, N};
         p_reshape1_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "reshape1_out",
                                                        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                        reshape1_out_dims, nullptr, 0);
@@ -4608,8 +4684,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    reshape1_inputs, 1, reshape1_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape1_op));
 
-        // MatMul: [B1, M, K] x [B1, K, N] -> [B1, M, N]
-        uint32_t matmul_out_dims[] = {B1, M, N};
+        // MatMul: [batch1, M, K] x [batch1, K, N] -> [batch1, M, N]
+        uint32_t matmul_out_dims[] = {batch1, M, N};
         p_matmul_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "matmul_out",
                                                      QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                      matmul_out_dims, nullptr, 0);
@@ -4621,7 +4697,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    matmul_inputs, 2, matmul_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, matmul_op));
 
-        // Output: [N, M, H1, B1] -> QNN: [B1, H1, M, N]
+        // Output: [N, M, H1, batch1] -> QNN: [batch1, H1, M, N]
         uint32_t reshape2_out_dims[] = {static_cast<uint32_t>(dst->ne[3]), static_cast<uint32_t>(dst->ne[2]),
                                         static_cast<uint32_t>(dst->ne[1]), static_cast<uint32_t>(dst->ne[0])
         };
@@ -7435,6 +7511,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     const char * ion_base = (const char *)ctx->rpc_mempool;
     const size_t ion_size = ctx->rpc_mempool_len;
 
+    // Save bump allocator position: we'll restore it after batch execution
+    // so that mirror regions and batch descriptors are freed after each call.
+    const size_t saved_usage = ctx->rpc_mempool_usage;
+
     // ---- Phase 1: deduplicate tensors, build index map ----
     std::unordered_map<void *, int32_t> tensor_index_map;
     std::vector<ggml_tensor *> tensor_src;       // original ggml_tensor pointers
@@ -7601,11 +7681,74 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         }
     }
 
+    // ---- DIAGNOSTIC: dump tensor data locations and sample values ----
+    for (uint32_t i = 0; i < n_tensors; i++) {
+        ggml_tensor * t = tensor_src[i];
+        const char * dp = (const char *)t->data;
+        const char * location = "???";
+        if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) location = "ION";
+        else location = "HEAP";
+        uint32_t offset = (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size)
+                          ? (uint32_t)(dp - ion_base) : 0xFFFFFFFFu;
+        GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u",
+                             i, (int)t->type,
+                             (int)t->ne[0], (int)t->ne[1], (int)t->ne[2], (int)t->ne[3],
+                             (void *)dp, location, offset, (uint32_t)ggml_nbytes(t));
+        // dump first 4 f32 values from src tensors (if f32 type and has data)
+        if (t->data && ggml_nbytes(t) >= 16) {
+            const float * fv = (const float *)t->data;
+            GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f]",
+                                 i, fv[0], fv[1], fv[2], fv[3]);
+        }
+    }
+
     // copy entire batch descriptor to ION mempool
     memcpy((char *)ctx->rpc_mempool + batch_offset, local_buf.data(), total_desc_size);
 
-    GGMLHEXAGON_LOG_INFO("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)",
+    GGMLHEXAGON_LOG_WARN("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)",
                          batch_offset, total_desc_size, n_ops, n_tensors);
+
+    // ---- Phase 6.5: AP -> DSP cache coherency ----
+    // Flush ONLY src tensor data that AP wrote in THIS invocation.
+    // Do NOT include dst areas or wide ranges that may contain stale data
+    // from previous invocations (DC CVAC would flush stale data TO DRAM,
+    // potentially overwriting DSP results). FastRPC invoke return handles
+    // cache invalidation for the mapped region.
+    {
+        uint32_t clean_min = ~0u, clean_max = 0;
+        // Only flush source input tensors (AP-written data that DSP needs to read)
+        for (uint32_t i = 0; i < n_tensors; i++) {
+            ggml_tensor * t = tensor_src[i];
+            if (!t || !t->data) continue;
+            // Only flush tensors that are genuine inputs (src0/src1),
+            // not output tensors that DSP will write to.
+            // Safe approach: flush all ION-backed tensors since DSP
+            // reads src0+src1 before writing dst.
+            const char * dp = (const char *)t->data;
+            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                uint32_t off = (uint32_t)(dp - ion_base);
+                uint32_t len = (uint32_t)ggml_nbytes(t);
+                if (off < clean_min) clean_min = off;
+                if (off + len > clean_max) clean_max = off + len;
+            }
+        }
+        // Also flush mirror regions (heap->ION copies that DSP reads)
+        for (const auto & m : mirrors) {
+            if (m.mirror_offset < clean_min) clean_min = m.mirror_offset;
+            uint32_t end = m.mirror_offset + m.data_len;
+            if (end > clean_max) clean_max = end;
+        }
+        // Flush batch descriptor (DSP reads op descriptors from ION)
+        if (batch_offset < clean_min) clean_min = batch_offset;
+        uint32_t desc_end = batch_offset + total_desc_size;
+        if (desc_end > clean_max) clean_max = desc_end;
+
+        if (clean_max > clean_min) {
+            cpu_dcache_flush_range((char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
+            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase6.5 DC CVAC [0x%x, 0x%x] (%u bytes, src-only)",
+                                  clean_min, clean_max, clean_max - clean_min);
+        }
+    }
 
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
     int hexagon_error = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, batch_offset, total_desc_size);
@@ -7614,20 +7757,26 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch_ion failed: 0x%x", hexagon_error);
     }
 
+    // NOTE: No Phase 7.5 (post-DSP cache invalidation) needed.
+    // FastRPC invoke return handles cache coherency for fastrpc-mapped regions.
+    // All 8 user-space invalidation methods fail on this device for ION/DELAYED maps.
+    // The probe test proves basic DSP-write -> AP-read works without explicit inval.
+
     // ---- Phase 8: copy-back mirrored results to heap ----
-    for (const auto & m : mirrors) {
-        if (hexagon_error == AEE_SUCCESS) {
+    if (hexagon_error == AEE_SUCCESS && !mirrors.empty()) {
+        for (const auto & m : mirrors) {
             memcpy(m.original_data, (const char *)ctx->rpc_mempool + m.mirror_offset, m.data_len);
             GGMLHEXAGON_LOG_DEBUG("ion-batch: restored tensor[%d] ION->heap (%u bytes)", m.tensor_idx, m.data_len);
         }
     }
 
-    // Rewind bump allocator: release mirror + batch descriptor space
-    // Note: batch descriptor region is no longer needed after DSP reads it
-    // Mirror regions are no longer needed after restore
-    // Simple approach: don't rewind batch desc (tiny), only track mirrors separately
-    // For now, just leave usage as-is (next batch will advance further)
-    // In production, would use a proper arena/region allocator with reset points
+    // NOTE: Do NOT rewind bump allocator (monotonic allocation).
+    // Reusing ION offsets across tests causes CPU cache pollution:
+    //   test N writes dst@X → CPU caches result → test N+1 reuses offset X
+    //   → DSP writes new result to DRAM@X → CPU cache still has old data
+    //   → no user-space cache inval works on this device → read returns stale data
+    // With 4GB pool, monotonic allocation supports thousands of test ops.
+    // ctx->rpc_mempool_usage = saved_usage; // DISABLED: no rewind
 
     return result;
 }
