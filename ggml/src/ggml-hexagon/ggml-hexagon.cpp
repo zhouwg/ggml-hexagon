@@ -7558,6 +7558,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     const uint32_t total_desc_size = tensors_offset + tens_region;
 
     // ---- Phase 4: handle heap tensors -> mirror into ION ----
+    // Mirror ALL heap tensors in the batch — DSP needs to READ every input tensor
+    // (src0, src1) as well as WRITE dst. A heap tensor without a mirror sends
+    // data_offset=0 (garbage/probe data) to the DSP, producing wrong results.
     struct ion_mirror {
         int32_t  tensor_idx;
         void *   original_data;
@@ -7566,14 +7569,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     };
     std::vector<ion_mirror> mirrors;
 
-    // collect indices of DSP-writable tensors
-    std::set<int32_t> written_indices;
-    for (const auto & op : hex_ops) {
-        if (op.dst_idx >= 0)  written_indices.insert(op.dst_idx);
-        if (op.opcode == GGML_OP_ADD && op.src0_idx >= 0) written_indices.insert(op.src0_idx);
-    }
-
-    for (int32_t tidx : written_indices) {
+    // Mirror ALL heap tensors: DSP reads src0/src1 and writes dst.
+    // Any heap tensor not mirrored -> data_offset=0 -> DSP reads garbage.
+    for (int32_t tidx = 0; tidx < (int32_t)n_tensors; tidx++) {
         if (tidx < 0 || tidx >= (int32_t)n_tensors) continue;
         ggml_tensor * t = tensor_src[tidx];
         if (!t->data) continue;
