@@ -82,6 +82,7 @@ function(llama_build_and_test source)
     set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
 endfunction()
 
+llama_build_and_test(test-backend-ops.cpp)
 # dedicated for ggml-hexagon - only build these tests for faster build times
 llama_build_and_test(ggmlhexagon-benchmark.cpp)
 llama_build_and_test(ggmlhexagon-testops.cpp)

@@ -812,11 +812,13 @@ function run_threadsafety()
 
 function run_test-ops()
 {
-    prepare_run_on_phone ggmlhexagon-testops
+    prog_name=ggmlhexagon_testops
+    prog_name=test-backend-ops
+    prepare_run_on_phone ${prog_name}
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test"
+               && ${REMOTE_PATH}/${prog_name} test"
 
 }
 
@@ -844,18 +846,22 @@ function check_mulmat_algotype
 
 function run_test-op()
 {
-    prepare_run_on_phone ggmlhexagon-testops
+    prog_name=ggmlhexagon-testops
+    prog_param="-o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+    #prog_name=test-backend-ops
+    #prog_param="-o ${opname}"
+    prepare_run_on_phone ${prog_name}
 
     check_mulmat_algotype
 
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/${prog_name} test ${prog_param}"
 
     echo "\n"
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/ggmlhexagon-testops test -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/${prog_name} test ${prog_param}"
 
 }
 

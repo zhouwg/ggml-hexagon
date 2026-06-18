@@ -362,8 +362,7 @@ struct hexagon_appcfg_t {
     int enable_offload_cgraph;  // enable/disable offload cgraph or multiple op to cDSP directly
     const char * cfgfilename;
     const char * runtime_libpath;
-    char ggml_hexagon_version[GGMLHEXAGON_TMPBUF_LEN];
-    char ggml_dsp_version[GGMLHEXAGON_TMPBUF_LEN];
+    char version[GGMLHEXAGON_TMPBUF_LEN];
 };
 
 static struct hexagon_appcfg_t g_hexagon_appcfg = {
@@ -398,8 +397,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .qnn_runtimelib_path    = "C:\\",
 #endif
-        .ggml_hexagon_version   = {"1.15"},
-        .ggml_dsp_version       = {"0.99.0"},
+        .version                = {"0.99.1"},
 };
 
 //file:///opt/qcom/aistack/qairt/2.31.0.250130/docs/QNN/general/overview.html#tbl-supported-snapdragon-devices
@@ -720,9 +718,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_ADD_ID, 0, nullptr, nullptr},
         {false, GGML_OP_ADD1, 0, nullptr, nullptr},
         {false, GGML_OP_ACC, 0, nullptr, nullptr},
-        {true,  GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},
+        {false, GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},  // disabled for binary-search quality debug
         {true,  GGML_OP_MUL, 2, "ggmlop_dsp_mul", nullptr},
-        {true,  GGML_OP_DIV, 2, "ggmlop_dsp_div", nullptr},
+        {false, GGML_OP_DIV, 2, "ggmlop_dsp_div", nullptr},  // disabled for binary-search quality debug
         {false, GGML_OP_SQR, 0, nullptr, nullptr},
         {false, GGML_OP_SQRT, 0, nullptr, nullptr},
         {false, GGML_OP_LOG, 0, nullptr, nullptr},
@@ -748,7 +746,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
         {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
         {false, GGML_OP_SET, 0, nullptr, nullptr},
-        {true,  GGML_OP_CPY,      0, "ggmlop_dsp_cpy",     nullptr},
+        {false, GGML_OP_CPY,      0, "ggmlop_dsp_cpy",     nullptr},  // disabled for binary-search quality debug
         {false, GGML_OP_CONT, 0, nullptr, nullptr},
         {false, GGML_OP_RESHAPE, 0, nullptr, nullptr},
         {false, GGML_OP_VIEW, 0, nullptr, nullptr},
@@ -760,7 +758,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_DIAG, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG_MASK_INF,    2, "ggmlop_dsp_diag_mask_inf", nullptr},
         {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-        {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
+        {false, GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},  // disabled: runs on CPU (never reached DSP in ION path)
         {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
         {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
         {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
@@ -800,7 +798,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
         {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
         {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-        {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
+        {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},  // required by static_assert; disabled in _special for debug
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -832,9 +830,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD_ID,   0, nullptr, nullptr},
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
-    {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
+    {false, GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},  // disabled for binary-search quality debug
     {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
-    {true,  GGML_OP_DIV,      2, "ggmlop_dsp_div",      nullptr},
+    {false, GGML_OP_DIV,      2, "ggmlop_dsp_div",      nullptr},  // disabled for binary-search quality debug
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
     {false, GGML_OP_LOG,      0, nullptr, nullptr},
@@ -861,7 +859,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
     {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
-    {true,  GGML_OP_CPY,      0, "ggmlop_dsp_cpy",      nullptr},
+    {false, GGML_OP_CPY,      0, "ggmlop_dsp_cpy",      nullptr},  // disabled for binary-search quality debug
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
     {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
@@ -873,7 +871,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_DIAG,     0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_INF,   2, "ggmlop_dsp_diag_mask_inf", nullptr},
     {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-    {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
+    {false, GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},  // disabled: runs on CPU
     {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
     {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
     {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
@@ -913,7 +911,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
+    {false, GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},  // disabled for binary-search quality debug
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -2197,10 +2195,8 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_VERBOSE("%s", tmposs.str().c_str());
     });
     std::string precision_mode;
-    std::string version; //version of ggml-hexagon.cpp
-    std::string ggmldsp_version; //version of ggml-dsp.c
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "1.00");
-    hexagoncfg_instance.get_stringvalue("general", "ggmldsp_version", ggmldsp_version, "0.62");
+    std::string version; //version of ggml-hexagon
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.91");
     hexagoncfg_instance.get_intvalue("general", "enable_perf", g_hexagon_appcfg.enable_perf, 1);
     hexagoncfg_instance.get_intvalue("general", "print_tensors_info", g_hexagon_appcfg.print_tensors_info, 0);
     hexagoncfg_instance.get_intvalue("general", "dump_op_info", g_hexagon_appcfg.dump_op_info, 0);
@@ -2223,13 +2219,8 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "mulmat_algotype", g_hexagon_appcfg.mulmat_algotype, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_offload_cgraph", g_hexagon_appcfg.enable_offload_cgraph, 0);
 
-    memcpy(g_hexagon_appcfg.ggml_dsp_version, ggmldsp_version.c_str(), strlen(ggmldsp_version.c_str()));
-
     GGMLHEXAGON_LOG_VERBOSE("load hexagon appcfg from %s", cfg_filename.c_str());
-    GGMLHEXAGON_LOG_VERBOSE("internal ggml_hexagon_version=%s", g_hexagon_appcfg.ggml_hexagon_version);
-    GGMLHEXAGON_LOG_VERBOSE("internal ggml_dsp_version=%s", g_hexagon_appcfg.ggml_dsp_version);
-    GGMLHEXAGON_LOG_VERBOSE("external ggml_hexagon_version=%s", version.c_str());
-    GGMLHEXAGON_LOG_VERBOSE("external ggml_dsp_version=%s", ggmldsp_version.c_str());
+    GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
     GGMLHEXAGON_LOG_VERBOSE("hwaccel_approach=%d(%s)", g_hexagon_appcfg.hwaccel_approach,
                          ggmlhexagon_get_hwaccel_approach_name(g_hexagon_appcfg.hwaccel_approach));
     GGMLHEXAGON_LOG_VERBOSE("hexagon_backend=%d(%s)", g_hexagon_appcfg.hexagon_backend,
@@ -2359,8 +2350,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
         return;
     }
 
-    GGMLHEXAGON_LOG_INFO("ggml_hexagon_version:             %s", g_hexagon_appcfg.ggml_hexagon_version);
-    GGMLHEXAGON_LOG_INFO("ggml_dsp_version:                 %s", g_hexagon_appcfg.ggml_dsp_version);
+    GGMLHEXAGON_LOG_INFO("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     GGMLHEXAGON_LOG_INFO("hwaccel approach:                 %d(%s)", g_hexagon_appcfg.hwaccel_approach,
                          ggmlhexagon_get_hwaccel_approach_name(g_hexagon_appcfg.hwaccel_approach));
     GGMLHEXAGON_LOG_INFO("hexagon_backend:                  %d(%s)", g_hexagon_appcfg.hexagon_backend,
