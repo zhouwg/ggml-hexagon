@@ -883,6 +883,12 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         memcpy(dst_dt.ne, td->ne, sizeof(dst_dt.ne));
         memcpy(dst_dt.nb, td->nb, sizeof(dst_dt.nb));
         memcpy(dst_dt.op_params, td->op_params, sizeof(dst_dt.op_params));
+        // Override with op-level params: for in-place ops (SCALE, etc),
+        // node->op_params has the correct value but dst tensor's
+        // op_params may be stale/zero from tensor reuse.
+        if (op->params[0] != 0 || op->params[1] != 0) {
+            memcpy(dst_dt.op_params, op->params, sizeof(dst_dt.op_params));
+        }
         dst_dt.flags    = td->flags;
         dst_dt.data     = (void *)(base + td->data_offset);
         dst_dt.data_len = td->data_len;
@@ -924,6 +930,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         /* Flush DSP cache after writing dst (so AP can read from DRAM) */
         dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
+
+        /* DSP-side DIAG: dump first 4 f32 values from dst data */
+        if (dst_dt.data && dst_dt.data_len >= 16) {
+            const float * fv = (const float *)dst_dt.data;
+            GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst  off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+                                 i, tens[op->dst_idx].data_offset, dst_dt.data, fv[0], fv[1], fv[2], fv[3]);
+        }
     }
 
     __asm__ __volatile__("" ::: "memory");

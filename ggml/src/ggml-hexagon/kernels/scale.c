@@ -142,6 +142,9 @@ int ggmlop_dsp_scale(remote_handle64 h, const ggml_tensor * src0, ggml_tensor * 
     // Scale factor is stored in op_params[0]
     float scale;
     memcpy(&scale, dst->op_params, sizeof(float));
+    GGMLHEXAGON_LOG_INFO("SCALE: scale=%.8f, src0 ne=[%lld,%lld,%lld,%lld]",
+                         scale, (long long)src0->ne[0], (long long)src0->ne[1],
+                         (long long)src0->ne[2], (long long)src0->ne[3]);
 
     char tempbuf[256];
     ggmlhexagon_get_opkey(GGML_OP_SCALE, src0, NULL, tempbuf, 256);

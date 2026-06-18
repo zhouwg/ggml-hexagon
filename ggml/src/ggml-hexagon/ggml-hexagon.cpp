@@ -739,14 +739,14 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_CONCAT, 0, nullptr, nullptr},
         {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_NORM, 0, nullptr, nullptr},
-        {false, GGML_OP_RMS_NORM, 0, nullptr, nullptr},
+        {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
         {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
         {false, GGML_OP_L2_NORM, 0, nullptr, nullptr},
         {true,  GGML_OP_MUL_MAT, 2, "ggmlop_dsp_mulmat", ggmlop_dsp_mulmat},
         {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
         {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-        {false, GGML_OP_SCALE, 0, nullptr, nullptr},
+        {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
         {false, GGML_OP_SET, 0, nullptr, nullptr},
         {false, GGML_OP_CPY, 0, nullptr, nullptr},
         {false, GGML_OP_CONT, 0, nullptr, nullptr},
@@ -800,7 +800,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
         {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
         {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-        {false, GGML_OP_UNARY, 0, nullptr, nullptr},
+        {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -815,6 +815,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_NONE].supported,     "GGML_OP_NONE is not true");
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_ADD].supported,      "GGML_OP_ADD is not true");
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_MUL_MAT].supported,  "GGML_OP_MUL_MAT is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_RMS_NORM].supported, "GGML_OP_RMS_NORM is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_SCALE].supported,    "GGML_OP_SCALE is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_UNARY].supported,    "GGML_OP_UNARY is not true");
 static_assert(std::size(ggmlhexagon_k_op_caps) == (static_cast<size_t>(GGML_OP_COUNT)),
               "pls check ggmlhexagon_k_op_caps and ensure is corresponding to latest ggml.h");
 
@@ -848,15 +851,15 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
-    {false, GGML_OP_RMS_NORM, 0, nullptr, nullptr},
-    {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
+        {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
+        {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
     {true,  GGML_OP_MUL_MAT,  2, "ggmlop_dsp_mulmat",   ggmlop_dsp_mulmat},
     // ... all others false until DSP kernels are validated ...
     {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-    {false, GGML_OP_SCALE,    0, nullptr, nullptr},
+    {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
     {false, GGML_OP_CPY,      0, nullptr, nullptr},
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
@@ -910,7 +913,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {false, GGML_OP_UNARY,    0, nullptr, nullptr},
+    {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -6339,10 +6342,26 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return false;
         }
         case GGML_OP_RMS_NORM:
-        case GGML_OP_POOL_2D:
         {
-
             ggmlhexagon_dump_op_info(op_tensor);
+            if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_UNARY:
+        {
+            const int unary_op = (int)op_tensor->op_params[0];
+            if (unary_op != GGML_UNARY_OP_SILU)
+                return false;
+            if (src0->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_SCALE:
+        {
+            if (src0->type != GGML_TYPE_F32)
+                return false;
+            return true;
         }
         default:
             break;
@@ -7547,6 +7566,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     const uint32_t n_tensors = (uint32_t)tensor_src.size();
 
     GGMLHEXAGON_LOG_WARN("special: ion-batch %u ops, %u unique tensors", n_ops, n_tensors);
+    for (size_t i = 0; i < hex_ops.size(); i++) {
+        const hex_op_desc & o = hex_ops[i];
+        GGMLHEXAGON_LOG_WARN("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
+                              i, ggml_op_name((ggml_op)o.opcode),
+                              o.src0_idx, o.src1_idx, o.src2_idx, o.dst_idx);
+    }
 
     // ---- Phase 3: compute layout sizes ----
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);          // ~24 bytes
@@ -7695,8 +7720,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         // dump first 4 f32 values from src tensors (if f32 type and has data)
         if (t->data && ggml_nbytes(t) >= 16) {
             const float * fv = (const float *)t->data;
-            GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f]",
-                                 i, fv[0], fv[1], fv[2], fv[3]);
+            float op_param0 = 0;
+            memcpy(&op_param0, t->op_params, sizeof(float));
+            GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f] op_params[0]=%.8f",
+                                 i, fv[0], fv[1], fv[2], fv[3], op_param0);
         }
     }
 
