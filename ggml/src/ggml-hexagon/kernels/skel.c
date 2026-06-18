@@ -759,6 +759,48 @@ static __inline int _skel_method_5(int (*_pfn)(const char*, remote_handle64*), u
    _QAIC_CATCH(_nErr) {}
    return _nErr;
 }
+static __inline int _skel_method_6(int (*_pfn)(remote_handle64, uint32_t, uint32_t), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
+   remote_arg* _praEnd = 0;
+   uint32_t _in0[1] = {0};
+   uint32_t _in1[1] = {0};
+   uint32_t* _primIn= 0;
+   int _nErr = 0;
+   _praEnd = ((_pra + REMOTE_SCALARS_INBUFS(_sc)) + REMOTE_SCALARS_OUTBUFS(_sc) + REMOTE_SCALARS_INHANDLES(_sc) + REMOTE_SCALARS_OUTHANDLES(_sc));
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INBUFS(_sc)==1);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTBUFS(_sc)==0);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, (_pra + ((1 + 0) + (((0 + 0) + 0) + 0))) <= _praEnd);
+   _QAIC_ASSERT(_nErr, _pra[0].buf.nLen >= 8);
+   _primIn = _pra[0].buf.pv;
+   _COPY(_in0, 0, _primIn, 0, 4);
+   _COPY(_in1, 0, _primIn, 4, 4);
+   _TRY(_nErr, _pfn(_h, (uint32_t)*_in0, (uint32_t)*_in1));
+   _QAIC_CATCH(_nErr) {}
+   return _nErr;
+}
+static __inline int _skel_method_7(int (*_pfn)(remote_handle64, uint32_t, uint32_t, uint32_t), remote_handle64 _h, uint32_t _sc, remote_arg* _pra) {
+   remote_arg* _praEnd = 0;
+   uint32_t _in0[1] = {0};
+   uint32_t _in1[1] = {0};
+   uint32_t _in2[1] = {0};
+   uint32_t* _primIn= 0;
+   int _nErr = 0;
+   _praEnd = ((_pra + REMOTE_SCALARS_INBUFS(_sc)) + REMOTE_SCALARS_OUTBUFS(_sc) + REMOTE_SCALARS_INHANDLES(_sc) + REMOTE_SCALARS_OUTHANDLES(_sc));
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INBUFS(_sc)==1);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTBUFS(_sc)==0);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_INHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, REMOTE_SCALARS_OUTHANDLES(_sc)==0);
+   _QAIC_ASSERT(_nErr, (_pra + ((1 + 0) + (((0 + 0) + 0) + 0))) <= _praEnd);
+   _QAIC_ASSERT(_nErr, _pra[0].buf.nLen >= 12);
+   _primIn = _pra[0].buf.pv;
+   _COPY(_in0, 0, _primIn, 0, 4);
+   _COPY(_in1, 0, _primIn, 4, 4);
+   _COPY(_in2, 0, _primIn, 8, 4);
+   _TRY(_nErr, _pfn(_h, (uint32_t)*_in0, (uint32_t)*_in1, (uint32_t)*_in2));
+   _QAIC_CATCH(_nErr) {}
+   return _nErr;
+}
 __QAIC_SKEL_EXPORT int __QAIC_SKEL(ggmldsp_skel_handle_invoke)(remote_handle64 _h, uint32_t _sc, remote_arg* _pra) __QAIC_SKEL_ATTRIBUTE {
    switch(REMOTE_SCALARS_METHOD(_sc)){
       case 0:
@@ -775,6 +817,10 @@ __QAIC_SKEL_EXPORT int __QAIC_SKEL(ggmldsp_skel_handle_invoke)(remote_handle64 _
       return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_execute_task), _h, _sc, _pra);
       case 6:
       return _skel_method(__QAIC_IMPL(ggmlop_dsp_execute_batch), _h, _sc, _pra);
+      case 7:
+      return _skel_method_6(__QAIC_IMPL(ggmlop_dsp_execute_batch_ion), _h, _sc, _pra);
+      case 8:
+      return _skel_method_7(__QAIC_IMPL(ggmlop_dsp_register_ion), _h, _sc, _pra);
    }
    return AEE_EUNSUPPORTED;
 }

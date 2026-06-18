@@ -39,4 +39,6 @@ interface ggmlop : remote_handle64 {
    long      dsp_mulmat(in dsptensor src0, in dsptensor src1, rout dsptensor dst);
    long      dsp_execute_task(in int32 ggml_op_type, in dsptensor src0, in dsptensor src1, rout dsptensor dst);
    AEEResult dsp_execute_batch(in dsp_opbatch_req req);
+   AEEResult dsp_execute_batch_ion(in uint32 batch_offset, in uint32 batch_size);
+   AEEResult dsp_register_ion(in uint32 ion_fd, in uint32 size_lo, in uint32 size_hi);
 };

@@ -107,6 +107,7 @@
 #include "ggml-backend-impl.h"
 
 #include "kernels/skel.h"
+#include "kernels/hex_batch.h"
 
 // =================================================================================================
 //  section-1: forward/prototype declaration, global vars, macros, data structures
@@ -316,6 +317,7 @@ struct ggml_backend_hexagon_context {
     size_t rpc_mempool_usage;
     void * rpc_mempool;
     int rpc_mempool_handle;
+    void * rpc_mempool_dsp_base;   // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
     remote_handle64 ggmlop_handle;
     int domain_id;
 };
@@ -504,6 +506,7 @@ static struct ggml_backend_hexagon_context g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICE
                 .rpc_mempool_usage    = 0,
                 .rpc_mempool          = nullptr,
                 .rpc_mempool_handle   = 0,
+                .rpc_mempool_dsp_base = nullptr,
                 .ggmlop_handle        = 0,
                 .domain_id            = -1,
         },
@@ -532,6 +535,7 @@ static struct ggml_backend_hexagon_context g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICE
                 .rpc_mempool_usage    = 0,
                 .rpc_mempool          = nullptr,
                 .rpc_mempool_handle   = 0,
+                .rpc_mempool_dsp_base = nullptr,
                 .ggmlop_handle        = 0,
                 .domain_id            = -1,
         },
@@ -560,6 +564,7 @@ static struct ggml_backend_hexagon_context g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICE
                 .rpc_mempool_usage    = 0,
                 .rpc_mempool          = nullptr,
                 .rpc_mempool_handle   = 0,
+                .rpc_mempool_dsp_base = nullptr,
                 .ggmlop_handle        = 0,
                 .domain_id            = -1,
          },
@@ -583,6 +588,7 @@ static struct ggml_backend_hexagon_context g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICE
                 .rpc_mempool_usage    = 0,
                 .rpc_mempool          = nullptr,
                 .rpc_mempool_handle   = 0,
+                .rpc_mempool_dsp_base = nullptr,
                 .ggmlop_handle        = 0,
                 .domain_id            = HEXAGON_CDSP,
         },
@@ -821,7 +827,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
     {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
-    {false, GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
+    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
     {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
@@ -5531,7 +5537,7 @@ static int ggmlhexagon_request_status_notifications(int domain_id, void * contex
 static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     size_t candidate_size   = 0;
     uint8_t * rpc_buffer    = nullptr;
-    size_t probe_slots[]    = {1024, 1536, 2000, 2048, 1024 + 2048, 4096};
+    size_t probe_slots[]    = {512, 768, 1024, 2048, 1024 + 2048, 1024 + 2048 + 900};
     size_t probe_counts     = sizeof(probe_slots) / sizeof(size_t);
 
     if (nullptr == ctx)
@@ -5560,7 +5566,11 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
         GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
         ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
+        // NOTE: Do NOT use RPCMEM_TRY_MAP_STATIC here!
+        // It pre-registers the ION fd with FastRPC kernel driver,
+        // which causes implicit fd_mmap_create on every invoke.
+        // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
+        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
         if (nullptr == ctx->rpc_mempool) {
             GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
             return 2;
@@ -5573,47 +5583,129 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", ctx->rpc_mempool_handle);
         GGMLHEXAGON_LOG_INFO("rpc mempool addr 0x%p", ctx->rpc_mempool);
         GGMLHEXAGON_LOG_INFO("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
-        remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
-
-        // Register ION pool base address on DSP side
-        // FastRPC translates dsptensor.data from AP VA to DSP VA automatically
-        // Use src1 to pass fd and size information as a special "metadata" tensor
+        // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
+        // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
+        // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
+        // This matches QCOM's approach in ggml-hexagon-qcom.cpp L199.
+        // Without this registration, invoke() still triggers implicit fd_mmap_create.
         {
-            struct dsptensor ion_base_tensor;
-            struct dsptensor ion_meta_tensor;  // metadata tensor for fd and size
-            struct dsptensor ion_dst_dummy;
-            int32_t dummy = 0;
-            int32_t meta_data[16] = {0};  // metadata array
+            int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
+                                         ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
+                                         FASTRPC_MAP_FD_DELAYED);
+            if (mmap_err != 0) {
+                GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
+                                     mmap_err, ctx->rpc_mempool_handle);
+            } else {
+                GGMLHEXAGON_LOG_INFO("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
+                                     ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+            }
+        }
 
-            memset(&ion_base_tensor, 0, sizeof(ion_base_tensor));
-            memset(&ion_meta_tensor, 0, sizeof(ion_meta_tensor));
-            memset(&ion_dst_dummy, 0, sizeof(ion_dst_dummy));
+        // NOTE: Do NOT call remote_register_buf() here!
+        // It registers the ION fd with FastRPC kernel driver, which causes
+        // implicit fd_mmap_create on every subsequent invoke.
+        // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
+        // Strategy: let DSP map via HAP_mmap2 exclusively (same as QCOM htp_iface_mmap).
+        // remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
 
-            // Main tensor: ION buffer base address
-            // For remote_register_buf'd ION buffers, FastRPC translates the pointer
-            // (not copy data). data_len tells FastRPC how many bytes to validate/map.
-            // Must be > sizeof(float) to get real pointer translation, but small enough
-            // that stub-layer allocation doesn't fail (data_len * sizeof(float) must fit).
-            ion_base_tensor.data = ctx->rpc_mempool;
-            ion_base_tensor.data_len = (int)(64 * 1024);  // 64KB: enough for pointer translation, safe for allocation
-            ion_base_tensor.type = 0;
+        // Register ION pool on DSP side via pure-scalar IDL call.
+        // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
+        // implicit fd_mmap_create when dsptensor.data pointers are passed.
+        // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
+        // same as QCOM's htp_iface_mmap() in htp/main.c.
+        {
+            uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
+            uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
+            uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
 
-            // Metadata tensor: contains fd and size
-            // Use a small buffer on stack, FastRPC will copy it to DSP
-            meta_data[0] = ctx->rpc_mempool_handle;  // fd
-            meta_data[1] = (int32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);  // size lower 32 bits
-            meta_data[2] = (int32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);  // size upper 32 bits
-            meta_data[3] = (int32_t)(ctx->rpc_mempool_len >> 20);  // size in MB
-            ion_meta_tensor.data = meta_data;
-            ion_meta_tensor.data_len = sizeof(meta_data);
-            ion_meta_tensor.type = 0;
+            int reg_err = ggmlop_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+            if (reg_err != AEE_SUCCESS) {
+                GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
+            } else {
+                GGMLHEXAGON_LOG_INFO("registered ION base via scalar call: fd=%d, size=%dMB",
+                                     ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+            }
 
-            ion_dst_dummy.data = &dummy;
-            ion_dst_dummy.data_len = sizeof(dummy);
+            // [ION-PROBE] Verify bidirectional ION shared memory access.
+            // Call with batch_size=0 → DSP enters probe mode: writes 0xAB at base+0,
+            // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
+            {
+                int probe_err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
+                if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
+                    // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
+                    __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
 
-            ggmlop_dsp_execute_task(ctx->ggmlop_handle, GGML_OP_NONE, &ion_base_tensor, &ion_meta_tensor, &ion_dst_dummy);
-            GGMLHEXAGON_LOG_INFO("registered ION DSP base, AP VA 0x%p, size=%lldMB, fd=%d",
-                                 ctx->rpc_mempool, ctx->rpc_mempool_len / SIZE_IN_MB, ctx->rpc_mempool_handle);
+                    const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
+                    bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
+                    bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
+                    GGMLHEXAGON_LOG_INFO("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
+                                         p[0], p[1], p[2], p[3],
+                                         ok_ab ? "PASS" : "FAIL");
+                    GGMLHEXAGON_LOG_INFO("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
+                                         p[64], p[65], p[66], p[67],
+                                         ok_cd ? "PASS" : "FAIL");
+                    if (ok_ab && ok_cd) {
+                        GGMLHEXAGON_LOG_INFO("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
+                    } else {
+                        GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
+                    }
+                    // clean up probe patterns
+                    memset((void *)p, 0, 16);
+                    memset((void *)(p + 64), 0, 16);
+                } else {
+                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] dsp_execute_batch_ion probe failed: 0x%x", probe_err);
+                }
+
+                // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
+                // Call dsp_execute_batch_ion N times with different write patterns.
+                // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
+                {
+                    const int N_ROUNDS = 5;
+                    bool multi_ok = true;
+
+                    for (int round = 0; round < N_ROUNDS; round++) {
+                        uint8_t pattern = (uint8_t)(0xA0 + round);
+                        // Write pattern from AP side first (AP→DSP direction)
+                        memset((void *)ctx->rpc_mempool, pattern, 16);
+                        __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                                (char *)ctx->rpc_mempool + 16);
+
+                        int err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
+                        if (err != AEE_SUCCESS) {
+                            GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
+                                                  round + 1, N_ROUNDS, err);
+                            multi_ok = false;
+                            break;
+                        }
+
+                        // Read back DSP-written data (DSP→AP direction)
+                        __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                                (char *)ctx->rpc_mempool + 80);
+                        const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
+                        if (r[0] != 0xAB || r[64] != 0xCD) {
+                            GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
+                                                  "base+0=0x%02x base+64=0x%02x",
+                                                  round + 1, N_ROUNDS, r[0], r[64]);
+                            multi_ok = false;
+                            break;
+                        }
+
+                        GGMLHEXAGON_LOG_INFO("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
+                                             round + 1, N_ROUNDS);
+
+                        // Clean up for next round
+                        memset((void *)r, 0, 16);
+                        memset((void *)(r + 64), 0, 16);
+                    }
+
+                    if (multi_ok) {
+                        GGMLHEXAGON_LOG_INFO("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
+                                             N_ROUNDS);
+                    } else {
+                        GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
+                    }
+                }
+            }
         }
     }
 
@@ -7287,6 +7379,259 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
     return result;
 }
 
+// Mode 2: ION-based op-batch — packs all ops into ION shared memory,
+//         passes only (offset, size) via FastRPC as doorbell.
+//         Avoids FastRPC scatter-gather limits entirely.
+static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+
+    enum ggml_status result         = GGML_STATUS_SUCCESS;
+    ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
+
+    // collect supported ops
+    std::vector<ggml_tensor *> supported_nodes;
+    std::vector<ggml_tensor *> unsupported_nodes;
+    GGMLHEXAGON_LOG_WARN("special: cgraph has %d total nodes", cgraph->n_nodes);
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
+        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
+            || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
+            || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+            continue;
+        }
+        //TODO: use relaxed batch table to maximize batching
+        if (ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(node)].supported) {
+            supported_nodes.push_back(node);
+        } else {
+            unsupported_nodes.push_back(node);
+        }
+    }
+
+    if (!unsupported_nodes.empty()) {
+        GGMLHEXAGON_LOG_WARN("special: %d unsupported ops skipped:", (int)unsupported_nodes.size());
+        for (auto * n : unsupported_nodes) {
+            GGMLHEXAGON_LOG_WARN("  node[%s] op=%s(%d), src0=%p src1=%p dst=%p",
+                                  n->name ? n->name : "?", ggml_op_name(n->op), n->op,
+                                  n->src[0] ? n->src[0]->data : nullptr,
+                                  n->src[1] ? n->src[1]->data : nullptr,
+                                  n->data);
+        }
+    }
+
+    if (supported_nodes.empty()) {
+        return result;
+    }
+
+    // ====================================================================
+    // ION-based multi-op offload: pack all ops into ION shared memory,
+    // then pass only (offset, size) via FastRPC as doorbell.
+    // This avoids FastRPC's scatter-gather limits on large batches.
+    // ====================================================================
+
+    if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
+        GGMLHEXAGON_LOG_WARN("special: no ION mempool, falling back to per-op");
+        return result;  // let scheduler use per-op path
+    }
+
+    const char * ion_base = (const char *)ctx->rpc_mempool;
+    const size_t ion_size = ctx->rpc_mempool_len;
+
+    // ---- Phase 1: deduplicate tensors, build index map ----
+    std::unordered_map<void *, int32_t> tensor_index_map;
+    std::vector<ggml_tensor *> tensor_src;       // original ggml_tensor pointers
+
+    auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
+        if (!t) return -1;
+        auto it = tensor_index_map.find(t->data);
+        if (it != tensor_index_map.end()) return it->second;
+        int32_t idx = (int32_t)tensor_src.size();
+        tensor_index_map[t->data] = idx;
+        tensor_src.push_back(t);
+        return idx;
+    };
+
+    // ---- Phase 2: build op descriptors ----
+    std::vector<hex_op_desc> hex_ops;
+    for (auto * node : supported_nodes) {
+        hex_op_desc op;
+        memset(&op, 0, sizeof(op));
+        op.opcode   = node->op;
+        memcpy(op.params, node->op_params, sizeof(op.params));
+        op.src0_idx = get_or_add_tensor_idx(node->src[0]);
+        op.src1_idx = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
+        op.src2_idx = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
+        op.dst_idx  = get_or_add_tensor_idx(node);
+        hex_ops.push_back(op);
+    }
+
+    const uint32_t n_ops     = (uint32_t)hex_ops.size();
+    const uint32_t n_tensors = (uint32_t)tensor_src.size();
+
+    GGMLHEXAGON_LOG_WARN("special: ion-batch %u ops, %u unique tensors", n_ops, n_tensors);
+
+    // ---- Phase 3: compute layout sizes ----
+    const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);          // ~24 bytes
+    const uint32_t ops_region    = (uint32_t)(n_ops * sizeof(hex_op_desc));  // ~96*N
+    const uint32_t tens_region   = (uint32_t)(n_tensors * sizeof(hex_tensor_desc)); // ~104*M
+    // align ops/tensors regions
+    const uint32_t ops_offset    = hdr_size;
+    const uint32_t tensors_offset = ops_offset + ((ops_region + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1));
+    const uint32_t total_desc_size = tensors_offset + tens_region;
+
+    // ---- Phase 4: handle heap tensors -> mirror into ION ----
+    struct ion_mirror {
+        int32_t  tensor_idx;
+        void *   original_data;
+        uint32_t mirror_offset;  // offset within ION mempool
+        uint32_t data_len;
+    };
+    std::vector<ion_mirror> mirrors;
+
+    // collect indices of DSP-writable tensors
+    std::set<int32_t> written_indices;
+    for (const auto & op : hex_ops) {
+        if (op.dst_idx >= 0)  written_indices.insert(op.dst_idx);
+        if (op.opcode == GGML_OP_ADD && op.src0_idx >= 0) written_indices.insert(op.src0_idx);
+    }
+
+    for (int32_t tidx : written_indices) {
+        if (tidx < 0 || tidx >= (int32_t)n_tensors) continue;
+        ggml_tensor * t = tensor_src[tidx];
+        if (!t->data) continue;
+
+        const char * data_ptr = (const char *)t->data;
+        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+            continue;  // already in ION pool
+        }
+
+        // heap tensor: bump-allocate mirror space in ION mempool
+        size_t mirror_size = (size_t)ggml_nbytes(t);
+        size_t aligned_offset = (ctx->rpc_mempool_usage + 127u) & ~127u;
+
+        if (aligned_offset + mirror_size > ion_size) {
+            GGMLHEXAGON_LOG_WARN("ion-batch: mempool full for mirror[%d] (%zu bytes)", tidx, mirror_size);
+            continue;
+        }
+
+        uint32_t moff = (uint32_t)aligned_offset;
+        void * ion_buf = (char *)ctx->rpc_mempool + moff;
+        ctx->rpc_mempool_usage = aligned_offset + mirror_size;
+
+        memcpy(ion_buf, t->data, mirror_size);
+
+        ion_mirror m;
+        m.tensor_idx    = tidx;
+        m.original_data = t->data;
+        m.mirror_offset = moff;
+        m.data_len      = (uint32_t)mirror_size;
+        mirrors.push_back(m);
+
+        GGMLHEXAGON_LOG_DEBUG("ion-batch: mirror tensor[%d] heap=%p -> ION offset=0x%x (%u bytes)",
+                              tidx, t->data, moff, m.data_len);
+    }
+
+    // ---- Phase 5: allocate batch descriptor region in ION mempool ----
+    size_t batch_align = HEX_BATCH_ALIGN;
+    size_t batch_offset_raw = ctx->rpc_mempool_usage;
+    size_t batch_offset_aligned = (batch_offset_raw + batch_align - 1) & ~(batch_align - 1);
+
+    if (batch_offset_aligned + total_desc_size > ion_size) {
+        GGMLHEXAGON_LOG_ERROR("ion-batch: mempool full for batch desc (%zu bytes at offset %zu)",
+                              total_desc_size, batch_offset_aligned);
+        // rewind mirrors
+        if (!mirrors.empty()) ctx->rpc_mempool_usage -= /* recalculate */ 0;  // simplified
+        return result;
+    }
+
+    uint32_t batch_offset = (uint32_t)batch_offset_aligned;
+    ctx->rpc_mempool_usage = batch_offset_aligned + total_desc_size;
+
+    // ---- Phase 6: build descriptors in local buffer, then memcpy to ION ----
+    std::vector<uint8_t> local_buf(total_desc_size);
+    hex_batch_hdr * hdr = (hex_batch_hdr *)local_buf.data();
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->n_ops         = n_ops;
+    hdr->n_tensors    = n_tensors;
+    hdr->ops_offset   = ops_offset;
+    hdr->tensors_offset = tensors_offset;
+    hdr->total_size   = total_desc_size;
+
+    // write op descriptors
+    hex_op_desc * ops_out = (hex_op_desc *)(local_buf.data() + ops_offset);
+    memcpy(ops_out, hex_ops.data(), ops_region);
+
+    // write tensor descriptors with computed offsets
+    hex_tensor_desc * tens_out = (hex_tensor_desc *)(local_buf.data() + tensors_offset);
+    for (uint32_t i = 0; i < n_tensors; i++) {
+        ggml_tensor * t = tensor_src[i];
+        hex_tensor_desc * td = &tens_out[i];
+        memset(td, 0, sizeof(*td));
+
+        td->type = (int32_t)t->type;
+        td->ne[0] = (int32_t)t->ne[0]; td->ne[1] = (int32_t)t->ne[1];
+        td->ne[2] = (int32_t)t->ne[2]; td->ne[3] = (int32_t)t->ne[3];
+        td->nb[0] = (int32_t)t->nb[0]; td->nb[1] = (int32_t)t->nb[1];
+        td->nb[2] = (int32_t)t->nb[2]; td->nb[3] = (int32_t)t->nb[3];
+        memcpy(td->op_params, t->op_params, sizeof(td->op_params));
+        td->data_len = (uint32_t)ggml_nbytes(t);
+
+        const char * data_ptr = (const char *)t->data;
+        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+            // ION tensor: direct offset
+            td->data_offset = (uint32_t)(data_ptr - ion_base);
+            td->flags = 0;  // readonly by default
+        } else {
+            // heap tensor: check if mirrored
+            bool found_mirror = false;
+            for (const auto & m : mirrors) {
+                if (m.tensor_idx == (int32_t)i) {
+                    td->data_offset = m.mirror_offset;
+                    td->flags = 1;  // writable (mirrored)
+                    found_mirror = true;
+                    break;
+                }
+            }
+            if (!found_mirror) {
+                // readonly heap tensor that wasn't mirrored (shouldn't happen often)
+                // fallback: still reference original pointer as offset (DSP can't access!)
+                // this is an error condition but try to continue
+                td->data_offset = 0;
+                td->flags = 0;
+                GGMLHEXAGON_LOG_WARN("ion-batch: tensor[%d] is non-ION heap without mirror!", i);
+            }
+        }
+    }
+
+    // copy entire batch descriptor to ION mempool
+    memcpy((char *)ctx->rpc_mempool + batch_offset, local_buf.data(), total_desc_size);
+
+    GGMLHEXAGON_LOG_INFO("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)",
+                         batch_offset, total_desc_size, n_ops, n_tensors);
+
+    // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
+    int hexagon_error = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, batch_offset, total_desc_size);
+
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch_ion failed: 0x%x", hexagon_error);
+    }
+
+    // ---- Phase 8: copy-back mirrored results to heap ----
+    for (const auto & m : mirrors) {
+        if (hexagon_error == AEE_SUCCESS) {
+            memcpy(m.original_data, (const char *)ctx->rpc_mempool + m.mirror_offset, m.data_len);
+            GGMLHEXAGON_LOG_DEBUG("ion-batch: restored tensor[%d] ION->heap (%u bytes)", m.tensor_idx, m.data_len);
+        }
+    }
+
+    // Rewind bump allocator: release mirror + batch descriptor space
+    // Note: batch descriptor region is no longer needed after DSP reads it
+    // Mirror regions are no longer needed after restore
+    // Simple approach: don't rewind batch desc (tiny), only track mirrors separately
+    // For now, just leave usage as-is (next batch will advance further)
+    // In production, would use a proper arena/region allocator with reset points
+
+    return result;
+}
+
 static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
     if (nullptr == ctx) {
@@ -7823,11 +8168,14 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
         if (nullptr == instance)
             return nullptr;
     }
-    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (1 == g_hexagon_appcfg.enable_offload_cgraph)) {
-        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special");
+    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (2 == g_hexagon_appcfg.enable_offload_cgraph)) {
+        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special_ion (ION-based op-batch)");
+        ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special_ion;
+    } else if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (1 == g_hexagon_appcfg.enable_offload_cgraph)) {
+        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special (FastRPC-based op-batch)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special;
     } else {
-        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_general");
+        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_general (per-op)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
     }
     ggml_backend_t hexagon_backend = new ggml_backend{

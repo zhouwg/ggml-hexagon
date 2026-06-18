@@ -660,6 +660,43 @@ __QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch)(remote_handle
    uint32_t _mid = 6;
    return _stub_method_3(_handle, _mid, (uintptr_t*)req);
 }
+static __inline int _stub_method_4(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint32_t _in1[1]) {
+   remote_arg _pra[1] = {0};
+   uint32_t _primIn[2]= {0};
+   int _nErr = 0;
+   _pra[0].buf.pv = (void*)_primIn;
+   _pra[0].buf.nLen = sizeof(_primIn);
+   _COPY(_primIn, 0, _in0, 0, 4);
+   _COPY(_primIn, 4, _in1, 0, 4);
+   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
+   _CATCH_FARF(_nErr) {
+      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
+   }
+   return _nErr;
+}
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch_ion)(remote_handle64 _handle, uint32_t batch_offset, uint32_t batch_size) __QAIC_STUB_ATTRIBUTE {
+   uint32_t _mid = 7;
+   return _stub_method_4(_handle, _mid, &batch_offset, &batch_size);
+}
+static __inline int _stub_method_5(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint32_t _in1[1], uint32_t _in2[1]) {
+   remote_arg _pra[1] = {0};
+   uint32_t _primIn[3]= {0};
+   int _nErr = 0;
+   _pra[0].buf.pv = (void*)_primIn;
+   _pra[0].buf.nLen = sizeof(_primIn);
+   _COPY(_primIn, 0, _in0, 0, 4);
+   _COPY(_primIn, 4, _in1, 0, 4);
+   _COPY(_primIn, 8, _in2, 0, 4);
+   _TRY_FARF(_nErr, __QAIC_REMOTE(remote_handle64_invoke)(_handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _pra));
+   _CATCH_FARF(_nErr) {
+      _QAIC_FARF(RUNTIME_ERROR, "ERROR 0x%x: handle=0x%"PRIx64", scalar=0x%x, method ID=%d: %s failed\n", _nErr , _handle, REMOTE_SCALARS_MAKEX(0, _mid, 1, 0, 0, 0), _mid, __func__);
+   }
+   return _nErr;
+}
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_register_ion)(remote_handle64 _handle, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) __QAIC_STUB_ATTRIBUTE {
+   uint32_t _mid = 8;
+   return _stub_method_5(_handle, _mid, &ion_fd, &size_lo, &size_hi);
+}
 #ifdef __cplusplus
 }
 #endif

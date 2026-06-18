@@ -5,6 +5,7 @@
 #include <HAP_compute_res.h>
 #include "ggml-dsp.h"
 #include "worker_pool.h"
+#include "hex_batch.h"
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
@@ -532,28 +533,37 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
     GGMLHEXAGON_LOG_INFO("executing op type %d", ggml_op);
 
-    // GGML_OP_NONE: register ION mempool base VA from AP side.
-    // FastRPC has already translated src0->data to DSP VA.
-    // src1 contains metadata: meta_data[0]=fd, [1..3]=size (low32, high32, size_mb)
+    // GGML_OP_NONE: register ION mempool on DSP side.
+    // AP passes metadata: [0]=fd, [1..2]=size (bytes), [3]=size_mb, [4..5]=DSP VA from logcat
+    // Strategy: use HAP_mmap2(fd) to get a DSP-user-space-accessible VA,
+    //            same as QCOM's htp_iface_mmap() in htp/main.c.
     if (ggml_op == GGML_OP_NONE) {
         if (src0 && src0->data) {
-            g_ion_dsp_base = src0->data;
-            int32_t data_len = src0->data_len;
+            uint32_t * meta = (uint32_t *)src0->data;
+            int32_t fd = (int32_t)meta[0];
+            uint64_t size = ((uint64_t)(uint32_t)meta[2] << 32) | (uint64_t)(uint32_t)meta[1];
+            int32_t size_mb = (int32_t)meta[3];
 
-            int32_t fd = 0;
-            uint64_t size_bytes = 0;
-            int32_t size_in_mb = 0;
-            if (src1 && src1->data) {
-                uint32_t * meta_data = (uint32_t *)src1->data;
-                fd = (int32_t)meta_data[0];
-                uint32_t size_low  = meta_data[1];
-                uint32_t size_high = meta_data[2];
-                size_bytes = ((uint64_t)size_high << 32) | (uint64_t)size_low;
-                size_in_mb = meta_data[3];
+            GGMLHEXAGON_LOG_INFO("[ION-REG] fd=%d, size=%llu bytes (%dMB), logcat_va=0x%08x%08x",
+                                 fd, (unsigned long long)size, size_mb, meta[5], meta[4]);
+
+#if __HVX_ARCH__ > 73
+            void * va = HAP_mmap2(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
+#else
+            void * va = HAP_mmap(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
+#endif
+
+            if (va == (void *)-1) {
+                g_ion_dsp_base = NULL;
+                GGMLHEXAGON_LOG_ERROR("[ION-REG] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
+            } else {
+                g_ion_dsp_base = va;
+                GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%dMB)",
+                                     va, fd, size_mb);
             }
-
-            GGMLHEXAGON_LOG_INFO("registered ION DSP base: %p, data_len=%d, fd=%d, size=%llubytes(%dMB)",
-                                 g_ion_dsp_base, data_len, fd, (unsigned long long)size_bytes, size_in_mb);
+        } else {
+            g_ion_dsp_base = NULL;
+            GGMLHEXAGON_LOG_ERROR("GGML_OP_NONE: no src0 data");
         }
         return AEE_SUCCESS;
     }
@@ -750,6 +760,170 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
     }
     __asm__ __volatile__("" ::: "memory");
 
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("leave %s (dsp_execute_batch)", __func__);
+    return AEE_SUCCESS;
+}
+
+/*
+ * ION-based batch execution: reads batch descriptor from shared ION memory.
+ * FastRPC only passes 2 scalars (offset, size) - all data is in the mempool.
+ *
+ * Probe mode: when batch_size == 0, performs bidirectional ION memory test.
+ */
+AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
+    if (g_ion_dsp_base == NULL) {
+        GGMLHEXAGON_LOG_ERROR("ION base not registered");
+        return AEE_EBADPARM;
+    }
+
+    const char * base = (const char *)g_ion_dsp_base;
+
+    /* Probe mode: verify bidirectional ION access */
+    if (batch_size == 0) {
+        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] testing ION R/W at base=%p", g_ion_dsp_base);
+
+        // Step 1: Read what AP wrote (AP→DSP direction)
+        // Invalidate DSP cache before reading
+        Q6_dccleaninva_A((void *)base);
+        uint8_t ap_val = ((const uint8_t *)base)[0];
+        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] AP→DSP: read base+0 = 0x%02x", ap_val);
+
+        // Step 2: Write pattern for AP to verify (DSP→AP direction)
+        memset((void *)base, 0xAB, 16);
+        memset((void *)(base + 64), 0xCD, 16);
+        // Flush DSP L2 cache so AP can see the written data (ION is non-coherent)
+        Q6_dccleaninva_A((void *)base);
+        Q6_dccleaninva_A((void *)(base + 64));
+        __asm__ __volatile__("" ::: "memory");
+        return AEE_SUCCESS;
+    }
+
+    /* Normal batch execution */
+    const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
+
+    if (hdr->n_ops == 0 || hdr->n_tensors == 0) {
+        GGMLHEXAGON_LOG_ERROR("empty ion-batch: n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+        return AEE_EBADPARM;
+    }
+
+    const hex_op_desc * ops = (const hex_op_desc *)((const char *)hdr + hdr->ops_offset);
+    const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
+
+    for (uint32_t i = 0; i < hdr->n_ops; i++) {
+        const hex_op_desc * op = &ops[i];
+
+        dsptensor src0_dt, src1_dt_buf, src2_dt_buf, dst_dt;
+        const dsptensor *src1_dt_ptr = NULL, *src2_dt_ptr = NULL;
+
+        /* Build src0 from hex_tensor_desc using ION base + offset */
+        const hex_tensor_desc * t0 = &tens[op->src0_idx];
+        memset(&src0_dt, 0, sizeof(src0_dt));
+        src0_dt.type     = t0->type;
+        memcpy(src0_dt.ne, t0->ne, sizeof(src0_dt.ne));
+        memcpy(src0_dt.nb, t0->nb, sizeof(src0_dt.nb));
+        memcpy(src0_dt.op_params, t0->op_params, sizeof(src0_dt.op_params));
+        src0_dt.flags    = t0->flags;
+        src0_dt.data     = (void *)(base + t0->data_offset);
+        src0_dt.data_len = t0->data_len;
+
+        if (op->src1_idx >= 0) {
+            const hex_tensor_desc * t1 = &tens[op->src1_idx];
+            memset(&src1_dt_buf, 0, sizeof(src1_dt_buf));
+            src1_dt_buf.type     = t1->type;
+            memcpy(src1_dt_buf.ne, t1->ne, sizeof(src1_dt_buf.ne));
+            memcpy(src1_dt_buf.nb, t1->nb, sizeof(src1_dt_buf.nb));
+            memcpy(src1_dt_buf.op_params, t1->op_params, sizeof(src1_dt_buf.op_params));
+            src1_dt_buf.flags    = t1->flags;
+            src1_dt_buf.data     = (void *)(base + t1->data_offset);
+            src1_dt_buf.data_len = t1->data_len;
+            src1_dt_ptr = &src1_dt_buf;
+        }
+        if (op->src2_idx >= 0) {
+            const hex_tensor_desc * t2 = &tens[op->src2_idx];
+            memset(&src2_dt_buf, 0, sizeof(src2_dt_buf));
+            src2_dt_buf.type     = t2->type;
+            memcpy(src2_dt_buf.ne, t2->ne, sizeof(src2_dt_buf.ne));
+            memcpy(src2_dt_buf.nb, t2->nb, sizeof(src2_dt_buf.nb));
+            memcpy(src2_dt_buf.op_params, t2->op_params, sizeof(src2_dt_buf.op_params));
+            src2_dt_buf.flags    = t2->flags;
+            src2_dt_buf.data     = (void *)(base + t2->data_offset);
+            src2_dt_buf.data_len = t2->data_len;
+            src2_dt_ptr = &src2_dt_buf;
+        }
+
+        const hex_tensor_desc * td = &tens[op->dst_idx];
+        memset(&dst_dt, 0, sizeof(dst_dt));
+        dst_dt.type     = td->type;
+        memcpy(dst_dt.ne, td->ne, sizeof(dst_dt.ne));
+        memcpy(dst_dt.nb, td->nb, sizeof(dst_dt.nb));
+        memcpy(dst_dt.op_params, td->op_params, sizeof(dst_dt.op_params));
+        dst_dt.flags    = td->flags;
+        dst_dt.data     = (void *)(base + td->data_offset);
+        dst_dt.data_len = td->data_len;
+
+        int op_ret = 0;
+        switch (op->opcode) {
+            case GGML_OP_SUB:
+                ggmlop_dsp_sub(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_ADD:
+                ggmlop_dsp_add(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_MUL:
+                ggmlop_dsp_mul(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_DIV:
+                ggmlop_dsp_div(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_MUL_MAT:
+                op_ret = ggmlop_dsp_mulmat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_RMS_NORM:
+                op_ret = ggmlop_dsp_rmsnorm(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_ROPE:
+                op_ret = ggmlop_dsp_rope(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
+            case GGML_OP_SOFT_MAX:
+                op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_UNARY:
+                op_ret = ggmlop_dsp_silu(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_SCALE:
+                op_ret = ggmlop_dsp_scale(h, &src0_dt, &dst_dt); break;
+            case GGML_OP_CPY:
+                op_ret = ggmlop_dsp_cpy(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            default:
+                GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
+                return AEE_EUNSUPPORTED;
+        }
+        if (op_ret != 0) return op_ret;
+    }
+
+    __asm__ __volatile__("" ::: "memory");
+    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx < hdr->n_tensors) {
+        uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx].data_offset;
+        if (batch_size > last_off + 4)
+            (void) *(volatile const int *)(base + last_off);
+    }
+    __asm__ __volatile__("" ::: "memory");
+
+    return AEE_SUCCESS;
+}
+
+AEEResult ggmlop_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
+    (void)h;
+    int32_t fd = (int32_t)ion_fd;
+    uint64_t size = ((uint64_t)size_hi << 32) | (uint64_t)size_lo;
+
+    GGMLHEXAGON_LOG_INFO("[ION-REG-SCALAR] fd=%d, size=%llu bytes (%dMB)",
+                         fd, (unsigned long long)size, (int32_t)(size >> 20));
+
+#if __HVX_ARCH__ > 73
+    void * va = HAP_mmap2(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
+#else
+    void * va = HAP_mmap(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
+#endif
+
+    if (va == (void *)-1) {
+        g_ion_dsp_base = NULL;
+        GGMLHEXAGON_LOG_ERROR("[ION-REG-SCALAR] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
+        return AEE_EFAILED;
+    }
+
+    g_ion_dsp_base = va;
+    GGMLHEXAGON_LOG_INFO("[ION-REG-SCALAR] HAP_mmap2 OK: va=%p (fd=%d)", va, fd);
     return AEE_SUCCESS;
 }
