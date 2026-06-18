@@ -721,8 +721,8 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_ADD1, 0, nullptr, nullptr},
         {false, GGML_OP_ACC, 0, nullptr, nullptr},
         {true,  GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},
-        {false, GGML_OP_MUL, 2, nullptr, nullptr},
-        {false, GGML_OP_DIV, 2, nullptr, nullptr},
+        {true,  GGML_OP_MUL, 2, "ggmlop_dsp_mul", nullptr},
+        {true,  GGML_OP_DIV, 2, "ggmlop_dsp_div", nullptr},
         {false, GGML_OP_SQR, 0, nullptr, nullptr},
         {false, GGML_OP_SQRT, 0, nullptr, nullptr},
         {false, GGML_OP_LOG, 0, nullptr, nullptr},
@@ -748,7 +748,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
         {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
         {false, GGML_OP_SET, 0, nullptr, nullptr},
-        {false, GGML_OP_CPY, 0, nullptr, nullptr},
+        {true,  GGML_OP_CPY,      0, "ggmlop_dsp_cpy",     nullptr},
         {false, GGML_OP_CONT, 0, nullptr, nullptr},
         {false, GGML_OP_RESHAPE, 0, nullptr, nullptr},
         {false, GGML_OP_VIEW, 0, nullptr, nullptr},
@@ -760,9 +760,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_DIAG, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-        {false, GGML_OP_SOFT_MAX, 0, nullptr, nullptr},
+        {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
         {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_ROPE, 0, nullptr, nullptr},
+        {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
         {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_CLAMP, 0, nullptr, nullptr},
         {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
@@ -834,7 +834,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
     {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
     {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
-    {false, GGML_OP_DIV,      0, nullptr, nullptr},
+    {true,  GGML_OP_DIV,      2, "ggmlop_dsp_div",      nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
     {false, GGML_OP_LOG,      0, nullptr, nullptr},
@@ -861,7 +861,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
     {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
-    {false, GGML_OP_CPY,      0, nullptr, nullptr},
+    {true,  GGML_OP_CPY,      0, "ggmlop_dsp_cpy",      nullptr},
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
     {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
@@ -873,9 +873,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_DIAG,     0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-    {false, GGML_OP_SOFT_MAX, 0, nullptr, nullptr},
+    {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
     {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-    {false, GGML_OP_ROPE,     0, nullptr, nullptr},
+    {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
     {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_CLAMP,    0, nullptr, nullptr},
     {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
@@ -6335,17 +6335,15 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return supported;
             }
         }
-        case GGML_OP_SOFT_MAX:{
+        case GGML_OP_SOFT_MAX:
+        {
             if (!ggml_is_contiguous(op_tensor))
                 return false;
             if (!ggml_are_same_shape(src0, op_tensor))
                 return false;
-        }
-        case GGML_OP_RMS_NORM:
-        {
-            ggmlhexagon_dump_op_info(op_tensor);
             if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
                 return false;
+            if (src1 != nullptr) return false; // mask not supported
             return true;
         }
         case GGML_OP_UNARY:
@@ -6360,6 +6358,37 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
         case GGML_OP_SCALE:
         {
             if (src0->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_RMS_NORM:
+        {
+            if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_MUL:
+        case GGML_OP_DIV:
+        {
+            if (src0->type != GGML_TYPE_F32)
+                return false;
+            if (!src1 || src1->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
+        case GGML_OP_ROPE:
+        {
+            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
+                return false;
+            if (!src1 || src1->type != GGML_TYPE_I32)
+                return false;
+            return true;
+        }
+        case GGML_OP_CPY:
+        {
+            // CPY kernel only supports f16<->f32, not quantized types
+            if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) ||
+                (op_tensor->type != GGML_TYPE_F16 && op_tensor->type != GGML_TYPE_F32))
                 return false;
             return true;
         }
@@ -6511,10 +6540,9 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         }
         case GGML_OP_CPY:
         {
-            // Copy: src0 -> dst (may involve type conversion f16<->f32)
-            if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32)
-                return false;
-            if (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)
+            // CPY kernel only supports f16<->f32, not quantized types
+            if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) ||
+                (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32))
                 return false;
             return true;
         }
