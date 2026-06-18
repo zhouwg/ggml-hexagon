@@ -734,9 +734,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_MEAN, 0, nullptr, nullptr},
         {false, GGML_OP_ARGMAX, 0, nullptr, nullptr},
         {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
-        {false, GGML_OP_REPEAT, 0, nullptr, nullptr},
+        {false, GGML_OP_REPEAT,    0, "ggmlop_dsp_repeat",    nullptr},
         {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_CONCAT, 0, nullptr, nullptr},
+        {false, GGML_OP_CONCAT,    0, "ggmlop_dsp_concat",    nullptr},
         {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_NORM, 0, nullptr, nullptr},
         {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
@@ -754,11 +754,11 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_VIEW, 0, nullptr, nullptr},
         {false, GGML_OP_PERMUTE, 0, nullptr, nullptr},
         {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
-        {false, GGML_OP_GET_ROWS, 0, nullptr, nullptr},
+        {false, GGML_OP_GET_ROWS,         2, "ggmlop_dsp_getrows",    nullptr},
         {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG, 0, nullptr, nullptr},
-        {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
+        {false, GGML_OP_DIAG_MASK_INF,    2, "ggmlop_dsp_diag_mask_inf", nullptr},
         {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
         {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
         {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
@@ -846,9 +846,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_MEAN,     0, nullptr, nullptr},
     {false, GGML_OP_ARGMAX,   0, nullptr, nullptr},
     {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
-    {false, GGML_OP_REPEAT,   0, nullptr, nullptr},
+    {false, GGML_OP_REPEAT,     0, "ggmlop_dsp_repeat",     nullptr},
     {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
-    {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
+    {false, GGML_OP_CONCAT,     0, "ggmlop_dsp_concat",     nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
         {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
@@ -867,11 +867,11 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
     {false, GGML_OP_PERMUTE,  0, nullptr, nullptr},
     {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
-    {false, GGML_OP_GET_ROWS, 0, nullptr, nullptr},
+    {false, GGML_OP_GET_ROWS,         2, "ggmlop_dsp_getrows",    nullptr},
     {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
     {false, GGML_OP_DIAG,     0, nullptr, nullptr},
-    {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
+    {false, GGML_OP_DIAG_MASK_INF,   2, "ggmlop_dsp_diag_mask_inf", nullptr},
     {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
     {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},
     {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
@@ -6392,6 +6392,41 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return false;
             return true;
         }
+        case GGML_OP_GET_ROWS:
+        {
+            // GET_ROWS: src0=quantized weight, src1=i32 indices, dst=f32
+            if (!src1 || src1->type != GGML_TYPE_I32)
+                return false;
+            if (op_tensor->type != GGML_TYPE_F32)
+                return false;
+            // Only support quantized types that our DSP kernel handles
+            if (src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q5_K)
+                return false;
+            return true;
+        }
+        case GGML_OP_CONCAT:
+        {
+            // CONCAT: same type for all operands
+            if (src0->type != op_tensor->type)
+                return false;
+            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
+                return false;
+            return true;
+        }
+        case GGML_OP_REPEAT:
+        {
+            // REPEAT: broadcast src0 to dst shape (same type)
+            if (src0->type != op_tensor->type)
+                return false;
+            return true;
+        }
+        case GGML_OP_DIAG_MASK_INF:
+        {
+            // DIAG_MASK_INF: f32 input -> f32 output with -inf mask
+            if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
+                return false;
+            return true;
+        }
         default:
             break;
     }
@@ -6543,6 +6578,32 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
             // CPY kernel only supports f16<->f32, not quantized types
             if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) ||
                 (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32))
+                return false;
+            return true;
+        }
+        case GGML_OP_GET_ROWS:
+        {
+            if (!src1 || src1->type != GGML_TYPE_I32)
+                return false;
+            if (dst->type != GGML_TYPE_F32)
+                return false;
+            if (src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q5_K)
+                return false;
+            return true;
+        }
+        case GGML_OP_CONCAT:
+        {
+            if (src0->type != dst->type)
+                return false;
+            return true;
+        }
+        case GGML_OP_REPEAT:
+        {
+            return true; // broadcast always ok
+        }
+        case GGML_OP_DIAG_MASK_INF:
+        {
+            if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
                 return false;
             return true;
         }

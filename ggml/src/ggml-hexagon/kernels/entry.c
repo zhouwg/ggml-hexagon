@@ -922,6 +922,12 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
                 op_ret = ggmlop_dsp_scale(h, &src0_dt, &dst_dt); break;
             case GGML_OP_CPY:
                 op_ret = ggmlop_dsp_cpy(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_CONCAT:
+                op_ret = ggmlop_dsp_concat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_REPEAT:
+                op_ret = ggmlop_dsp_repeat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_DIAG_MASK_INF:
+                op_ret = ggmlop_dsp_diag_mask_inf(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
             default:
                 GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
                 return AEE_EUNSUPPORTED;
