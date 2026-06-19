@@ -10,12 +10,6 @@ typedef struct {
     worker_synctoken_t *synctoken;
 } mul_thread_data_t;
 
-static inline void ggml_mul_f32_scalar(const int n, float * z, const float * x, const float * y) {
-    #pragma unroll(4)
-    for (int i = 0; i < n; ++i)
-        z[i] = x[i] * y[i];
-}
-
 static void mul_thread_func(void * data) {
     mul_thread_data_t * tdata = (mul_thread_data_t *) data;
     const ggml_tensor * src0 = tdata->src0;
@@ -24,82 +18,122 @@ static void mul_thread_func(void * data) {
     const int64_t start_idx = tdata->start_idx;
     const int64_t end_idx = tdata->end_idx;
 
-    // Use dst shape for index decomposition (dst = broadcasted result shape)
-    // ggml row-major: flat_idx = i0 + i1*ne0 + i2*ne0*ne1 + i3*ne0*ne1*ne2
-    const int64_t ne0 = dst->ne[0], ne1 = dst->ne[1];
-    const int64_t ne2 = dst->ne[2], ne3 = dst->ne[3];
+    const int64_t ne0  = dst->ne[0];
+    const int64_t ne1  = dst->ne[1];
+    const int64_t ne2  = dst->ne[2];
+    const int64_t ne3  = dst->ne[3];
+    const int64_t nb0  = dst->nb[0];
+    const int64_t nb1  = dst->nb[1];
+    const int64_t nb2  = dst->nb[2];
+    const int64_t nb3  = dst->nb[3];
+
+    const int64_t nr  = ne1 * ne2 * ne3;
+    const int64_t ir0 = start_idx / ne0;
+    const int64_t ir1 = (end_idx + ne0 - 1) / ne0;
 
     if (src0->type == GGML_TYPE_F16) {
-        uint16_t * dst_ptr  = (uint16_t *)dst->data;
-        uint16_t * src0_ptr = (uint16_t *)src0->data;
-        uint16_t * src1_ptr = (uint16_t *)src1->data;
+        uint16_t *       dst_data  = (uint16_t *)dst->data;
+        const uint16_t * src0_data = (const uint16_t *)src0->data;
+        const uint16_t * src1_data = (const uint16_t *)src1->data;
 
-        for (int64_t i = start_idx; i < end_idx; ++i) {
-            int64_t i0 = i % ne0;
-            int64_t r  = i / ne0;
-            int64_t i1 = r % ne1;
-            int64_t r2 = r / ne1;
-            int64_t i2 = r2 % ne2;
-            int64_t i3 = r2 / ne2;
+        const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+        const int64_t nb00 = src0->nb[0], nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
+        const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1], ne12 = src1->ne[2], ne13 = src1->ne[3];
+        const int64_t nb10 = src1->nb[0], nb11 = src1->nb[1], nb12 = src1->nb[2], nb13 = src1->nb[3];
 
-            // Broadcast-aware coordinate mapping via modulo
-            int64_t s0_0 = i0 % src0->ne[0];
-            int64_t s0_1 = i1 % src0->ne[1];
-            int64_t s0_2 = i2 % src0->ne[2];
-            int64_t s0_3 = i3 % src0->ne[3];
+        bool src1_contig_rows = (ne10 == ne00 || ne10 == 1) &&
+                                (nb10 == sizeof(uint16_t)) &&
+                                (ne11 == 1 && ne12 == 1 && ne13 == 1);
 
-            int64_t s1_0 = i0 % src1->ne[0];
-            int64_t s1_1 = i1 % src1->ne[1];
-            int64_t s1_2 = i2 % src1->ne[2];
-            int64_t s1_3 = i3 % src1->ne[3];
+        for (int64_t ir = ir0; ir < ir1 && ir < nr; ++ir) {
+            const int64_t i03 = ir / (ne02 * ne01);
+            const int64_t i02 = (ir - i03 * ne02 * ne01) / ne01;
+            const int64_t i01 = ir - i03 * ne02 * ne01 - i02 * ne01;
 
-            int64_t off0 = s0_0*src0->nb[0] + s0_1*src0->nb[1] + s0_2*src0->nb[2] + s0_3*src0->nb[3];
-            int64_t off1 = s1_0*src1->nb[0] + s1_1*src1->nb[1] + s1_2*src1->nb[2] + s1_3*src1->nb[3];
+            const int64_t i13 = i03 % ne13;
+            const int64_t i12 = i02 % ne12;
+            const int64_t i11 = i01 % ne11;
 
-            float f0 = ggml_compute_fp16_to_fp32(src0_ptr[off0 >> 1]);
-            float f1 = ggml_compute_fp16_to_fp32(src1_ptr[off1 >> 1]);
-            dst_ptr[i] = ggml_compute_fp32_to_fp16(f0 * f1);
+            uint16_t *       dst_row  = (uint16_t *)((uint8_t *)dst_data  + i03 * nb3  + i02 * nb2  + i01 * nb1);
+            const uint16_t * src0_row = (const uint16_t *)((const uint8_t *)src0_data + i03 * nb03 + i02 * nb02 + i01 * nb01);
+            const uint16_t * src1_row = (const uint16_t *)((const uint8_t *)src1_data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+
+            int64_t row_start = ir * ne0;
+            int64_t eff_start = (start_idx > row_start) ? start_idx - row_start : 0;
+            int64_t eff_end   = ((row_start + ne0) < end_idx) ? ne0 : end_idx - row_start;
+
+            if (src1_contig_rows) {
+                int64_t nr0 = ne00 / ne10;
+                for (int64_t r = 0; r < nr0; ++r) {
+                    int64_t seg_start = r * ne10;
+                    int64_t seg_end   = seg_start + ne10;
+                    if (seg_end <= eff_start || seg_start >= eff_end) continue;
+                    int64_t js = (seg_start > eff_start) ? seg_start : eff_start;
+                    int64_t je = (seg_end < eff_end) ? seg_end : eff_end;
+                    for (int64_t j = js; j < je; ++j) {
+                        float f0 = ggml_compute_fp16_to_fp32(src0_row[j]);
+                        float f1 = ggml_compute_fp16_to_fp32(src1_row[j - seg_start]);
+                        dst_row[j] = ggml_compute_fp32_to_fp16(f0 * f1);
+                    }
+                }
+            } else {
+                for (int64_t j = eff_start; j < eff_end; ++j) {
+                    int64_t j10 = j % ne10;
+                    float f0 = ggml_compute_fp16_to_fp32(src0_row[j]);
+                    float f1 = ggml_compute_fp16_to_fp32(src1_row[j10]);
+                    dst_row[j] = ggml_compute_fp32_to_fp16(f0 * f1);
+                }
+            }
         }
     } else {
-        float * dst_ptr  = (float *)dst->data;
-        float * src0_ptr = (float *)src0->data;
-        float * src1_ptr = (float *)src1->data;
+        float *       dst_data  = (float *)dst->data;
+        const float * src0_data = (const float *)src0->data;
+        const float * src1_data = (const float *)src1->data;
 
-        bool need_broadcast = (src0->ne[0] != ne0 || src0->ne[1] != ne1 ||
-                               src0->ne[2] != ne2 || src0->ne[3] != ne3 ||
-                               src1->ne[0] != ne0 || src1->ne[1] != ne1 ||
-                               src1->ne[2] != ne2 || src1->ne[3] != ne3);
+        const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+        const int64_t nb00 = src0->nb[0], nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
+        const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1], ne12 = src1->ne[2], ne13 = src1->ne[3];
+        const int64_t nb10 = src1->nb[0], nb11 = src1->nb[1], nb12 = src1->nb[2], nb13 = src1->nb[3];
 
-        bool contig = !need_broadcast &&
-                      (src0->nb[0] == sizeof(float) && src0->nb[1] == src0->ne[0]*sizeof(float) &&
-                       src1->nb[0] == sizeof(float) && src1->nb[1] == src1->ne[0]*sizeof(float));
+        bool src1_contig_rows = (ne10 == ne00 || ne10 == 1) &&
+                                (nb10 == sizeof(float)) &&
+                                (ne11 == 1 && ne12 == 1 && ne13 == 1);
 
-        if (contig) {
-            const int n = end_idx - start_idx;
-            ggml_mul_f32_scalar(n, dst_ptr + start_idx, src0_ptr + start_idx, src1_ptr + start_idx);
-        } else {
-            for (int64_t i = start_idx; i < end_idx; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
+        const int64_t nr  = ne1 * ne2 * ne3;
+        const int64_t ir0_mt = start_idx / ne0;
+        const int64_t ir1_mt = (end_idx + ne0 - 1) / ne0;
 
-                int64_t s0_0 = i0 % src0->ne[0];
-                int64_t s0_1 = i1 % src0->ne[1];
-                int64_t s0_2 = i2 % src0->ne[2];
-                int64_t s0_3 = i3 % src0->ne[3];
+        for (int64_t ir = ir0_mt; ir < ir1_mt && ir < nr; ++ir) {
+            const int64_t i03 = ir / (ne02 * ne01);
+            const int64_t i02 = (ir - i03*ne02*ne01) / ne01;
+            const int64_t i01 = ir - i03*ne02*ne01 - i02*ne01;
 
-                int64_t s1_0 = i0 % src1->ne[0];
-                int64_t s1_1 = i1 % src1->ne[1];
-                int64_t s1_2 = i2 % src1->ne[2];
-                int64_t s1_3 = i3 % src1->ne[3];
+            const int64_t i13 = i03 % ne13;
+            const int64_t i12 = i02 % ne12;
+            const int64_t i11 = i01 % ne11;
 
-                int64_t off0 = s0_0*src0->nb[0] + s0_1*src0->nb[1] + s0_2*src0->nb[2] + s0_3*src0->nb[3];
-                int64_t off1 = s1_0*src1->nb[0] + s1_1*src1->nb[1] + s1_2*src1->nb[2] + s1_3*src1->nb[3];
+            float *       dst_row  = (float *)((uint8_t *)dst_data  + i03*nb3  + i02*nb2  + i01*nb1);
+            const float * src0_row = (float *)((const uint8_t *)src0_data + i03*nb03 + i02*nb02 + i01*nb01);
+            const float * src1_row = (float *)((const uint8_t *)src1_data + i13*nb13 + i12*nb12 + i11*nb11);
 
-                dst_ptr[i] = src0_ptr[off0 >> 2] * src1_ptr[off1 >> 2];
+            int64_t row_start = ir * ne0;
+            int64_t eff_start = (start_idx > row_start) ? start_idx - row_start : 0;
+            int64_t eff_end   = ((row_start + ne0) < end_idx) ? ne0 : end_idx - row_start;
+
+            if (src1_contig_rows) {
+                int64_t nr0 = ne00 / ne10;
+                for (int64_t r = 0; r < nr0; ++r) {
+                    int64_t seg_start = r * ne10;
+                    int64_t seg_end   = seg_start + ne10;
+                    if (seg_end <= eff_start || seg_start >= eff_end) continue;
+                    int64_t js = (seg_start > eff_start) ? seg_start : eff_start;
+                    int64_t je = (seg_end < eff_end) ? seg_end : eff_end;
+                    for (int64_t j = js; j < je; ++j)
+                        dst_row[j] = src0_row[j] * src1_row[j - seg_start];
+                }
+            } else {
+                for (int64_t j = eff_start; j < eff_end; ++j)
+                    dst_row[j] = src0_row[j] * src1_row[j % ne10];
             }
         }
     }
@@ -109,109 +143,105 @@ static void mul_thread_func(void * data) {
     }
 }
 
-static void ggml_compute_forward_mul_f32(
-        const struct ggml_tensor * src0,
-        const struct ggml_tensor * src1,
-        struct ggml_tensor * dst) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
-    uint64_t start_time = ggml_time_us();
-
-    const int64_t n = ggml_nelements(dst);
-    const int64_t ne0 = dst->ne[0], ne1 = dst->ne[1];
-    const int64_t ne2 = dst->ne[2], ne3 = dst->ne[3];
+/* Single-threaded row-iteration MUL — matches CPU binary-ops.cpp apply_binary_op */
+static void ggml_mul_singlethread(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    const int64_t ne0  = dst->ne[0], ne1  = dst->ne[1], ne2  = dst->ne[2], ne3  = dst->ne[3];
+    const int64_t nb0  = dst->nb[0], nb1  = dst->nb[1], nb2  = dst->nb[2], nb3  = dst->nb[3];
 
     if (src0->type == GGML_TYPE_F16) {
-        uint16_t * dst_ptr  = (uint16_t *)dst->data;
-        uint16_t * src0_ptr = (uint16_t *)src0->data;
-        uint16_t * src1_ptr = (uint16_t *)src1->data;
+        uint16_t *       dst_data  = (uint16_t *)dst->data;
+        const uint16_t * src0_data = (const uint16_t *)src0->data;
+        const uint16_t * src1_data = (const uint16_t *)src1->data;
 
-        for (int64_t i = 0; i < n; ++i) {
-            int64_t i0 = i % ne0;
-            int64_t r  = i / ne0;
-            int64_t i1 = r % ne1;
-            int64_t r2 = r / ne1;
-            int64_t i2 = r2 % ne2;
-            int64_t i3 = r2 / ne2;
+        const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+        const int64_t nb00 = src0->nb[0], nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
+        const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1], ne12 = src1->ne[2], ne13 = src1->ne[3];
+        const int64_t nb10 = src1->nb[0], nb11 = src1->nb[1], nb12 = src1->nb[2], nb13 = src1->nb[3];
 
-            int64_t s0_0 = i0 % src0->ne[0];
-            int64_t s0_1 = i1 % src0->ne[1];
-            int64_t s0_2 = i2 % src0->ne[2];
-            int64_t s0_3 = i3 % src0->ne[3];
+        bool src1_contig_rows = (ne10 == ne00 || ne10 == 1) &&
+                                (nb10 == sizeof(uint16_t)) &&
+                                (ne11 == 1 && ne12 == 1 && ne13 == 1);
 
-            int64_t s1_0 = i0 % src1->ne[0];
-            int64_t s1_1 = i1 % src1->ne[1];
-            int64_t s1_2 = i2 % src1->ne[2];
-            int64_t s1_3 = i3 % src1->ne[3];
+        for (int64_t i01 = 0; i01 < ne1; ++i01) {
+            for (int64_t i02 = 0; i02 < ne2; ++i02) {
+                for (int64_t i03 = 0; i03 < ne3; ++i03) {
+                    const int64_t i13 = i03 % ne13;
+                    const int64_t i12 = i02 % ne12;
+                    const int64_t i11 = i01 % ne11;
 
-            int64_t off0 = s0_0*src0->nb[0] + s0_1*src0->nb[1] + s0_2*src0->nb[2] + s0_3*src0->nb[3];
-            int64_t off1 = s1_0*src1->nb[0] + s1_1*src1->nb[1] + s1_2*src1->nb[2] + s1_3*src1->nb[3];
+                    uint16_t *       dst_row  = (uint16_t *)((uint8_t *)dst_data  + i03*nb3  + i02*nb2  + i01*nb1);
+                    const uint16_t * src0_row = (const uint16_t *)((const uint8_t *)src0_data + i03*nb03 + i02*nb02 + i01*nb01);
+                    const uint16_t * src1_row = (const uint16_t *)((const uint8_t *)src1_data + i13*nb13 + i12*nb12 + i11*nb11);
 
-            float f0 = ggml_compute_fp16_to_fp32(src0_ptr[off0 >> 1]);
-            float f1 = ggml_compute_fp16_to_fp32(src1_ptr[off1 >> 1]);
-            dst_ptr[i] = ggml_compute_fp32_to_fp16(f0 * f1);
+                    if (src1_contig_rows) {
+                        int64_t nr0 = ne00 / ne10;
+                        for (int64_t r = 0; r < nr0; ++r) {
+                            for (int64_t j = 0; j < ne10; ++j) {
+                                float f0 = ggml_compute_fp16_to_fp32(src0_row[r*ne10 + j]);
+                                float f1 = ggml_compute_fp16_to_fp32(src1_row[j]);
+                                dst_row[r*ne10 + j] = ggml_compute_fp32_to_fp16(f0 * f1);
+                            }
+                        }
+                    } else {
+                        for (int64_t j = 0; j < ne0; ++j) {
+                            int64_t j10 = j % ne10;
+                            float f0 = ggml_compute_fp16_to_fp32(src0_row[j]);
+                            float f1 = ggml_compute_fp16_to_fp32(src1_row[j10]);
+                            dst_row[j] = ggml_compute_fp32_to_fp16(f0 * f1);
+                        }
+                    }
+                }
+            }
         }
     } else {
-        float * dst_ptr  = (float *)dst->data;
-        float * src0_ptr = (float *)src0->data;
-        float * src1_ptr = (float *)src1->data;
+        float *       dst_data  = (float *)dst->data;
+        const float * src0_data = (const float *)src0->data;
+        const float * src1_data = (const float *)src1->data;
 
-        bool need_broadcast = (src0->ne[0] != ne0 || src0->ne[1] != ne1 ||
-                               src0->ne[2] != ne2 || src0->ne[3] != ne3 ||
-                               src1->ne[0] != ne0 || src1->ne[1] != ne1 ||
-                               src1->ne[2] != ne2 || src1->ne[3] != ne3);
+        const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+        const int64_t nb00 = src0->nb[0], nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
+        const int64_t ne10 = src1->ne[0], ne11 = src1->ne[1], ne12 = src1->ne[2], ne13 = src1->ne[3];
+        const int64_t nb10 = src1->nb[0], nb11 = src1->nb[1], nb12 = src1->nb[2], nb13 = src1->nb[3];
 
-        bool contig = !need_broadcast &&
-                      (src0->nb[0] == sizeof(float) && src0->nb[1] == src0->ne[0]*sizeof(float) &&
-                       src1->nb[0] == sizeof(float) && src1->nb[1] == src1->ne[0]*sizeof(float));
+        bool src1_contig_rows = (ne10 == ne00 || ne10 == 1) &&
+                                (nb10 == sizeof(float)) &&
+                                (ne11 == 1 && ne12 == 1 && ne13 == 1);
 
-        if (contig) {
-            ggml_mul_f32_scalar(n, dst_ptr, src0_ptr, src1_ptr);
-        } else {
-            for (int64_t i = 0; i < n; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
+        for (int64_t i01 = 0; i01 < ne1; ++i01) {
+            for (int64_t i02 = 0; i02 < ne2; ++i02) {
+                for (int64_t i03 = 0; i03 < ne3; ++i03) {
+                    const int64_t i13 = i03 % ne13;
+                    const int64_t i12 = i02 % ne12;
+                    const int64_t i11 = i01 % ne11;
 
-                int64_t s0_0 = i0 % src0->ne[0];
-                int64_t s0_1 = i1 % src0->ne[1];
-                int64_t s0_2 = i2 % src0->ne[2];
-                int64_t s0_3 = i3 % src0->ne[3];
+                    float *       dst_row  = (float *)((uint8_t *)dst_data  + i03*nb3  + i02*nb2  + i01*nb1);
+                    const float * src0_row = (float *)((const uint8_t *)src0_data + i03*nb03 + i02*nb02 + i01*nb01);
+                    const float * src1_row = (float *)((const uint8_t *)src1_data + i13*nb13 + i12*nb12 + i11*nb11);
 
-                int64_t s1_0 = i0 % src1->ne[0];
-                int64_t s1_1 = i1 % src1->ne[1];
-                int64_t s1_2 = i2 % src1->ne[2];
-                int64_t s1_3 = i3 % src1->ne[3];
-
-                int64_t off0 = s0_0*src0->nb[0] + s0_1*src0->nb[1] + s0_2*src0->nb[2] + s0_3*src0->nb[3];
-                int64_t off1 = s1_0*src1->nb[0] + s1_1*src1->nb[1] + s1_2*src1->nb[2] + s1_3*src1->nb[3];
-
-                dst_ptr[i] = src0_ptr[off0 >> 2] * src1_ptr[off1 >> 2];
+                    if (src1_contig_rows) {
+                        int64_t nr0 = ne00 / ne10;
+                        for (int64_t r = 0; r < nr0; ++r) {
+                            for (int64_t j = 0; j < ne10; ++j)
+                                dst_row[r*ne10 + j] = src0_row[r*ne10 + j] * src1_row[j];
+                        }
+                    } else {
+                        for (int64_t j = 0; j < ne0; ++j)
+                            dst_row[j] = src0_row[j] * src1_row[j % ne10];
+                    }
+                }
             }
         }
     }
-
-    uint64_t end_time = ggml_time_us();
-    uint64_t duration = (end_time - start_time);
-    GGMLHEXAGON_LOG_DEBUG("duration %llu us", duration);
-#if !GGMLHEXAGON_DEBUG
-    UNUSED(duration);
-#endif
-
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
 
 static int ggmlop_dsp_mul_singlethread(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
-    ggml_compute_forward_mul_f32(src0, src1, dst);
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
+    GGML_UNUSED(h);
+    ggml_mul_singlethread(src0, src1, dst);
     return 0;
 }
 
 static int ggmlop_dsp_mul_multithread(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
+    GGML_UNUSED(h);
 
     const int64_t n = ggml_nelements(src0);
     int num_threads = num_workers;
@@ -266,23 +296,11 @@ static int ggmlop_dsp_mul_multithread(remote_handle64 h, const ggml_tensor * src
 
     worker_pool_synctoken_wait(&synctoken);
 
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return 0;
 }
 
 int ggmlop_dsp_mul(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
-    char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_MUL, src0, src1, tempbuf, 256);
-
-    int64_t begin_time = ggml_time_us();
-    if (ggmlop_get_thread_counts() > 1) {
-        ggmlop_dsp_mul_multithread(h, src0, src1, dst);
-    } else {
-        ggmlop_dsp_mul_singlethread(h, src0, src1, dst);
-    }
-    int64_t end_time = ggml_time_us();
-    GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
-    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
-    return 0;
+    /* For now, use single-threaded row-iteration.
+     * Multi-thread requires guarantee that dst does not alias src0. */
+    return ggmlop_dsp_mul_singlethread(h, src0, src1, dst);
 }

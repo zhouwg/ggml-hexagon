@@ -359,7 +359,8 @@ struct hexagon_appcfg_t {
     int profiler_counts;        // threshold of counts in profiler
     int thread_counts;          // thread_counts on cDSP side
     int mulmat_algotype;        // algorithm type of mulmat on cDSP side
-    int enable_offload_cgraph;  // enable/disable offload cgraph or multiple op to cDSP directly
+    int offload_cgraph_type;    // offload type on AP side
+    int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on cDSP side
     const char * cfgfilename;
     const char * runtime_libpath;
     char version[GGMLHEXAGON_TMPBUF_LEN];
@@ -384,7 +385,8 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .profiler_counts        = 100,
         .thread_counts          = 4,
         .mulmat_algotype        = 0,
-        .enable_offload_cgraph  = 0,
+        .offload_cgraph_type    = 0,
+        .dump_diag_info         = 0,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
     #if defined(STANDARD_ANDROID_APP)
@@ -718,9 +720,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_ADD_ID, 0, nullptr, nullptr},
         {false, GGML_OP_ADD1, 0, nullptr, nullptr},
         {false, GGML_OP_ACC, 0, nullptr, nullptr},
-        {false, GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},  // disabled for binary-search quality debug
-        {true,  GGML_OP_MUL, 2, "ggmlop_dsp_mul", nullptr},
-        {false, GGML_OP_DIV, 2, "ggmlop_dsp_div", nullptr},  // disabled for binary-search quality debug
+        {true,  GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},
+        {false, GGML_OP_MUL, 2, nullptr, nullptr},
+        {false, GGML_OP_DIV, 2, nullptr, nullptr},
         {false, GGML_OP_SQR, 0, nullptr, nullptr},
         {false, GGML_OP_SQRT, 0, nullptr, nullptr},
         {false, GGML_OP_LOG, 0, nullptr, nullptr},
@@ -732,9 +734,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_MEAN, 0, nullptr, nullptr},
         {false, GGML_OP_ARGMAX, 0, nullptr, nullptr},
         {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
-        {false, GGML_OP_REPEAT,    0, "ggmlop_dsp_repeat",    nullptr},
+        {false, GGML_OP_REPEAT, 0, nullptr, nullptr},
         {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_CONCAT,    0, "ggmlop_dsp_concat",    nullptr},
+        {false, GGML_OP_CONCAT, 0, nullptr, nullptr},
         {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_NORM, 0, nullptr, nullptr},
         {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
@@ -746,21 +748,21 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
         {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
         {false, GGML_OP_SET, 0, nullptr, nullptr},
-        {false, GGML_OP_CPY,      0, "ggmlop_dsp_cpy",     nullptr},  // disabled for binary-search quality debug
+        {false, GGML_OP_CPY, 0, nullptr, nullptr},
         {false, GGML_OP_CONT, 0, nullptr, nullptr},
         {false, GGML_OP_RESHAPE, 0, nullptr, nullptr},
         {false, GGML_OP_VIEW, 0, nullptr, nullptr},
         {false, GGML_OP_PERMUTE, 0, nullptr, nullptr},
         {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
-        {false, GGML_OP_GET_ROWS,         2, "ggmlop_dsp_getrows",    nullptr},
+        {false, GGML_OP_GET_ROWS, 0, nullptr, nullptr},
         {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG, 0, nullptr, nullptr},
-        {false, GGML_OP_DIAG_MASK_INF,    2, "ggmlop_dsp_diag_mask_inf", nullptr},
+        {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
         {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-        {false, GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},  // disabled: runs on CPU (never reached DSP in ION path)
+        {false, GGML_OP_SOFT_MAX, 0, nullptr, nullptr},
         {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-        {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
+        {false, GGML_OP_ROPE, 0, nullptr, nullptr},
         {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_CLAMP, 0, nullptr, nullptr},
         {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
@@ -798,7 +800,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
         {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
         {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-        {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},  // required by static_assert; disabled in _special for debug
+        {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -819,7 +821,7 @@ static_assert(ggmlhexagon_k_op_caps[GGML_OP_UNARY].supported,    "GGML_OP_UNARY 
 static_assert(std::size(ggmlhexagon_k_op_caps) == (static_cast<size_t>(GGML_OP_COUNT)),
               "pls check ggmlhexagon_k_op_caps and ensure is corresponding to latest ggml.h");
 
-// Batch-op relaxed caps table for cgraph offload mode (enable_offload_cgraph==1).
+// Batch-op relaxed caps table for cgraph offload mode (offload_cgraph_type==2).
 // Only checks op type support — no shape/size/type restrictions.
 // This allows larger subgraphs to be formed, reducing FastRPC call count.
 // Start with minimal set (ADD + MUL_MAT) for validation, expand incrementally.
@@ -830,9 +832,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD_ID,   0, nullptr, nullptr},
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
-    {false, GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},  // disabled for binary-search quality debug
-    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
-    {false, GGML_OP_DIV,      2, "ggmlop_dsp_div",      nullptr},  // disabled for binary-search quality debug
+    {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
+    {false, GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
+    {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
     {false, GGML_OP_LOG,      0, nullptr, nullptr},
@@ -844,13 +846,13 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_MEAN,     0, nullptr, nullptr},
     {false, GGML_OP_ARGMAX,   0, nullptr, nullptr},
     {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
-    {false, GGML_OP_REPEAT,     0, "ggmlop_dsp_repeat",     nullptr},
+    {false, GGML_OP_REPEAT,   0, nullptr, nullptr},
     {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
-    {false, GGML_OP_CONCAT,     0, "ggmlop_dsp_concat",     nullptr},
+    {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
-        {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
-        {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
+    {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
+    {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
     {true,  GGML_OP_MUL_MAT,  2, "ggmlop_dsp_mulmat",   ggmlop_dsp_mulmat},
@@ -859,21 +861,21 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
     {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale",   nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
-    {false, GGML_OP_CPY,      0, "ggmlop_dsp_cpy",      nullptr},  // disabled for binary-search quality debug
-    {false, GGML_OP_CONT,     0, nullptr, nullptr},
+    {false,  GGML_OP_CPY,      0, nullptr, nullptr},
+    {false,  GGML_OP_CONT,     0, nullptr, nullptr},
     {false, GGML_OP_RESHAPE,  0, nullptr, nullptr},
     {false, GGML_OP_VIEW,     0, nullptr, nullptr},
     {false, GGML_OP_PERMUTE,  0, nullptr, nullptr},
     {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
-    {false, GGML_OP_GET_ROWS,         2, "ggmlop_dsp_getrows",    nullptr},
+    {false,  GGML_OP_GET_ROWS, 0, nullptr, nullptr},
     {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
     {false, GGML_OP_DIAG,     0, nullptr, nullptr},
-    {false, GGML_OP_DIAG_MASK_INF,   2, "ggmlop_dsp_diag_mask_inf", nullptr},
+    {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
     {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-    {false, GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax",   nullptr},  // disabled: runs on CPU
+    {false, GGML_OP_SOFT_MAX, 0, nullptr, nullptr},
     {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-    {true,  GGML_OP_ROPE,     4, "ggmlop_dsp_rope",     nullptr},
+    {false, GGML_OP_ROPE,     0, nullptr, nullptr},
     {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_CLAMP,    0, nullptr, nullptr},
     {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
@@ -911,7 +913,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {false, GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},  // disabled for binary-search quality debug
+    {true,  GGML_OP_UNARY,    2, "ggmlop_dsp_silu",     nullptr},
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -2062,7 +2064,11 @@ static size_t ggmlhexagon_get_op_input_param_count(const ggml_tensor * op) {
 }
 
 static void ggmlhexagon_get_opkey_from_op(const ggml_tensor * op, std::string & output) {
-    GGML_ASSERT(op->op != GGML_OP_NONE);
+    //GGML_ASSERT(op->op != GGML_OP_NONE);
+    if (op->op == GGML_OP_NONE) {
+        output = "GGML_OP_NONE";
+        return;
+    }
     output += ggml_op_desc(op);
     output += ggmlhexagon_get_ggml_type_name(op->type);
     size_t param_count = ggmlhexagon_get_op_input_param_count(op);
@@ -2196,7 +2202,7 @@ static void ggmlhexagon_load_cfg() {
     });
     std::string precision_mode;
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.91");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99");
     hexagoncfg_instance.get_intvalue("general", "enable_perf", g_hexagon_appcfg.enable_perf, 1);
     hexagoncfg_instance.get_intvalue("general", "print_tensors_info", g_hexagon_appcfg.print_tensors_info, 0);
     hexagoncfg_instance.get_intvalue("general", "dump_op_info", g_hexagon_appcfg.dump_op_info, 0);
@@ -2217,7 +2223,10 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "enable_all_q_mulmat", g_hexagon_appcfg.enable_all_q_mulmat, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 4);
     hexagoncfg_instance.get_intvalue("cdsp", "mulmat_algotype", g_hexagon_appcfg.mulmat_algotype, 0);
-    hexagoncfg_instance.get_intvalue("cdsp", "enable_offload_cgraph", g_hexagon_appcfg.enable_offload_cgraph, 0);
+    hexagoncfg_instance.get_intvalue("cdsp", "offload_cgraph_type", g_hexagon_appcfg.offload_cgraph_type, 2);
+    hexagoncfg_instance.get_intvalue("cdsp", "dump_diag_info", g_hexagon_appcfg.dump_diag_info, 0);
+
+    memcpy(g_hexagon_appcfg.version, version.c_str(), strlen(version.c_str()));
 
     GGMLHEXAGON_LOG_VERBOSE("load hexagon appcfg from %s", cfg_filename.c_str());
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
@@ -2334,6 +2343,21 @@ static bool ggmlhexagon_check_valid_appcfg() {
         }
     }
 
+    if (g_hexagon_appcfg.offload_cgraph_type > 2) {
+        GGMLHEXAGON_LOG_WARN("invalid offload_cgraph_type %d, reset to 2", g_hexagon_appcfg.offload_cgraph_type);
+        g_hexagon_appcfg.offload_cgraph_type = 2;
+    }
+
+    if (g_hexagon_appcfg.thread_counts > 6) {
+        GGMLHEXAGON_LOG_WARN("invalid thread_counts %d, reset to 6", g_hexagon_appcfg.thread_counts);
+        g_hexagon_appcfg.thread_counts = 6;
+    }
+
+    if (g_hexagon_appcfg.dump_diag_info > 1) {
+        GGMLHEXAGON_LOG_WARN("invalid dump_diag_info %d, reset to 0", g_hexagon_appcfg.dump_diag_info);
+        g_hexagon_appcfg.dump_diag_info = 0;
+    }
+
     if (!is_valid_appcfg) {
         GGMLHEXAGON_LOG_VERBOSE("it seems there is non-default configuration in ggml-hexagon.cfg, will using the default ggml backend accordingly");
     }
@@ -2361,7 +2385,8 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
         GGMLHEXAGON_LOG_INFO("using rpc ion memory pool:        %s", g_hexagon_appcfg.enable_rpc_ion_mempool ? "YES" : "NO");
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_CDSP:  %d", g_hexagon_appcfg.thread_counts);
         GGMLHEXAGON_LOG_INFO("mulmat algo type on cDSP:         %d", g_hexagon_appcfg.mulmat_algotype);
-        GGMLHEXAGON_LOG_INFO("offload cgraph mode:              %d", g_hexagon_appcfg.enable_offload_cgraph);
+        GGMLHEXAGON_LOG_INFO("offload cgraph type:              %d", g_hexagon_appcfg.offload_cgraph_type);
+        GGMLHEXAGON_LOG_INFO("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
         ggmlhexagon_probe_dspinfo(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_QNN:   %d", g_hexagon_appcfg.hvx_threads);
@@ -5649,9 +5674,9 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                                   ctx->rpc_mempool_len / SIZE_IN_MB);
         }
         ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", ctx->rpc_mempool_handle);
-        GGMLHEXAGON_LOG_INFO("rpc mempool addr 0x%p", ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_INFO("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
+        GGMLHEXAGON_LOG_WARN("rpc mempool handle %d", ctx->rpc_mempool_handle);
+        GGMLHEXAGON_LOG_WARN("rpc mempool addr 0x%p", ctx->rpc_mempool);
+        GGMLHEXAGON_LOG_WARN("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
         // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
         // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
         // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
@@ -5665,7 +5690,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                 GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
                                      mmap_err, ctx->rpc_mempool_handle);
             } else {
-                GGMLHEXAGON_LOG_INFO("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
+                GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
                                      ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
             }
         }
@@ -5691,7 +5716,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
             if (reg_err != AEE_SUCCESS) {
                 GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
             } else {
-                GGMLHEXAGON_LOG_INFO("registered ION base via scalar call: fd=%d, size=%dMB",
+                GGMLHEXAGON_LOG_WARN("registered ION base via scalar call: fd=%d, size=%dMB",
                                      ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
             }
 
@@ -5707,14 +5732,14 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                     const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
                     bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
                     bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
-                    GGMLHEXAGON_LOG_INFO("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
+                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
                                          p[0], p[1], p[2], p[3],
                                          ok_ab ? "PASS" : "FAIL");
-                    GGMLHEXAGON_LOG_INFO("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
+                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
                                          p[64], p[65], p[66], p[67],
                                          ok_cd ? "PASS" : "FAIL");
                     if (ok_ab && ok_cd) {
-                        GGMLHEXAGON_LOG_INFO("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
+                        GGMLHEXAGON_LOG_WARN("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
                     } else {
                         GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
                     }
@@ -5759,7 +5784,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                             break;
                         }
 
-                        GGMLHEXAGON_LOG_INFO("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
+                        GGMLHEXAGON_LOG_WARN("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
                                              round + 1, N_ROUNDS);
 
                         // Clean up for next round
@@ -5768,7 +5793,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                     }
 
                     if (multi_ok) {
-                        GGMLHEXAGON_LOG_INFO("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
+                        GGMLHEXAGON_LOG_WARN("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
                                              N_ROUNDS);
                     } else {
                         GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
@@ -6325,15 +6350,17 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return supported;
             }
         }
-        case GGML_OP_SOFT_MAX:
-        {
+        case GGML_OP_SOFT_MAX:{
             if (!ggml_is_contiguous(op_tensor))
                 return false;
             if (!ggml_are_same_shape(src0, op_tensor))
                 return false;
+        }
+        case GGML_OP_RMS_NORM:
+        {
+            ggmlhexagon_dump_op_info(op_tensor);
             if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
                 return false;
-            if (src1 != nullptr) return false; // mask not supported
             return true;
         }
         case GGML_OP_UNARY:
@@ -6351,79 +6378,13 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return false;
             return true;
         }
-        case GGML_OP_RMS_NORM:
-        {
-            if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
-                return false;
-            return true;
-        }
-        case GGML_OP_MUL:
-        case GGML_OP_DIV:
-        {
-            if (src0->type != GGML_TYPE_F32)
-                return false;
-            if (!src1 || src1->type != GGML_TYPE_F32)
-                return false;
-            return true;
-        }
-        case GGML_OP_ROPE:
-        {
-            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
-                return false;
-            if (!src1 || src1->type != GGML_TYPE_I32)
-                return false;
-            return true;
-        }
-        case GGML_OP_CPY:
-        {
-            // CPY kernel only supports f16<->f32, not quantized types
-            if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) ||
-                (op_tensor->type != GGML_TYPE_F16 && op_tensor->type != GGML_TYPE_F32))
-                return false;
-            return true;
-        }
-        case GGML_OP_GET_ROWS:
-        {
-            // GET_ROWS: src0=quantized weight, src1=i32 indices, dst=f32
-            if (!src1 || src1->type != GGML_TYPE_I32)
-                return false;
-            if (op_tensor->type != GGML_TYPE_F32)
-                return false;
-            // Only support quantized types that our DSP kernel handles
-            if (src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q5_K)
-                return false;
-            return true;
-        }
-        case GGML_OP_CONCAT:
-        {
-            // CONCAT: same type for all operands
-            if (src0->type != op_tensor->type)
-                return false;
-            if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
-                return false;
-            return true;
-        }
-        case GGML_OP_REPEAT:
-        {
-            // REPEAT: broadcast src0 to dst shape (same type)
-            if (src0->type != op_tensor->type)
-                return false;
-            return true;
-        }
-        case GGML_OP_DIAG_MASK_INF:
-        {
-            // DIAG_MASK_INF: f32 input -> f32 output with -inf mask
-            if (src0->type != GGML_TYPE_F32 || op_tensor->type != GGML_TYPE_F32)
-                return false;
-            return true;
-        }
         default:
             break;
     }
     return false;
 }
 
-// Relaxed supports_op for cgraph offload mode (enable_offload_cgraph==1).
+// Relaxed supports_op for cgraph offload mode (offload_cgraph_type==2).
 // Uses op-type-specific validation (type consistency, broadcast support, contiguity)
 // but omits the strict size threshold (ne00 >= 1024) that limits per-op granularity.
 // This allows the scheduler to form larger subgraphs with more ops per batch,
@@ -6566,8 +6527,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         case GGML_OP_CPY:
         {
             // CPY kernel only supports f16<->f32, not quantized types
-            if ((src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32) ||
-                (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32))
+            // Copy: src0 -> dst (may involve type conversion f16<->f32)
+            if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32)
+                return false;
+            if (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)
                 return false;
             return true;
         }
@@ -7560,6 +7523,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
 
     enum ggml_status result         = GGML_STATUS_SUCCESS;
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
+    int64_t begin_time = ggml_time_us();
 
     // collect supported ops
     std::vector<ggml_tensor *> supported_nodes;
@@ -7572,6 +7536,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
+
+        std::string node_name;
+        ggmlhexagon_get_opkey_from_op(node, node_name);
+        GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
+
         //TODO: use relaxed batch table to maximize batching
         if (ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(node)].supported) {
             supported_nodes.push_back(node);
@@ -7784,25 +7753,27 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     }
 
     // ---- DIAGNOSTIC: dump tensor data locations and sample values ----
-    for (uint32_t i = 0; i < n_tensors; i++) {
-        ggml_tensor * t = tensor_src[i];
-        const char * dp = (const char *)t->data;
-        const char * location = "???";
-        if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) location = "ION";
-        else location = "HEAP";
-        uint32_t offset = (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size)
-                          ? (uint32_t)(dp - ion_base) : 0xFFFFFFFFu;
-        GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u",
-                             i, (int)t->type,
-                             (int)t->ne[0], (int)t->ne[1], (int)t->ne[2], (int)t->ne[3],
-                             (void *)dp, location, offset, (uint32_t)ggml_nbytes(t));
-        // dump first 4 f32 values from src tensors (if f32 type and has data)
-        if (t->data && ggml_nbytes(t) >= 16) {
-            const float * fv = (const float *)t->data;
-            float op_param0 = 0;
-            memcpy(&op_param0, t->op_params, sizeof(float));
-            GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f] op_params[0]=%.8f",
-                                 i, fv[0], fv[1], fv[2], fv[3], op_param0);
+    if (1 == g_hexagon_appcfg.dump_diag_info) {
+        for (uint32_t i = 0; i < n_tensors; i++) {
+            ggml_tensor * t = tensor_src[i];
+            const char * dp = (const char *)t->data;
+            const char * location = "???";
+            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) location = "ION";
+            else location = "HEAP";
+            uint32_t offset = (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size)
+                              ? (uint32_t)(dp - ion_base) : 0xFFFFFFFFu;
+            GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u",
+                                 i, (int)t->type,
+                                 (int)t->ne[0], (int)t->ne[1], (int)t->ne[2], (int)t->ne[3],
+                                 (void *)dp, location, offset, (uint32_t)ggml_nbytes(t));
+            // dump first 4 f32 values from src tensors (if f32 type and has data)
+            if (t->data && ggml_nbytes(t) >= 16) {
+                const float * fv = (const float *)t->data;
+                float op_param0 = 0;
+                memcpy(&op_param0, t->op_params, sizeof(float));
+                GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f] op_params[0]=%.8f",
+                                     i, fv[0], fv[1], fv[2], fv[3], op_param0);
+            }
         }
     }
 
@@ -7861,6 +7832,35 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch_ion failed: 0x%x", hexagon_error);
     }
 
+    // ---- Phase 7.3: Post-invoke AP-side verification ----
+    // Read back the LAST op's dst tensor from ION to verify AP can read DSP-written data.
+    if (hexagon_error == AEE_SUCCESS && n_ops > 0) {
+        const hex_op_desc & last_op = hex_ops[n_ops - 1];
+        uint32_t last_dst_idx = last_op.dst_idx;
+        if (last_dst_idx < n_tensors) {
+            ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
+            if (dst_tensor && dst_tensor->data) {
+                // Find this tensor's ION offset from mirrors
+                uint32_t ion_off = 0;
+                for (const auto & m : mirrors) {
+                    if ((uint32_t)m.tensor_idx == last_dst_idx) { ion_off = m.mirror_offset; break; }
+                }
+                // If not mirrored (already in ION), try to compute from data pointer
+                if (ion_off == 0 && dst_tensor->data >= (void *)ion_base && dst_tensor->data < (void *)(ion_base + ion_size)) {
+                    ion_off = (uint32_t)((const char *)dst_tensor->data - ion_base);
+                }
+                const char * ion_data = (const char *)ctx->rpc_mempool + ion_off;
+                const float * ion_vals = (const float *)ion_data;
+                const float * ptr_vals  = (const float *)dst_tensor->data;
+                GGMLHEXAGON_LOG_WARN("[AP-POST] batch last-op[%u] dst[tensor%u]: ION_f32=[%.4f, %.4f, %.4f, %.4f] PTR_f32=[%.4f, %.4f, %.4f, %.4f] ion_off=0x%x ptr=%p",
+                                     n_ops - 1, last_dst_idx,
+                                     ion_vals[0], ion_vals[1], ion_vals[2], ion_vals[3],
+                                     ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3],
+                                     ion_off, (void *)dst_tensor->data);
+            }
+        }
+    }
+
     // NOTE: No Phase 7.5 (post-DSP cache invalidation) needed.
     // FastRPC invoke return handles cache coherency for fastrpc-mapped regions.
     // All 8 user-space invalidation methods fail on this device for ION/DELAYED maps.
@@ -7881,6 +7881,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     //   → no user-space cache inval works on this device → read returns stale data
     // With 4GB pool, monotonic allocation supports thousands of test ops.
     // ctx->rpc_mempool_usage = saved_usage; // DISABLED: no rewind
+    int64_t end_time = ggml_time_us();
+    GGMLHEXAGON_LOG_WARN("graph supported_nodes   %d", supported_nodes.size());
+    GGMLHEXAGON_LOG_WARN("graph unsupported_nodes %d", unsupported_nodes.size());
+    GGMLHEXAGON_LOG_WARN("graph inference duration %lld microseconds", (end_time - begin_time));
 
     return result;
 }
@@ -8280,12 +8284,14 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
             for (int i = 0; i < ggml_backend_hexagon_get_device_count(); i++) {
                 if (HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) {
-                    if (1 == g_hexagon_appcfg.enable_offload_cgraph) {
+                    if (2 == g_hexagon_appcfg.offload_cgraph_type) {
                         // cgraph offload: use relaxed supports_op (batch mode)
                         ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp_special;
-                    } else {
+                    } else if (1 == g_hexagon_appcfg.offload_cgraph_type) {
                         // per-op mode: use strict supports_op with shape/type checks
                         ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp;
+                    } else {
+                        GGML_ASSERT(1 == 0);
                     }
                 } else {
                     ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_qnn;
@@ -8421,14 +8427,15 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
         if (nullptr == instance)
             return nullptr;
     }
-    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (2 == g_hexagon_appcfg.enable_offload_cgraph)) {
-        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special_ion (ION-based op-batch)");
+
+    if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (2 == g_hexagon_appcfg.offload_cgraph_type)) {
+        GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_special_ion (ION-based op-batch)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special_ion;
-    } else if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (1 == g_hexagon_appcfg.enable_offload_cgraph)) {
-        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_special (FastRPC-based op-batch)");
+    } else if ((HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) &&  (1 == g_hexagon_appcfg.offload_cgraph_type)) {
+        GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_special (FastRPC-based op-batch)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special;
     } else {
-        GGMLHEXAGON_LOG_INFO("using ggmlhexagon_backend_graph_compute_general (per-op)");
+        GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_general (per-op)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
     }
     ggml_backend_t hexagon_backend = new ggml_backend{

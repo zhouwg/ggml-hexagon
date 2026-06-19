@@ -419,6 +419,7 @@ AEEResult hap_probe_dsp(remote_handle64 h) {
                  "\nDCVS status:                     %d",
                   max_mips, max_bus_bw, max_bus_bw >> 20, client_class, clk_freq_hz, dcvs_enabled);
 
+    return AEE_SUCCESS;
 }
 
 AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 latency, int32 mulmat_algo, int32 thread_counts) {
@@ -883,12 +884,10 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         memcpy(dst_dt.ne, td->ne, sizeof(dst_dt.ne));
         memcpy(dst_dt.nb, td->nb, sizeof(dst_dt.nb));
         memcpy(dst_dt.op_params, td->op_params, sizeof(dst_dt.op_params));
-        // Override with op-level params: for in-place ops (SCALE, etc),
-        // node->op_params has the correct value but dst tensor's
-        // op_params may be stale/zero from tensor reuse.
-        if (op->params[0] != 0 || op->params[1] != 0) {
-            memcpy(dst_dt.op_params, op->params, sizeof(dst_dt.op_params));
-        }
+        // Always override with op-level params (from node->op_params).
+        // Confirmed: node->op_params is correct for all ops, but dst tensor's
+        // op_params can be zero (ROPE, SOFT_MAX) or stale (SCALE in-place reuse).
+        memcpy(dst_dt.op_params, op->params, sizeof(dst_dt.op_params));
         dst_dt.flags    = td->flags;
         dst_dt.data     = (void *)(base + td->data_offset);
         dst_dt.data_len = td->data_len;
