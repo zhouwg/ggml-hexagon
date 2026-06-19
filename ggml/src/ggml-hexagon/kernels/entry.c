@@ -488,6 +488,10 @@ int ggmlop_is_hmx_available(void) {
     return g_hmx_available;
 }
 
+bool ggmlop_is_ion_mode(void) {
+    return g_ion_dsp_base != NULL;
+}
+
 void * ggmlop_get_work_data(size_t size) {
     if (g_work_data == NULL || g_work_size < size) {
         if (g_work_data != NULL) {

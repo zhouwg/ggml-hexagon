@@ -342,6 +342,7 @@ GGML_API int ggmlop_get_thread_counts(void);
 GGML_API int ggmlop_get_mulmat_algotype(void);
 GGML_API unsigned int ggmlop_get_compute_res_ctx_id(void);
 GGML_API int ggmlop_is_hmx_available(void);
+GGML_API bool ggmlop_is_ion_mode(void);
 GGML_API void * ggmlop_get_work_data(size_t size);
 GGML_API void * ggmlop_get_vtcm_pool(size_t * size);
 GGML_API int ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)

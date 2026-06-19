@@ -833,7 +833,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
     {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
-    {false, GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
+    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
     {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
@@ -6384,6 +6384,82 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
     return false;
 }
 
+//borrow from Qualcomm's official ggml-hexagon backend
+static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    switch (src0->type) {
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_MXFP4:
+            if (src0->ne[0] % 32) {
+                return false;
+            }
+
+            if (ggml_nrows(src0) > 16 * 1024) {
+                return false;  // typically the lm-head which would be too large for VTCM
+            }
+
+            if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+                return false;  // no huge batches or broadcasting (for now)
+            }
+
+            // src0 (weights) must be repacked
+            //if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
+            //    return false;
+            //}
+            return false;
+            break;
+
+        case GGML_TYPE_F16:
+            if (src0->nb[1] < src0->nb[0]) {
+                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: permuted F16 src0 not supported\n");
+                return false;
+            }
+            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
+                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: src1 broadcasting not supported\n");
+                return false;
+            }
+            if (ggml_nrows(src1) > 1024) {
+                return false;  // no huge batches (for now)
+            }
+            break;
+
+        case GGML_TYPE_F32:
+            if (src1->type != GGML_TYPE_F32) {
+                return false;
+            }
+            if (src0->nb[1] < src0->nb[0]) {
+                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: permuted F32 src0 not supported\n");
+                return false;
+            }
+            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
+                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: src1 broadcasting not supported\n");
+                return false;
+            }
+            if (ggml_nrows(src1) > 1024) {
+                return false;  // no huge batches (for now)
+            }
+            break;
+
+        default:
+            return false;
+    }
+
+    return true;
+}
+
 // Relaxed supports_op for cgraph offload mode (offload_cgraph_type==2).
 // Uses op-type-specific validation (type consistency, broadcast support, contiguity)
 // but omits the strict size threshold (ne00 >= 1024) that limits per-op granularity.
@@ -6459,6 +6535,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         }
         case GGML_OP_MUL_MAT:
         {
+#if 0
             // Same as strict version's MUL_MAT checks (no size threshold)
             const int64_t k = src0->ne[0];
             if ((src0->type == GGML_TYPE_F16 && src1->type == GGML_TYPE_F16) ||
@@ -6476,6 +6553,9 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
                 return (k % 64 == 0) && (src1->type == GGML_TYPE_F16);
             }
             return false;
+#else
+            return ggmlhexagon_supported_mul_mat(op_tensor);
+#endif
         }
         case GGML_OP_RMS_NORM:
         {

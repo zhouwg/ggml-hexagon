@@ -689,7 +689,7 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                     const int32_t row_idx = ir0 - iir0;
 
                     if (type == GGML_TYPE_F16) {
-                        if (vec_dot_type == GGML_TYPE_F16 && src1->type != GGML_TYPE_F16) {
+                        if (vec_dot_type == GGML_TYPE_F16) {
                             vec_dot_f16_f16(ne00, &tmp[row_idx], 0,
                                            (const uint16_t*)(src0_row + ir0 * nb01), 0,
                                            (uint16_t*)src1_col, 0, 1);
@@ -1057,14 +1057,10 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                     for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
                         const int32_t row_idx = ir0 - iir0;
 
-                        if (type == GGML_TYPE_F16 && vec_dot_type == GGML_TYPE_F16) {
+                        if (type == GGML_TYPE_F16) {
                             vec_dot_f16_f16(ne00, &tmp[row_idx], 0,
                                            (const uint16_t*)(vtcm_buf + row_idx * nb01), 0,
                                            (uint16_t*)src1_col, 0, 1);
-                        } else if (type == GGML_TYPE_F16) {
-                            vec_dot_f16_f32(ne00, &tmp[row_idx], 0,
-                                           (const uint16_t*)(vtcm_buf + row_idx * nb01), 0,
-                                           (float*)src1_col, 0, 1);
                         } else if (type == GGML_TYPE_Q4_0) {
                             const block_q4_0 * q4_row = (const block_q4_0*)(vtcm_buf + row_idx * nb01);
                             const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
@@ -1131,10 +1127,14 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
     if (n_threads < 1) n_threads = 1;
     if (n_threads > 8) n_threads = 8;
 
-    const size_t vtcm_per_thread = 64 * 1024;
-    const size_t total_vtcm = vtcm_per_thread * n_threads;
+    size_t vtcm_size = 0;
+    void *vtcm_base = ggmlop_get_vtcm_pool(&vtcm_size);
 
-    void *vtcm_base = HAP_request_VTCM(total_vtcm, 0);
+    //const size_t vtcm_per_thread = 64 * 1024;
+    //const size_t total_vtcm = vtcm_per_thread * n_threads;
+    size_t vtcm_per_thread = vtcm_size / n_threads;
+    size_t total_vtcm      = vtcm_size;
+
     if (vtcm_base == NULL) {
         GGMLHEXAGON_LOG_DEBUG("%s: VTCM allocation failed, falling back to non-VTCM", __func__);
         return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
@@ -1188,8 +1188,6 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
         dma_queue_flush(dma_queues[t]);
         dma_queue_delete(dma_queues[t]);
     }
-
-    HAP_release_VTCM(vtcm_base);
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return 0;
