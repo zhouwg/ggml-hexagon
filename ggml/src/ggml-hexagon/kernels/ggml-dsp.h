@@ -340,6 +340,7 @@ GGML_API void ggmlhexagon_log_always(int level, const char *file, const char *fu
 
 GGML_API int ggmlop_get_thread_counts(void);
 GGML_API int ggmlop_get_mulmat_algotype(void);
+GGML_API int ggmlop_get_offload_cgraph_type(void);
 GGML_API unsigned int ggmlop_get_compute_res_ctx_id(void);
 GGML_API int ggmlop_is_hmx_available(void);
 GGML_API bool ggmlop_is_ion_mode(void);

@@ -9,6 +9,7 @@
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
+static int g_offload_cgraph_type            = 2;
 static void * g_work_data                   = NULL;
 static size_t g_work_size                   = 0;
 
@@ -422,7 +423,7 @@ AEEResult hap_probe_dsp(remote_handle64 h) {
     return AEE_SUCCESS;
 }
 
-AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 latency, int32 mulmat_algo, int32 thread_counts) {
+AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 offload_cgraph_type, int32 mulmat_algo, int32 thread_counts) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     GGMLHEXAGON_LOG_INFO("user specified thread_counts %d", thread_counts);
@@ -434,6 +435,9 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 power_level, int32 
     g_mulmat_algotype = mulmat_algo;
     GGMLHEXAGON_LOG_INFO("mulmat_algotype %d", g_mulmat_algotype);
     FARF(ALWAYS, "mulmat_algotype set to %d (0=auto, 32=VTCM+HMX, 33=VTCM multithread)", g_mulmat_algotype);
+
+    g_offload_cgraph_type = offload_cgraph_type;
+    GGMLHEXAGON_LOG_INFO("offload_cgraph_type %d", offload_cgraph_type);
 
     if (g_thread_counts >= 1) {
         AEEResult result = worker_pool_reinit_with_threads(g_thread_counts);
@@ -478,6 +482,10 @@ int ggmlop_get_mulmat_algotype(void) {
 
 int ggmlop_get_thread_counts(void) {
     return g_thread_counts;
+}
+
+int ggmlop_get_offload_cgraph_type(void) {
+    return g_offload_cgraph_type;
 }
 
 unsigned int ggmlop_get_compute_res_ctx_id(void) {
@@ -563,27 +571,15 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
     //            same as QCOM's htp_iface_mmap() in htp/main.c.
     if (ggml_op == GGML_OP_NONE) {
         if (src0 && src0->data) {
-            uint32_t * meta = (uint32_t *)src0->data;
-            int32_t fd = (int32_t)meta[0];
-            uint64_t size = ((uint64_t)(uint32_t)meta[2] << 32) | (uint64_t)(uint32_t)meta[1];
-            int32_t size_mb = (int32_t)meta[3];
-
-            GGMLHEXAGON_LOG_INFO("[ION-REG] fd=%d, size=%llu bytes (%dMB), logcat_va=0x%08x%08x",
-                                 fd, (unsigned long long)size, size_mb, meta[5], meta[4]);
-
-#if __HVX_ARCH__ > 73
-            void * va = HAP_mmap2(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
-#else
-            void * va = HAP_mmap(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
-#endif
-
-            if (va == (void *)-1) {
-                g_ion_dsp_base = NULL;
-                GGMLHEXAGON_LOG_ERROR("[ION-REG] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
-            } else {
-                g_ion_dsp_base = va;
-                GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%dMB)",
-                                     va, fd, size_mb);
+            if (2 != g_offload_cgraph_type) {
+                uint32_t * meta = (uint32_t *)src0->data;
+                int32_t fd = (int32_t)meta[0];
+                uint64_t size = ((uint64_t)(uint32_t)meta[2] << 32) | (uint64_t)(uint32_t)meta[1];
+                int32_t size_mb = (int32_t)meta[3];
+                g_ion_dsp_base = src0->data;
+                GGMLHEXAGON_LOG_INFO("offload_cgraph_type=%d, registered ION DSP base: %p, data_len=%llu, fd=%d, size=%llubytes(%dMB)",
+                                 g_offload_cgraph_type,
+                                 g_ion_dsp_base, size, fd, (unsigned long long)size, size_mb);
             }
         } else {
             g_ion_dsp_base = NULL;
