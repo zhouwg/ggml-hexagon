@@ -35,8 +35,16 @@ extern "C" {
 
 #define QK4_0               32
 #define QK4_1               32
+#define QK5_0               32
+#define QK5_1               32
 #define QK8_0               32
 #define QK8_1               32
+#define QK4_NL              32
+#define QK_K                256
+#define K_SCALE_SIZE        12
+#define QK_MXFP4            32
+#define QK_NVFP4            64
+#define QK_NVFP4_SUB        16
 
 #define GGML_UNUSED(x)      (void)(x)
 
@@ -319,6 +327,7 @@ enum ggml_type {
     GGML_TYPE_MXFP4   = 39,
     GGML_TYPE_NVFP4   = 40,
     GGML_TYPE_Q1_0    = 41,
+    GGML_TYPE_COUNT   = 42,
 };
 
 typedef double      ggml_float;
@@ -366,7 +375,11 @@ static inline int ggml_blck_size(enum ggml_type type) {
         case GGML_TYPE_Q5_1:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q8_1:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_MXFP4:
             return 32;
+        case GGML_TYPE_NVFP4:
+            return 64;
         case GGML_TYPE_Q2_K:
             return 256;
         case GGML_TYPE_Q3_K:
@@ -374,6 +387,12 @@ static inline int ggml_blck_size(enum ggml_type type) {
         case GGML_TYPE_Q5_K:
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_Q8_K:
+        case GGML_TYPE_IQ4_XS:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ1_S:
             return 256;
         case GGML_TYPE_I8:
             return 1;
@@ -397,12 +416,43 @@ static inline size_t ggml_type_size(enum ggml_type type) {
         case GGML_TYPE_Q4_1:
             return 2*sizeof(uint16_t) + QK4_1/2;
         case GGML_TYPE_Q5_0:
+            return sizeof(uint16_t) + sizeof(uint32_t) + QK5_0/2;
         case GGML_TYPE_Q5_1:
-            return sizeof(uint16_t) + QK4_0/2 + QK4_0/2;
+            return 2*sizeof(uint16_t) + sizeof(uint32_t) + QK5_1/2;
+        case GGML_TYPE_IQ4_NL:
+            return sizeof(uint16_t) + QK4_NL/2;
         case GGML_TYPE_Q8_0:
             return sizeof(uint16_t) + QK8_0;
         case GGML_TYPE_Q8_1:
             return 2*sizeof(uint16_t) + QK8_1;
+        case GGML_TYPE_Q8_K:
+            return sizeof(float) + QK_K + QK_K/16*sizeof(int16_t); // 292
+        case GGML_TYPE_Q4_K:
+            return 2*sizeof(uint16_t) + K_SCALE_SIZE + QK_K/2;     // 144
+        case GGML_TYPE_Q6_K:
+            return QK_K/2 + QK_K/4 + QK_K/16 + sizeof(uint16_t);  // 210
+        case GGML_TYPE_Q2_K:
+            return QK_K/16 + QK_K/4 + 2*sizeof(uint16_t);         // 84
+        case GGML_TYPE_Q3_K:
+            return QK_K/8 + QK_K/4 + 12 + sizeof(uint16_t);       // 110
+        case GGML_TYPE_Q5_K:
+            return 2*sizeof(uint16_t) + K_SCALE_SIZE + QK_K/8 + QK_K/2; // 176
+        case GGML_TYPE_MXFP4:
+            return sizeof(uint8_t) + QK_MXFP4/2;                       // 17
+        case GGML_TYPE_NVFP4:
+            return QK_NVFP4/QK_NVFP4_SUB + QK_NVFP4/2;                // 36
+        case GGML_TYPE_IQ4_XS:
+            return sizeof(uint16_t) + sizeof(uint16_t) + QK_K/64 + QK_K/2; // 136
+        case GGML_TYPE_IQ3_XXS:
+            return sizeof(uint16_t) + 3*(QK_K/8);                          // 98
+        case GGML_TYPE_IQ2_XXS:
+            return sizeof(uint16_t) + QK_K/8*sizeof(uint16_t);             // 66
+        case GGML_TYPE_IQ2_XS:
+            return sizeof(uint16_t) + QK_K/8*sizeof(uint16_t) + QK_K/32;   // 74
+        case GGML_TYPE_IQ2_S:
+            return sizeof(uint16_t) + QK_K/4 + QK_K/32 + QK_K/32;          // 82
+        case GGML_TYPE_IQ1_S:
+            return sizeof(uint16_t) + QK_K/8 + QK_K/32*sizeof(uint16_t);    // 50
         case GGML_TYPE_I8:
             return sizeof(int8_t);
         default:

@@ -538,6 +538,7 @@ enum ggml_type ggml_vec_dot_type(enum ggml_type type) {
             return GGML_TYPE_Q8_0;
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q5_0:
+        case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
             return GGML_TYPE_Q8_0;
@@ -558,12 +559,11 @@ enum ggml_type ggml_vec_dot_type(enum ggml_type type) {
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ3_XXS:
         case GGML_TYPE_IQ1_S:
-        case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_IQ3_S:
         case GGML_TYPE_IQ2_S:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ1_M:
-            return GGML_TYPE_Q8_0;
+            return GGML_TYPE_Q8_K;
         case GGML_TYPE_I8:
         case GGML_TYPE_I16:
         case GGML_TYPE_I32:
