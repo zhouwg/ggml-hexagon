@@ -1,6 +1,7 @@
 #include "ggml-dsp.h"
 #include "worker_pool.h"
-#include "../htp/hvx-base.h"  // for official hvx_vec_f32_to_f16 with vdeal
+#include "../htp/hvx-base.h"   // for official hvx_vec_f32_to_f16 with vdeal
+#include "../htp/hvx-reduce.h" // for hvx_vec_reduce_max_f32
 #include "../htp/hex-dma.h"   // for official DMA async transfers
 
 union ui32f { int32_t i; float f; };
@@ -9,9 +10,6 @@ union ui32f { int32_t i; float f; };
 #define HMX_FP16_TILE_N_COLS 32
 #define HMX_FP16_TILE_N_ELMS 1024
 #define HMX_FP16_TILE_SIZE (HMX_FP16_TILE_N_ELMS * sizeof(__fp16))
-
-// Forward declarations
-int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst);
 
 static HVX_INLINE_ALWAYS void l2fetch(const void * p, uint32_t stride,
                            uint32_t width, uint32_t height,
@@ -56,23 +54,6 @@ static inline float fp32_from_bits(uint32_t w) {
     } fp32;
     fp32.as_bits = w;
     return fp32.as_value;
-}
-
-static inline HVX_Vector hvx_vec_reduce_sum_n_f32(HVX_Vector in, unsigned int n) {
-    unsigned int total = n * 4;
-    unsigned int width = 4;
-
-    HVX_Vector sum = in, sum_t;
-    while (width < total) {
-        sum_t = Q6_V_vror_VR(sum, width);
-        sum   = Q6_Vsf_vadd_VsfVsf(sum, sum_t);
-        width = width << 1;
-    }
-    return sum;
-}
-
-static inline HVX_Vector hvx_vec_reduce_sum_f32(HVX_Vector in) {
-    return hvx_vec_reduce_sum_n_f32(in, VLEN_FP32);
 }
 
 static inline float horizontal_sum_safe(HVX_Vector vec) {
@@ -271,6 +252,7 @@ static void vec_dot_f16_f32(int n, float *GGML_RESTRICT s, size_t bs, const uint
     *s = sumf;
 }
 
+#if 0
 static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint16_t *GGML_RESTRICT x,
                     size_t bx, const uint16_t *GGML_RESTRICT y, size_t by, int nrc) {
     UNUSED(bs);
@@ -286,14 +268,67 @@ static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint
     }
     *s = sumf;
 }
+#endif
+
+static void vec_dot_f16_f16(int n, float *GGML_RESTRICT s, size_t bs, const uint16_t *GGML_RESTRICT x,
+                    size_t bx, const uint16_t *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int fp16_per_vec = VLEN / sizeof(uint16_t); // 64
+    const int nvec = n / fp16_per_vec;
+    const int nloe = n % fp16_per_vec;
+
+    float sumf = 0.0f;
+
+    if (nvec > 0 && ((uintptr_t)x & 0x7F) == 0 && ((uintptr_t)y & 0x7F) == 0) {
+        const HVX_Vector * restrict vx = (const HVX_Vector *)x;
+        const HVX_Vector * restrict vy = (const HVX_Vector *)y;
+
+        HVX_VectorPair acc = Q6_W_vcombine_VV(Q6_V_vzero(), Q6_V_vzero());
+
+        for (int i = 0; i < nvec; ++i) {
+            HVX_Vector vx_shuf = Q6_Vh_vshuff_Vh(vx[i]);
+            HVX_Vector vy_shuf = Q6_Vh_vshuff_Vh(vy[i]);
+            acc = hvx_vec_mpyacc_f32_f16(acc, vx_shuf, vy_shuf);
+        }
+
+        // horizontal sum of acc
+        HVX_Vector acc_lo = Q6_V_lo_W(acc);
+        HVX_Vector acc_hi = Q6_V_hi_W(acc);
+        HVX_Vector sum_v = Q6_Vsf_vadd_VsfVsf(acc_lo, acc_hi);
+        sumf = horizontal_sum_hvx_2(sum_v);
+
+        if (nloe > 0) {
+            const int base = nvec * fp16_per_vec;
+            for (int i = 0; i < nloe; ++i) {
+                float va = ggml_compute_fp16_to_fp32(x[base + i]);
+                float vb = ggml_compute_fp16_to_fp32(y[base + i]);
+                sumf += (va * vb);
+            }
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            float va = ggml_compute_fp16_to_fp32(x[i]);
+            float vb = ggml_compute_fp16_to_fp32(y[i]);
+            sumf += (va * vb);
+        }
+    }
+
+    *s = sumf;
+}
 
 #define QK4_0 32
 #define QK4_1 32
 #define QK8_0 32
+#define QK8_1 32
 
 #define GGML_Q4_0_BLCK_SZ (sizeof(uint16_t) + QK4_0/2)
 #define GGML_Q4_1_BLCK_SZ (sizeof(uint16_t) + sizeof(uint16_t) + QK4_1/2)
 #define GGML_Q8_0_BLCK_SZ (sizeof(uint16_t) + QK8_0)
+#define GGML_Q8_1_BLCK_SZ (sizeof(uint16_t) + sizeof(uint16_t) + QK8_1)
 
 typedef struct {
     uint16_t d;
@@ -311,6 +346,13 @@ typedef struct {
     int8_t qs[QK8_0];
 } block_q8_0;
 
+typedef struct {
+    uint16_t d;
+    uint16_t s;
+    int8_t qs[QK8_1];
+} block_q8_1;
+
+#if 0
 static void vec_dot_q4_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
                     size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
     UNUSED(bs);
@@ -332,7 +374,53 @@ static void vec_dot_q4_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const blo
     }
     *s = sumf;
 }
+#endif
 
+static void vec_dot_q4_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
+                    size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int nb = n / QK4_0;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = ggml_compute_fp16_to_fp32(x[i].d);
+        const uint8_t * qs_ptr = x[i].qs;
+        const float   * y_ptr  = y + i * QK4_0;
+
+        // Dequantize q4_0 to f32 using scalar (block is only 18 bytes, not vector-aligned)
+        float dq[QK4_0];
+        for (int j = 0; j < QK4_0 / 2; ++j) {
+            dq[2 * j]     = (float)((qs_ptr[j] & 0x0F) - 8) * d;
+            dq[2 * j + 1] = (float)((qs_ptr[j] >> 4) - 8) * d;
+        }
+
+        // Dot product with f32 y using HVX if aligned
+        if (((uintptr_t)y_ptr & 0x7F) == 0 && QK4_0 >= VLEN_FP32) {
+            const HVX_Vector * restrict vy = (const HVX_Vector *)y_ptr;
+            HVX_Vector * restrict vdq = (HVX_Vector *)dq;
+            HVX_Vector rsum = Q6_V_vsplat_R(0);
+            for (int j = 0; j < QK4_0 / VLEN_FP32; ++j) {
+                HVX_Vector prod = Q6_Vsf_vmpy_VsfVsf(vdq[j], vy[j]);
+                rsum = Q6_Vsf_vadd_VsfVsf(rsum, prod);
+            }
+            sumf += hvx_vec_get_f32(hvx_vec_reduce_sum_f32(rsum));
+        } else {
+            float block_sum = 0.0f;
+            for (int j = 0; j < QK4_0; ++j) {
+                block_sum += dq[j] * y_ptr[j];
+            }
+            sumf += block_sum;
+        }
+    }
+
+    *s = sumf;
+}
+
+#if 0
 static void vec_dot_q8_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
                     size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
     UNUSED(bs);
@@ -351,7 +439,52 @@ static void vec_dot_q8_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const blo
     }
     *s = sumf;
 }
+#endif
 
+static void vec_dot_q8_0_f32(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
+                    size_t bx, const float *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int nb = n / QK8_0;
+    float sumf = 0.0f;
+
+    for (int i = 0; i < nb; ++i) {
+        const float d = ggml_compute_fp16_to_fp32(x[i].d);
+        const int8_t * qs_ptr = x[i].qs;
+        const float  * y_ptr  = y + i * QK8_0;
+
+        // Dequantize q8_0 to f32
+        float dq[QK8_0];
+        for (int j = 0; j < QK8_0; ++j) {
+            dq[j] = (float)qs_ptr[j] * d;
+        }
+
+        // Dot product with f32 y using HVX if aligned
+        if (((uintptr_t)y_ptr & 0x7F) == 0 && QK8_0 >= VLEN_FP32) {
+            const HVX_Vector * restrict vy = (const HVX_Vector *)y_ptr;
+            HVX_Vector * restrict vdq = (HVX_Vector *)dq;
+            HVX_Vector rsum = Q6_V_vsplat_R(0);
+            for (int j = 0; j < QK8_0 / VLEN_FP32; ++j) {
+                HVX_Vector prod = Q6_Vsf_vmpy_VsfVsf(vdq[j], vy[j]);
+                rsum = Q6_Vsf_vadd_VsfVsf(rsum, prod);
+            }
+            sumf += hvx_vec_get_f32(hvx_vec_reduce_sum_f32(rsum));
+        } else {
+            float block_sum = 0.0f;
+            for (int j = 0; j < QK8_0; ++j) {
+                block_sum += dq[j] * y_ptr[j];
+            }
+            sumf += block_sum;
+        }
+    }
+
+    *s = sumf;
+}
+
+#if 0
 static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
                     size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
     UNUSED(bs);
@@ -380,7 +513,64 @@ static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const bl
     }
     *s = sumf;
 }
+#endif
 
+static void vec_dot_q4_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,
+                    size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int qk = QK4_0;
+    const int nb = n / qk;
+
+    float sumf = 0;
+
+    const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+    const HVX_Vector voff  = Q6_Vb_vsplat_R(8);
+    const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+    const HVX_VectorPred p32 = Q6_Q_vsetq_R(32);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        // Use HVX_UVector for unaligned load (block qs at offset 2, not 128-byte aligned)
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)x[ib].qs);
+
+        // Extract low nibbles: (qs & 0x0F) - 8
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+        HVX_Vector lo_val = Q6_Vb_vsub_VbVb(lo_nib, voff);
+
+        // Extract high nibbles: (qs >> 4) - 8
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+        HVX_Vector hi_val = Q6_Vb_vsub_VbVb(hi_nib, voff);
+
+        // Load q8 values: first 16 bytes and next 16 bytes
+        HVX_Vector q8_lo = Q6_V_vand_QV(p16, *(const HVX_UVector *)y[ib].qs);
+        HVX_Vector q8_hi = Q6_V_vand_QV(p16, *(const HVX_UVector *)(y[ib].qs + 16));
+
+        // vrmpy: for each 4-byte group, sum of signed byte products -> int32
+        HVX_Vector rsum_lo = Q6_Vw_vrmpy_VbVb(lo_val, q8_lo);
+        HVX_Vector rsum_hi = Q6_Vw_vrmpy_VbVb(hi_val, q8_hi);
+
+        // Horizontal sum of 4 int32 values from each
+        int32_t __attribute__((aligned(128))) tmp_lo[32];
+        int32_t __attribute__((aligned(128))) tmp_hi[32];
+        *(HVX_Vector *)tmp_lo = rsum_lo;
+        *(HVX_Vector *)tmp_hi = rsum_hi;
+
+        int32_t sumi = 0;
+        for (int j = 0; j < 4; ++j) {
+            sumi += tmp_lo[j] + tmp_hi[j];
+        }
+
+        const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        sumf += (float)sumi * d;
+    }
+
+    *s = sumf;
+}
+
+#if 0
 static void vec_dot_q8_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
                     size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
     UNUSED(bs);
@@ -404,6 +594,98 @@ static void vec_dot_q8_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const bl
     }
     *s = sumf;
 }
+#endif
+
+static void vec_dot_q8_0_q8_0(int n, float *GGML_RESTRICT s, size_t bs, const block_q8_0 *GGML_RESTRICT x,
+                    size_t bx, const block_q8_0 *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int qk = QK8_0;
+    const int nb = n / qk;
+
+    float sumf = 0;
+
+    const HVX_VectorPred p32 = Q6_Q_vsetq_R(32);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        // Use HVX_UVector for unaligned load (block qs at offset 2, not 128-byte aligned)
+        HVX_Vector vx = Q6_V_vand_QV(p32, *(const HVX_UVector *)x[ib].qs);
+        HVX_Vector vy = Q6_V_vand_QV(p32, *(const HVX_UVector *)y[ib].qs);
+
+        // vrmpy: for each 4-byte group, sum of signed byte products -> int32
+        HVX_Vector rsum = Q6_Vw_vrmpy_VbVb(vx, vy);
+
+        // Horizontal sum of 8 int32 values
+        int32_t sumi = 0;
+        int32_t __attribute__((aligned(128))) tmp[32];
+        *(HVX_Vector *)tmp = rsum;
+        for (int j = 0; j < 8; ++j) {
+            sumi += tmp[j];
+        }
+
+        const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        sumf += (float)sumi * d;
+    }
+
+    *s = sumf;
+}
+
+static void vec_dot_q4_1_q8_1(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_1 *GGML_RESTRICT x,
+                    size_t bx, const block_q8_1 *GGML_RESTRICT y, size_t by, int nrc) {
+    UNUSED(bs);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(nrc);
+
+    const int qk = QK4_1;
+    const int nb = n / qk;
+
+    float sumf = 0;
+
+    const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+    const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        // Use HVX_UVector for unaligned load
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)x[ib].qs);
+
+        // Extract low nibbles: qs & 0x0F (no offset subtraction for q4_1)
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+
+        // Extract high nibbles: qs >> 4
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+
+        // Load q8 values: first 16 bytes and next 16 bytes
+        HVX_Vector q8_lo = Q6_V_vand_QV(p16, *(const HVX_UVector *)y[ib].qs);
+        HVX_Vector q8_hi = Q6_V_vand_QV(p16, *(const HVX_UVector *)(y[ib].qs + 16));
+
+        // vrmpy: for each 4-byte group, sum of unsigned*signed byte products -> int32
+        // q4_1 nibbles are unsigned (0-15), q8_1 values are signed
+        HVX_Vector rsum_lo = Q6_Vw_vrmpy_VubVb(lo_nib, q8_lo);
+        HVX_Vector rsum_hi = Q6_Vw_vrmpy_VubVb(hi_nib, q8_hi);
+
+        // Horizontal sum of 4 int32 values from each
+        int32_t __attribute__((aligned(128))) tmp_lo[32];
+        int32_t __attribute__((aligned(128))) tmp_hi[32];
+        *(HVX_Vector *)tmp_lo = rsum_lo;
+        *(HVX_Vector *)tmp_hi = rsum_hi;
+
+        int32_t sumi = 0;
+        for (int j = 0; j < 4; ++j) {
+            sumi += tmp_lo[j] + tmp_hi[j];
+        }
+
+        // Q4_1 formula: sumf += d_x * d_y * sumi + m_x * s_y
+        const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        const float m = ggml_compute_fp16_to_fp32(x[ib].m) * ggml_compute_fp16_to_fp32(y[ib].s);
+        sumf += d * sumi + m;
+    }
+
+    *s = sumf;
+}
 
 typedef struct {
     const ggml_tensor *src0;
@@ -416,9 +698,11 @@ typedef struct {
     int32_t ir0_end;
     int32_t ir1_start;
     int32_t ir1_end;
+    const void *wdata;
     worker_synctoken_t *synctoken;
 } mulmat_thread_data_t;
 
+#if 0
 static void quantize_row_q8_0(const float * x, block_q8_0 * y, int n) {
     const int nb = n / QK8_0;
     for (int i = 0; i < nb; ++i) {
@@ -436,27 +720,110 @@ static void quantize_row_q8_0(const float * x, block_q8_0 * y, int n) {
         }
     }
 }
+#endif
 
-static enum ggml_type ggml_vec_dot_type(enum ggml_type type) {
-    switch (type) {
-        case GGML_TYPE_F32:
-            return GGML_TYPE_F32;
-        case GGML_TYPE_F16:
-            return GGML_TYPE_F16;
-        case GGML_TYPE_Q4_0:
-        case GGML_TYPE_Q5_0:
-            return GGML_TYPE_Q8_0;
-        case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q5_1:
-            return GGML_TYPE_Q8_1;
-        case GGML_TYPE_Q8_0:
-            return GGML_TYPE_Q8_0;
-        case GGML_TYPE_Q8_1:
-            return GGML_TYPE_Q8_1;
-        default:
-            return GGML_TYPE_F32;
+static void quantize_row_q8_0(const float * x, block_q8_0 * y, int n) {
+    const int nb = n / QK8_0;
+
+    for (int i = 0; i < nb; ++i) {
+        const float * src = x + i * QK8_0;
+        int8_t * dst_qs = y[i].qs;
+
+        // Compute amax using HVX if aligned
+        float amax = 0.0f;
+        if (((uintptr_t)src & 0x7F) == 0) {
+            const HVX_Vector * restrict vsrc = (const HVX_Vector *)src;
+            HVX_Vector vabs_max = Q6_V_vsplat_R(0);
+            for (int j = 0; j < QK8_0 / VLEN_FP32; ++j) {
+                HVX_Vector v = vsrc[j];
+                HVX_Vector vabs = hvx_vec_abs_f32(v);
+                vabs_max = Q6_Vsf_vmax_VsfVsf(vabs_max, vabs);
+            }
+            vabs_max = hvx_vec_reduce_max_f32(vabs_max);
+            amax = hvx_vec_get_f32(vabs_max);
+        } else {
+            for (int j = 0; j < QK8_0; ++j) {
+                amax = MAX(amax, fabsf(src[j]));
+            }
+        }
+
+        const float d = amax / ((1 << 7) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+        y[i].d = ggml_compute_fp32_to_fp16(d);
+
+        // Quantize using scalar (fp16 intermediate in HVX path causes precision issues)
+        for (int j = 0; j < QK8_0; ++j) {
+            const float x0 = src[j] * id;
+            dst_qs[j] = roundf(x0);
+        }
     }
 }
+
+static void quantize_row_q8_1(const float * x, block_q8_1 * y, int n) {
+    const int nb = n / QK8_1;
+
+    for (int i = 0; i < nb; ++i) {
+        const float * src = x + i * QK8_1;
+
+        float amax = 0.0f;
+        for (int j = 0; j < QK8_1; ++j) {
+            amax = MAX(amax, fabsf(src[j]));
+        }
+
+        const float d = amax / ((1 << 7) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+
+        y[i].d = ggml_compute_fp32_to_fp16(d);
+
+        int sum = 0;
+        for (int j = 0; j < QK8_1 / 2; ++j) {
+            const float v0 = src[j] * id;
+            const float v1 = src[QK8_1 / 2 + j] * id;
+
+            y[i].qs[j] = roundf(v0);
+            y[i].qs[QK8_1 / 2 + j] = roundf(v1);
+
+            sum += y[i].qs[j];
+            sum += y[i].qs[QK8_1 / 2 + j];
+        }
+
+        y[i].s = ggml_compute_fp32_to_fp16(sum * d);
+    }
+}
+
+static void quantize_f32_to_f16_row_hvx(const float * GGML_RESTRICT x, uint16_t * GGML_RESTRICT y, int n) {
+    const int fp32_per_vec = VLEN / sizeof(float);  // 32
+    const int fp16_per_vec = VLEN / sizeof(uint16_t); // 64
+
+    // scalar fallback for small or unaligned cases
+    if (n < fp16_per_vec || ((uintptr_t)x & 0x3F) != 0 || ((uintptr_t)y & 0x7F) != 0) {
+        for (int i = 0; i < n; ++i) {
+            y[i] = ggml_compute_fp32_to_fp16(x[i]);
+        }
+        return;
+    }
+
+    const int nvec = n / fp16_per_vec;
+    const int nloe = n % fp16_per_vec;
+
+    const HVX_Vector * restrict vx = (const HVX_Vector *)x;
+    HVX_Vector * restrict vy = (HVX_Vector *)y;
+
+    for (int i = 0; i < nvec; ++i) {
+        HVX_Vector v0 = vx[2 * i];
+        HVX_Vector v1 = vx[2 * i + 1];
+        vy[i] = hvx_vec_f32_to_f16(v0, v1);
+    }
+
+    if (nloe > 0) {
+        const float * tail_x = x + nvec * fp16_per_vec;
+        uint16_t * tail_y = y + nvec * fp16_per_vec;
+        for (int i = 0; i < nloe; ++i) {
+            tail_y[i] = ggml_compute_fp32_to_fp16(tail_x[i]);
+        }
+    }
+}
+
 
 
 
@@ -466,7 +833,8 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                                                    const enum ggml_type vec_dot_type,
                                                    const int32_t num_rows_per_vec_dot,
                                                    const int32_t ir0_start, const int32_t ir0_end,
-                                                   const int32_t ir1_start, const int32_t ir1_end) {
+                                                   const int32_t ir1_start, const int32_t ir1_end,
+                                                   const void * wdata_precomputed) {
     const bool src1_cont = ggml_is_contiguous(src1);
 
     const int32_t ne00 = src0->ne[0];
@@ -504,8 +872,10 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
     const int32_t blck_0 = 16;
     const int32_t blck_1 = 16;
 
-    const void * wdata = src1->data;
-    if (src1->type != vec_dot_type) {
+    const void * wdata;
+    if (wdata_precomputed != NULL) {
+        wdata = wdata_precomputed;
+    } else if (src1->type != vec_dot_type) {
         const size_t nbw1 = row_size;
         const size_t nbw2 = nbw1 * ne11;
         const size_t nbw3 = nbw2 * ne12;
@@ -518,9 +888,17 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                         for (int i11 = 0; i11 < ne11; ++i11) {
                             const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
                             uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
-                            for (int i = 0; i < ne10; ++i) {
-                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
-                            }
+                            quantize_f32_to_f16_row_hvx(src_row, dst_row, ne10);
+                        }
+                    }
+                }
+            } else if (vec_dot_type == GGML_TYPE_Q8_1) {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            block_q8_1 * dst_row = (block_q8_1*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_1(src_row, dst_row, ne10);
                         }
                     }
                 }
@@ -536,7 +914,11 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                 }
             }
             wdata = q8_data;
+        } else {
+            wdata = src1->data;
         }
+    } else {
+        wdata = src1->data;
     }
 
     const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
@@ -580,6 +962,10 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
                         const block_q4_0 * q4_row = (const block_q4_0*)(src0_row + ir0 * nb01);
                         const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
                         vec_dot_q4_0_q8_0(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
+                    } else if (type == GGML_TYPE_Q4_1) {
+                        const block_q4_1 * q4_row = (const block_q4_1*)(src0_row + ir0 * nb01);
+                        const block_q8_1 * q8_col = (const block_q8_1*)src1_col;
+                        vec_dot_q4_1_q8_1(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
                     } else if (type == GGML_TYPE_Q8_0) {
                         const block_q8_0 * q8_row = (const block_q8_0*)(src0_row + ir0 * nb01);
                         const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
@@ -607,7 +993,8 @@ static void mulmat_thread_func(void * data) {
         tdata->type, tdata->vec_dot_type,
         tdata->num_rows_per_vec_dot,
         tdata->ir0_start, tdata->ir0_end,
-        tdata->ir1_start, tdata->ir1_end
+        tdata->ir1_start, tdata->ir1_end,
+        tdata->wdata
     );
 
     if (tdata->synctoken != NULL) {
@@ -671,7 +1058,7 @@ static int ggmlop_dsp_mulmat_singlethread(remote_handle64 h, const ggml_tensor *
         }
 
         ggml_compute_forward_mul_mat_one_chunk(src0, src1, dst, src0->type, vec_dot_type, num_rows_per_vec_dot,
-                                               ir0_start, ir0_end, ir1_start, ir1_end);
+                                               ir0_start, ir0_end, ir1_start, ir1_end, NULL);
 
         if (1 >= nchunk0 * nchunk1) {
             break;
@@ -720,9 +1107,17 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
                         for (int i11 = 0; i11 < src1->ne[1]; ++i11) {
                             const float * src_row = (const float*)((const char*)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2] + i11 * src1->nb[1]);
                             uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
-                            for (int i = 0; i < src1->ne[0]; ++i) {
-                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
-                            }
+                            quantize_f32_to_f16_row_hvx(src_row, dst_row, src1->ne[0]);
+                        }
+                    }
+                }
+            } else if (vec_dot_type == GGML_TYPE_Q8_1) {
+                for (int i13 = 0; i13 < src1->ne[3]; ++i13) {
+                    for (int i12 = 0; i12 < src1->ne[2]; ++i12) {
+                        for (int i11 = 0; i11 < src1->ne[1]; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2] + i11 * src1->nb[1]);
+                            block_q8_1 * dst_row = (block_q8_1*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_1(src_row, dst_row, src1->ne[0]);
                         }
                     }
                 }
@@ -748,10 +1143,10 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
     if (n_threads < 1) n_threads = 1;
     if (n_threads > 8) n_threads = 8;
 
-    FARF(HIGH, "mulmat multithread: num_workers=%u, n_threads=%u, nr1=%d", num_workers, n_threads, nr1);
+    GGMLHEXAGON_LOG_DEBUG("mulmat multithread: num_workers=%u, n_threads=%u, nr1=%d", num_workers, n_threads, nr1);
 
     if (n_threads == 1) {
-        FARF(HIGH, "WARNING: Running single-threaded! num_workers=%u", num_workers);
+        GGMLHEXAGON_LOG_WARN("WARNING: Running single-threaded! num_workers=%u", num_workers);
     }
 
     const int32_t rows_per_thread = (nr1 + n_threads - 1) / n_threads;
@@ -775,6 +1170,7 @@ static int ggmlop_dsp_mulmat_multithread(remote_handle64 h, const struct dsptens
         thread_data[t].ir0_end = nr0;
         thread_data[t].ir1_start = ir1_start;
         thread_data[t].ir1_end = ir1_end;
+        thread_data[t].wdata = wdata;
         thread_data[t].synctoken = (t == 0) ? NULL : &synctoken;
 
         if (t == 0) {
@@ -867,9 +1263,17 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                         for (int i11 = 0; i11 < ne11; ++i11) {
                             const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
                             uint16_t * dst_row = (uint16_t*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
-                            for (int i = 0; i < ne10; ++i) {
-                                dst_row[i] = ggml_compute_fp32_to_fp16(src_row[i]);
-                            }
+                            quantize_f32_to_f16_row_hvx(src_row, dst_row, ne10);
+                        }
+                    }
+                }
+            } else if (vec_dot_type == GGML_TYPE_Q8_1) {
+                for (int i13 = 0; i13 < ne13; ++i13) {
+                    for (int i12 = 0; i12 < ne12; ++i12) {
+                        for (int i11 = 0; i11 < ne11; ++i11) {
+                            const float * src_row = (const float*)((const char*)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11);
+                            block_q8_1 * dst_row = (block_q8_1*)((char*)q8_data + i13 * nbw3 + i12 * nbw2 + i11 * nbw1);
+                            quantize_row_q8_1(src_row, dst_row, ne10);
                         }
                     }
                 }
@@ -945,6 +1349,10 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                             const block_q4_0 * q4_row = (const block_q4_0*)(vtcm_buf + row_idx * nb01);
                             const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
                             vec_dot_q4_0_q8_0(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
+                        } else if (type == GGML_TYPE_Q4_1) {
+                            const block_q4_1 * q4_row = (const block_q4_1*)(vtcm_buf + row_idx * nb01);
+                            const block_q8_1 * q8_col = (const block_q8_1*)src1_col;
+                            vec_dot_q4_1_q8_1(ne00, &tmp[row_idx], 0, q4_row, 0, q8_col, 0, 1);
                         } else if (type == GGML_TYPE_Q8_0) {
                             const block_q8_0 * q8_row = (const block_q8_0*)(vtcm_buf + row_idx * nb01);
                             const block_q8_0 * q8_col = (const block_q8_0*)src1_col;
@@ -1012,7 +1420,7 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
 
     void *vtcm_base = HAP_request_VTCM(total_vtcm, 0);
     if (vtcm_base == NULL) {
-        GGMLHEXAGON_LOG_INFO("%s: VTCM allocation failed, falling back to non-VTCM", __func__);
+        GGMLHEXAGON_LOG_INFO("%s: VTCM allocation failed, falling back to multithread-without-vtcm", __func__);
         return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
     }
 
@@ -1069,28 +1477,6 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return 0;
-}
-
-int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
-    int  ret = 0;
-    char tempbuf[256];
-    int  mulmat_algo = ggmlop_get_mulmat_algotype();
-    ggmlhexagon_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
-    int64_t begin_time = ggml_time_us();
-    if (mulmat_algo == 32) {
-        GGMLHEXAGON_LOG_DEBUG("mulmat using VTCM+HMX mode");
-        ret = ggmlop_dsp_mulmat_vtcm_hmx(h, src0, src1, dst);
-    } else if (ggmlop_get_thread_counts() > 1) {
-        GGMLHEXAGON_LOG_DEBUG("mulmat using multithread mode");
-        ret= ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
-    } else {
-        GGMLHEXAGON_LOG_DEBUG("mulmat using singlethread mode");
-        ret = ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
-    }
-    int64_t end_time = ggml_time_us();
-    GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
-    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
-    return ret;
 }
 
 // Transfer activation chunk from fp32 to fp16 tiles
@@ -1908,7 +2294,7 @@ static void parallel_output_writeback(float *dst, const __fp16 *src,
     worker_pool_synctoken_wait(&synctoken);
 }
 
-int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
     int hmx_locked = 0;
     if (compute_res_ctx_id != 0) {
@@ -2200,4 +2586,27 @@ int ggmlop_dsp_mulmat_vtcm_hmx(remote_handle64 h, const struct dsptensor * src0,
     GGMLHEXAGON_LOG_INFO("end real vtcm + hmx");
 
     return 0;
+}
+
+int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+    int  ret = 0;
+    char tempbuf[256];
+    int  mulmat_algo = ggmlop_get_mulmat_algotype();
+    ggmlhexagon_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
+    int64_t begin_time = ggml_time_us();
+    if (mulmat_algo == 32) {
+        GGMLHEXAGON_LOG_INFO("mulmat using HMX mode");
+        ret = ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
+    } else if (ggmlop_get_thread_counts() > 1) {
+        GGMLHEXAGON_LOG_INFO("mulmat using MT_VTCM mode");
+        //ret= ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
+        ret= ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
+    } else {
+        GGMLHEXAGON_LOG_INFO("mulmat using singlethread mode");
+        ret = ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
+    }
+    int64_t end_time = ggml_time_us();
+    GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
+    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
+    return ret;
 }

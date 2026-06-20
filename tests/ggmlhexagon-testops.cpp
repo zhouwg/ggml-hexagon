@@ -5090,11 +5090,11 @@ const ggml_type mulmat_other_types[] = {
     test_cases.emplace_back(new test_bin_bcast(ggml_add, GGML_TYPE_F32, {2048, 2048, 1, 1}, {1,   1, 1, 1}));
     test_cases.emplace_back(new test_bin_bcast(ggml_add, GGML_TYPE_F32, {2048, 1, 1, 1}, {1,   1, 1, 1}));
     test_cases.emplace_back(new test_bin_bcast(ggml_add, GGML_TYPE_F32, {4096, 4096, 1, 1}, {1,   1, 1, 1}));
+    //verify computation result of mulmat on cDSP
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
-    //verify computation result of mulmat on cDSP
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 256, 128, 256, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 600, 300, 600, { 1,  1}, {1, 1}));

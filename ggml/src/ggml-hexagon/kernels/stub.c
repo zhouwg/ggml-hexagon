@@ -313,9 +313,9 @@ static __inline int _stub_method(remote_handle64 _handle, uint32_t _mid, uint32_
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 power_level, int32 offload_cgraph_type, int32 mulmat_algotype, int32 thread_counts) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 dump_diag_info, int32 offload_cgraph_type, int32 mulmat_algotype, int32 thread_counts) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 2;
-   return _stub_method(_handle, _mid, (uint32_t*)&power_level, (uint32_t*)&offload_cgraph_type, (uint32_t*)&mulmat_algotype, (uint32_t*)&thread_counts);
+   return _stub_method(_handle, _mid, (uint32_t*)&dump_diag_info, (uint32_t*)&offload_cgraph_type, (uint32_t*)&mulmat_algotype, (uint32_t*)&thread_counts);
 }
 static __inline int _stub_unpack(_ATTRIBUTE_UNUSED remote_arg* _praROutPost, _ATTRIBUTE_UNUSED remote_arg* _ppraROutPost[1], _ATTRIBUTE_UNUSED void* _primROut, _ATTRIBUTE_UNUSED uint32_t _rout0[1], _ATTRIBUTE_UNUSED uint32_t _rout1[4], _ATTRIBUTE_UNUSED uint32_t _rout2[4], _ATTRIBUTE_UNUSED uint32_t _rout3[1], _ATTRIBUTE_UNUSED uint32_t _rout4[16], _ATTRIBUTE_UNUSED uint32_t _rout5[1], _ATTRIBUTE_UNUSED char* _rout6[1], _ATTRIBUTE_UNUSED uint32_t _rout6Len[1]) {
    int _nErr = 0;

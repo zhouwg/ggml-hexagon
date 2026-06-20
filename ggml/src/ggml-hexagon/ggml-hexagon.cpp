@@ -6101,7 +6101,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
             GGMLHEXAGON_LOG_INFO("only support offload GGML_OP_ADD and GGML_OP_MUL_MAT to cDSP currently");
         }
         ggmlhexagon_probe_dspinfo(ctx);
-        ggmlop_dsp_setclocks(ctx->ggmlop_handle, HAP_DCVS_VCORNER_TURBO_PLUS, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
+        ggmlop_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         int result = ggmlhexagon_init_rpcmempool(ctx);
         if (0 != result) {
@@ -6315,6 +6315,112 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
 // =================================================================================================
 //  section-8: implementation of ggml-hexagon backend according to specification in ggml backend subsystem
 // =================================================================================================
+//ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
+static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    ggmlhexagon_dump_op_info(dst);
+    const int64_t m = src0->ne[1];
+    const int64_t k = src0->ne[0];
+    const int64_t n = src1->ne[1];
+    const uint32_t src0_rank    = ggml_n_dims(src0);
+    const uint32_t src1_rank    = ggml_n_dims(src1);
+    GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
+
+    if (dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    switch (src0->type) {
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q8_0:
+#if 0   //not yet supported on DSP side
+        case GGML_TYPE_BF16:
+        case GGML_TYPE_Q5_0:
+        case GGML_TYPE_Q5_1:
+        case GGML_TYPE_Q2_K:
+        case GGML_TYPE_Q3_K:
+        case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q5_K:
+        case GGML_TYPE_Q6_K:
+        case GGML_TYPE_IQ2_S:
+        case GGML_TYPE_IQ2_XS:
+        case GGML_TYPE_IQ2_XXS:
+        case GGML_TYPE_IQ3_XXS:
+        case GGML_TYPE_IQ1_S:
+        case GGML_TYPE_IQ4_XS:
+        case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
+#endif
+            if (src0->ne[0] % 32) {
+                return false;
+            }
+
+            if (ggml_nrows(src0) > 16 * 1024) {
+                return false;  // typically the lm-head which would be too large for VTCM
+            }
+
+            if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+                return false;  // no huge batches or broadcasting (for now)
+            }
+
+            // src0 (weights) must be repacked
+            //if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
+            //    return false;
+            //}
+            if (1 == g_hexagon_appcfg.enable_q_mulmat) {
+                return true;
+            } else {
+                return false;
+            }
+            break;
+
+        case GGML_TYPE_F16:
+            if (src0->nb[1] < src0->nb[0]) {
+                GGMLHEXAGON_LOG_WARN("permuted F16 src0 not supported\n");
+                //return false;
+            }
+            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
+                GGMLHEXAGON_LOG_WARN("src1 broadcasting not supported\n");
+                //return false;
+            }
+            if (ggml_nrows(src1) > 1024) {
+                //return false;  // no huge batches (for now)
+            }
+            break;
+
+        case GGML_TYPE_F32:
+            if (src1->type != GGML_TYPE_F32) {
+                return false;
+            }
+            if (src0->nb[1] < src0->nb[0]) {
+                GGMLHEXAGON_LOG_WARN("permuted F32 src0 not supported\n");
+                //return false;
+            }
+            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
+                GGMLHEXAGON_LOG_WARN("src1 broadcasting not supported\n");
+                //return false;
+            }
+            //if (ggml_nrows(src1) > 1024) {
+            //    GGMLHEXAGON_LOG_WARN("no huge batches");
+            //    return false;  // no huge batches (for now)
+            //}
+            break;
+
+        default:
+            return false;
+    }
+
+    return true;
+}
+
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
     GGML_UNUSED(ctx);
@@ -6355,16 +6461,19 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
         }
         case GGML_OP_MUL_MAT:
         {
+#if 0
             ggmlhexagon_dump_op_info(op_tensor);
             const int64_t m = src0->ne[1];
             const int64_t k = src0->ne[0];
             const int64_t n = src1->ne[1];
+            const uint32_t src0_rank    = ggml_n_dims(src0);
+            const uint32_t src1_rank    = ggml_n_dims(src1);
             GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
 
             if (ne00 < 1024) {
                 //fused ops via single FastRPC call is not supported at the moment,
                 //don't offload small matrix to reduce the overhead of FastRPC
-                return false;
+                //return false;
             }
 
             if (src0_rank != src1_rank) {
@@ -6384,7 +6493,8 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 }
 
                 bool supported = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
-                        || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q8_0
+                        || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1
+                        || src0->type == GGML_TYPE_Q8_0
                        ) && (src1->type == GGML_TYPE_F32) && (op_tensor->type == GGML_TYPE_F32);
                 GGMLHEXAGON_LOG_DEBUG("MUL_MAT enable_q_mulmat: src0.type=%d, src1.type=%d, op.type=%d, supported=%d", src0->type, src1->type, op_tensor->type, supported);
                 return supported;
@@ -6395,6 +6505,8 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 GGMLHEXAGON_LOG_DEBUG("MUL_MAT default: src0.type=%d, src1.type=%d, op.type=%d, supported=%d", src0->type, src1->type, op_tensor->type, supported);
                 return supported;
             }
+#endif
+            return ggmlhexagon_supported_mul_mat(op_tensor);
         }
         case GGML_OP_SOFT_MAX:{
             if (!ggml_is_contiguous(op_tensor))
@@ -6428,95 +6540,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
             break;
     }
     return false;
-}
-
-//borrow from Qualcomm's official ggml-hexagon backend
-static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
-    const struct ggml_tensor * src0 = dst->src[0];
-    const struct ggml_tensor * src1 = dst->src[1];
-
-    if (dst->type != GGML_TYPE_F32) {
-        return false;
-    }
-
-    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
-        return false;
-    }
-
-    switch (src0->type) {
-        case GGML_TYPE_Q4_0:
-        case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q8_0:
-        case GGML_TYPE_IQ4_NL:
-        case GGML_TYPE_MXFP4:
-            if (src0->ne[0] % 32) {
-                return false;
-            }
-
-            if (ggml_nrows(src0) > 16 * 1024) {
-                return false;  // typically the lm-head which would be too large for VTCM
-            }
-
-            if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
-                return false;  // no huge batches or broadcasting (for now)
-            }
-
-            // src0 (weights) must be repacked
-            //if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
-            //    return false;
-            //}
-            if (1 == g_hexagon_appcfg.enable_q_mulmat) {
-                if (1 == g_hexagon_appcfg.enable_all_q_mulmat) {
-                    bool supported = (src0->type == GGML_TYPE_F32  || src0->type == GGML_TYPE_F16 || ggml_is_quantized(src0->type)) && (src1->type == GGML_TYPE_F32);
-                    GGMLHEXAGON_LOG_DEBUG("MUL_MAT enable_all_q_mulmat: src0.type=%d, src1.type=%d, supported=%d", src0->type, src1->type, supported);
-                    return supported;
-                }
-
-                bool supported = (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
-                        || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q8_0
-                       ) && (src1->type == GGML_TYPE_F32) && (dst->type == GGML_TYPE_F32);
-                GGMLHEXAGON_LOG_DEBUG("MUL_MAT enable_q_mulmat: src0.type=%d, src1.type=%d, op.type=%d, supported=%d", src0->type, src1->type, dst->type, supported);
-                return supported;
-            }
-            break;
-
-        case GGML_TYPE_F16:
-            if (src0->nb[1] < src0->nb[0]) {
-                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: permuted F16 src0 not supported\n");
-                return false;
-            }
-            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
-                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: src1 broadcasting not supported\n");
-                return false;
-            }
-            if (ggml_nrows(src1) > 1024) {
-                return false;  // no huge batches (for now)
-            }
-            break;
-
-        case GGML_TYPE_F32:
-            if (src1->type != GGML_TYPE_F32) {
-                return false;
-            }
-            if (src0->nb[1] < src0->nb[0]) {
-                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: permuted F32 src0 not supported\n");
-                return false;
-            }
-            if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
-                GGMLHEXAGON_LOG_WARN("ggml_hexagon_supported_mul_mat: src1 broadcasting not supported\n");
-                return false;
-            }
-            //if (ggml_nrows(src1) > 1024) {
-            //    GGMLHEXAGON_LOG_WARN("no huge batches");
-            //    return false;  // no huge batches (for now)
-            //}
-            break;
-
-        default:
-            return false;
-    }
-
-    return true;
 }
 
 // Relaxed supports_op for cgraph offload mode (offload_cgraph_type==2).

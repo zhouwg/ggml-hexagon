@@ -34,7 +34,9 @@ extern "C" {
 #define VLEN                128
 
 #define QK4_0               32
+#define QK4_1               32
 #define QK8_0               32
+#define QK8_1               32
 
 #define GGML_UNUSED(x)      (void)(x)
 
@@ -391,20 +393,24 @@ static inline size_t ggml_type_size(enum ggml_type type) {
         case GGML_TYPE_BF16:
             return sizeof(uint16_t);
         case GGML_TYPE_Q4_0:
-        case GGML_TYPE_Q4_1:
             return sizeof(uint16_t) + QK4_0/2;
+        case GGML_TYPE_Q4_1:
+            return 2*sizeof(uint16_t) + QK4_1/2;
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_Q5_1:
             return sizeof(uint16_t) + QK4_0/2 + QK4_0/2;
         case GGML_TYPE_Q8_0:
-        case GGML_TYPE_Q8_1:
             return sizeof(uint16_t) + QK8_0;
+        case GGML_TYPE_Q8_1:
+            return 2*sizeof(uint16_t) + QK8_1;
         case GGML_TYPE_I8:
             return sizeof(int8_t);
         default:
             return sizeof(float);
     }
 }
+
+GGML_API enum ggml_type ggml_vec_dot_type(enum ggml_type type);
 
 static inline size_t ggml_row_size(enum ggml_type type, int64_t ne) {
     return ggml_type_size(type) * ne / ggml_blck_size(type);
