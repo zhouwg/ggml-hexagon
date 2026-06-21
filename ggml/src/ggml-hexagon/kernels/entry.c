@@ -424,7 +424,7 @@ AEEResult hap_probe_dsp(remote_handle64 h) {
     return AEE_SUCCESS;
 }
 
-AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 dump_diag_info, int32 offload_cgraph_type, int32 mulmat_algo, int32 thread_counts) {
+AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 offload_cgraph_type, int32 mulmat_algo, int32 thread_counts) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     GGMLHEXAGON_LOG_INFO("user specified thread_counts %d", thread_counts);
@@ -435,12 +435,19 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 dump_diag_info, int
 
     g_mulmat_algotype = mulmat_algo;
     GGMLHEXAGON_LOG_INFO("mulmat_algotype %d", g_mulmat_algotype);
-    FARF(ALWAYS, "mulmat_algotype set to %d (0=auto, 32=VTCM+HMX, 33=VTCM multithread)", g_mulmat_algotype);
+    GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=auto, 32=VTCM+HMX, 33=VTCM multithread)", g_mulmat_algotype);
 
     g_offload_cgraph_type = offload_cgraph_type;
     GGMLHEXAGON_LOG_INFO("offload_cgraph_type %d", offload_cgraph_type);
-    g_dump_diag_info      = dump_diag_info;
-    GGMLHEXAGON_LOG_INFO("dump_diag_info %d", dump_diag_info);
+
+    GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
+    //g_dump_diag_info      = diag_info;
+    //g_dump_diag_info      = diag_info;
+    GGMLHEXAGON_LOG_INFO("dump_diag_info %d", g_dump_diag_info);
+
+    //ggml_type_traits_dsp_init(1);
+    //re-use the IDL's input param
+    ggml_type_traits_dsp_init(diag_info);
 
     if (g_thread_counts >= 1) {
         AEEResult result = worker_pool_reinit_with_threads(g_thread_counts);

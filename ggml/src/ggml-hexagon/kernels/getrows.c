@@ -8,100 +8,7 @@
 //
 // For each index i in src1, copy & dequantize row src0[row_idx] into dst[:,i]
 
-// ---- K-quant constants (must match ggml-common.h) ----
-
-#define QK_K        256
-#define K_SCALE_SIZE 12
-
-// ---- fp16 conversion (reuse existing helper) ----
-
-static inline float dsp_fp16_to_fp32(uint16_t h) {
-    return ggml_compute_fp16_to_fp32(h);
-}
-
-// ---- scale/min unpacking for K-type quantization ----
-
-static inline void get_scale_min_k4(int j, const uint8_t * q,
-                                     uint8_t * d, uint8_t * m) {
-    if (j < 4) {
-        *d = q[j] & 63;
-        *m = q[j + 4] & 63;
-    } else {
-        *d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4);
-        *m = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4);
-    }
-}
-
-// ---- Quantized block structures (DSP-local definitions) ----
-
-typedef struct {
-    uint16_t d;             // super-block scale (fp16)
-    uint16_t dmin;          // super-block min (fp16)
-    uint8_t scales[K_SCALE_SIZE]; // packed 6-bit scales/mins
-    uint8_t qs[QK_K/2];     // 4-bit quants
-} dsp_block_q4_K;
-
-typedef struct {
-    uint16_t d;             // super-block scale (fp16)
-    uint16_t dmin;          // super-block min (fp16)
-    uint8_t scales[K_SCALE_SIZE]; // packed 6-bit scales/mins
-    uint8_t qh[QK_K/8];     // high bit for 5-bit quants
-    uint8_t qs[QK_K/2];     // low 4-bit quants
-} dsp_block_q5_K;
-
-// ---- Dequantization functions ----
-
-static void dequantize_row_q4_K(const dsp_block_q4_K * x, float * y, int k) {
-    const int nb = k / QK_K;
-
-    for (int i = 0; i < nb; i++) {
-        const uint8_t * q  = x[i].qs;
-        const float   d   = dsp_fp16_to_fp32(x[i].d);
-        const float min  = dsp_fp16_to_fp32(x[i].dmin);
-
-        int is = 0;
-        uint8_t sc, m;
-        for (int j = 0; j < QK_K; j += 64) {
-            get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
-            const float d1 = d * sc; const float m1 = min * m;
-            get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
-            const float d2 = d * sc; const float m2 = min * m;
-            for (int l = 0; l < 32; ++l) *y++ = d1 * (q[l] & 0xF) - m1;
-            for (int l = 0; l < 32; ++l) *y++ = d2 * (q[l] >> 4) - m2;
-            q += 32; is += 2;
-        }
-    }
-}
-
-static void dequantize_row_q5_K(const dsp_block_q5_K * x, float * y, int k) {
-    const int nb = k / QK_K;
-
-    for (int i = 0; i < nb; i++) {
-        const uint8_t * ql = x[i].qs;
-        const uint8_t * qh = x[i].qh;
-        const float   d   = dsp_fp16_to_fp32(x[i].d);
-        const float min  = dsp_fp16_to_fp32(x[i].dmin);
-
-        int is = 0;
-        uint8_t sc, m;
-        uint8_t u1 = 1, u2 = 2;
-        for (int j = 0; j < QK_K; j += 64) {
-            get_scale_min_k4(is + 0, x[i].scales, &sc, &m);
-            const float d1 = d * sc; const float m1 = min * m;
-            get_scale_min_k4(is + 1, x[i].scales, &sc, &m);
-            const float d2 = d * sc; const float m2 = min * m;
-            for (int l = 0; l < 32; ++l)
-                *y++ = d1 * ((ql[l] & 0xF) + (qh[l] & u1 ? 16 : 0)) - m1;
-            for (int l = 0; l < 32; ++l)
-                *y++ = d2 * ((ql[l] >> 4) + (qh[l] & u2 ? 16 : 0)) - m2;
-            ql += 32; is += 2;
-            u1 <<= 2; u2 <<= 2;
-        }
-    }
-}
-
 // ---- Thread data for parallel GET_ROWS ----
-
 typedef struct {
     const ggml_tensor * src0;
     const ggml_tensor * src1;
@@ -160,14 +67,14 @@ static void getrows_thread_func(void * data) {
         // dequantize based on type
         switch (type) {
             case GGML_TYPE_Q4_K:
-                dequantize_row_q4_K((const dsp_block_q4_K *)src_row, dst_row, (int)ne00);
+                dequantize_row_q4_K((const block_q4_K *)src_row, dst_row, (int)ne00);
                 break;
             case GGML_TYPE_Q5_K:
-                dequantize_row_q5_K((const dsp_block_q5_K *)src_row, dst_row, (int)ne00);
+                dequantize_row_q5_K((const block_q5_K *)src_row, dst_row, (int)ne00);
                 break;
             default:
                 GGMLHEXAGON_LOG_ERROR("GET_ROWS: unsupported type %d (%s)",
-                                      type, ggml_get_ggml_type_name(type));
+                                      type, ggml_get_type_traits(type)->type_name);
                 memset(dst_row, 0, ne00 * sizeof(float));
                 break;
         }
@@ -190,7 +97,7 @@ int ggmlop_dsp_getrows(remote_handle64 h,
 
     GGMLHEXAGON_LOG_DEBUG("GET_ROWS: src0 type=%s ne=[%ld,%ld,%ld,%ld] -> "
                           "dst f32 ne=[%ld,%ld,%ld,%ld], nr=%ld rows",
-                          ggml_get_ggml_type_name(src0->type),
+                          ggml_get_type_traits(src0->type)->type_name,
                           (long)src0->ne[0], (long)src0->ne[1],
                           (long)src0->ne[2], (long)src0->ne[3],
                           (long)dst->ne[0], (long)dst->ne[1],

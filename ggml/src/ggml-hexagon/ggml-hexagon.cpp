@@ -361,6 +361,8 @@ struct hexagon_appcfg_t {
     int mulmat_algotype;        // algorithm type of mulmat on cDSP side
     int offload_cgraph_type;    // offload type on AP side
     int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on cDSP side
+    int ggml_dsp_use_hvx;       // enable/disable HVX-optimized quantize_row & vec_dot on cDSP side
+
     const char * cfgfilename;
     const char * runtime_libpath;
     char version[GGMLHEXAGON_TMPBUF_LEN];
@@ -387,6 +389,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .mulmat_algotype        = 0,
         .offload_cgraph_type    = 0,
         .dump_diag_info         = 0,
+        .ggml_dsp_use_hvx       = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
     #if defined(STANDARD_ANDROID_APP)
@@ -2222,6 +2225,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "mulmat_algotype", g_hexagon_appcfg.mulmat_algotype, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "offload_cgraph_type", g_hexagon_appcfg.offload_cgraph_type, 2);
     hexagoncfg_instance.get_intvalue("cdsp", "dump_diag_info", g_hexagon_appcfg.dump_diag_info, 0);
+    hexagoncfg_instance.get_intvalue("cdsp", "ggml_dsp_use_hvx", g_hexagon_appcfg.ggml_dsp_use_hvx, 1);
 
     memcpy(g_hexagon_appcfg.version, version.c_str(), strlen(version.c_str()));
 
@@ -2355,6 +2359,11 @@ static bool ggmlhexagon_check_valid_appcfg() {
         g_hexagon_appcfg.dump_diag_info = 0;
     }
 
+    if (g_hexagon_appcfg.ggml_dsp_use_hvx > 1) {
+        GGMLHEXAGON_LOG_WARN("invalid ggml_dsp_use_hvx %d, reset to 1", g_hexagon_appcfg.ggml_dsp_use_hvx);
+        g_hexagon_appcfg.ggml_dsp_use_hvx = 1;
+    }
+
     if (!is_valid_appcfg) {
         GGMLHEXAGON_LOG_VERBOSE("it seems there is non-default configuration in ggml-hexagon.cfg, will using the default ggml backend accordingly");
     }
@@ -2384,6 +2393,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
         GGMLHEXAGON_LOG_INFO("mulmat algo type on cDSP:         %d", g_hexagon_appcfg.mulmat_algotype);
         GGMLHEXAGON_LOG_INFO("offload cgraph type:              %d", g_hexagon_appcfg.offload_cgraph_type);
         GGMLHEXAGON_LOG_INFO("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
+        GGMLHEXAGON_LOG_INFO("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
         ggmlhexagon_probe_dspinfo(ctx);
     } else {
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_QNN:   %d", g_hexagon_appcfg.hvx_threads);
@@ -6101,7 +6111,8 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
             GGMLHEXAGON_LOG_INFO("only support offload GGML_OP_ADD and GGML_OP_MUL_MAT to cDSP currently");
         }
         ggmlhexagon_probe_dspinfo(ctx);
-        ggmlop_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
+        //ggmlop_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
+        ggmlop_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.ggml_dsp_use_hvx, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         int result = ggmlhexagon_init_rpcmempool(ctx);
         if (0 != result) {
