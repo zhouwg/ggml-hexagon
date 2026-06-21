@@ -8351,11 +8351,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8192, 512, 5120, {128, 1}, {1, 1}));
 #endif
 
+#if 0 //JZ
     for (ggml_type type_a : all_types) {
         for (int i = 1; i < 10; ++i) {
             test_cases.emplace_back(new test_mul_mat(type_a,    GGML_TYPE_F32, 16,  i, 256, { 1,  1}, {1, 1}));
         }
     }
+#endif
 
 #if 0
     {
@@ -8370,7 +8372,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 #endif
 
-#if 1
+#if 0 //JZ
     for (ggml_type type_a : base_types) {
         for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
             std::vector<int> ks = { 256 };
@@ -8442,7 +8444,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, {1,  1}, {1, 1}));
         }
     }
-#else
+//#else
     // m = a rows
     // n = b rows
     // k = cols
@@ -8461,6 +8463,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 #endif
 
+#if 0 //JZ
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32,  64, 2,  128, { 8,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32,  83, 2,  128, { 8,  1}, {4, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32,  64, 2,   64, { 8,  1}, {4, 1}));
@@ -8479,6 +8482,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6, 4096, 5120, {1, 1}, {1, 1}));
+#endif
 
 #if 0
     // test the mat-mat path for Metal
@@ -8496,6 +8500,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 #endif
 
+#if 0 //JZ
     for (auto bs2 : {1,3}) {
         for (auto bs : {1,2,4,8}) {
             for (auto nr : {1,4}) {
@@ -8510,6 +8515,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+#endif
 
     // sycl backend will limit task global_range < MAX_INT
     // test case for f16-type-convert-to-fp32 kernel with large k under fp32 compute dtype (occurs in stable-diffusion)
@@ -9164,10 +9170,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 #endif
 
     //jz's case for HMX test and other test
-    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
-    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
-    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
-    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
+#if 0
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 256, 128, 256, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 600, 300, 600, { 1,  1}, {1, 1}));
@@ -9182,6 +9185,30 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 4096, 2048, 4096, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 14336, 512, 4096, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 4096, 4096, 4096, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 512, 512, 1024, { 1,  1}, {1, 1}));
+#endif
+
+    // matrix cases for HVX quantize perf comparison
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 32, 14, 64, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 14336, 512, 4096, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,    GGML_TYPE_F32, 4096, 4096, 4096, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16,     GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16,     GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+
     //end jz'case
     return test_cases;
 }

@@ -835,9 +835,9 @@ function check_hexagon_backend
 function check_mulmat_algotype
 {
     printf "mulmat_algotype ${mulmat_algotype} \n"
-    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]]; then
+    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]]; then
         printf "invalid mulmat algotype\n"
-        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 32, 33 \n"
+        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 31, 32, 33 \n"
         exit 1
     fi
 }
@@ -998,9 +998,9 @@ function show_usage()
     echo "  $0 run_testop     MUL_MAT       0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify accuracy    of MUL_MAT)"
     echo "  $0 run_benchmark  ADD/MUL_MAT   0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify performance of ADD/MUL_MAT)"
     echo "  $0 run_benchmark  ADD/MUL_MAT   0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) 256/512/1024/2048/4096 256/512/1024/2048/4096"
-    echo "  $0 run_benchmark  MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_perfop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
+    echo "  $0 run_benchmark  MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
+    echo "  $0 run_perfop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
+    echo "  $0 run_testop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
     echo "  $0 run_testop     ADD                                                            (verify accuracy    of ADD     on cDSP)"
 
     echo -e "\n\n\n"

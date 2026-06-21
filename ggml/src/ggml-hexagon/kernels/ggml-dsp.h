@@ -188,7 +188,7 @@ extern "C" {
 
 #define GGMLHEXAGON_TMPBUF_LEN          256
 
-#ifdef GGMLHEXAGON_DEBUG
+#if GGMLHEXAGON_DEBUG
 
 #define GGMLHEXAGON_LOG_DEBUG(...)      ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
@@ -2068,6 +2068,7 @@ GGML_API float          ggml_compute_fp16_to_fp32(uint16_t h);
 GGML_API float          ggml_fp16_to_fp32(ggml_fp16_t);
 GGML_API ggml_fp16_t    ggml_fp32_to_fp16(float);
 GGML_API void           ggml_fp16_to_fp32_row(const ggml_fp16_t *, float *, int64_t);
+GGML_API void           ggml_fp16_to_fp32_row_hvx(const ggml_fp16_t *, float *, int64_t);
 GGML_API void           ggml_fp32_to_fp16_row(const float *, ggml_fp16_t *, int64_t);
 
 GGML_API ggml_bf16_t    ggml_fp32_to_bf16(float);
@@ -2106,7 +2107,9 @@ GGML_API void vec_dot_q5_0_q8_0_generic (int n, float * GGML_RESTRICT s, size_t 
 GGML_API void vec_dot_q5_1_q8_1_generic (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_q8_0_q8_0_generic (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_iq4_nl_q8_0_generic(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_iq4_nl_q8_0_hvx   (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_bf16_bf16_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_bf16_bf16_hvx     (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_q4_K_q8_K_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_q6_K_q8_K_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_q2_K_q8_K_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
@@ -2120,6 +2123,14 @@ GGML_API void vec_dot_iq2_xxs_q8_K_generic(int n, float * GGML_RESTRICT s, size_
 GGML_API void vec_dot_iq2_xs_q8_K_generic (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_iq2_s_q8_K_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 GGML_API void vec_dot_iq1_s_q8_K_generic  (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+
+// vec_dot HVX-accelerated implementations
+GGML_API void vec_dot_f16_f16_hvx          (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_q4_0_q8_0_generic_hvx(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_q8_0_q8_0_hvx       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_q4_1_q8_1_hvx       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_q5_0_q8_0_hvx       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
+GGML_API void vec_dot_q5_1_q8_1_hvx       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 
 // quantize HVX-accelerated implementations
 GGML_API void quantize_row_bf16_hvx          (const float * GGML_RESTRICT x, ggml_bf16_t * GGML_RESTRICT y, int n);

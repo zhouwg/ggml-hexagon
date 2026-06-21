@@ -633,43 +633,43 @@ static const struct ggml_type_traits_dsp type_traits_dsp[GGML_TYPE_COUNT] = {
     },
     [GGML_TYPE_F16] = {
         .from_float       = (ggml_from_float_t) quantize_f32_to_f16_row_hvx,
-        .to_float         = NULL,
-        .vec_dot          = vec_dot_f16_f16_generic,
+        .to_float         = (ggml_to_float_t) ggml_fp16_to_fp32_row_hvx,
+        .vec_dot          = vec_dot_f16_f16_hvx,
         .vec_dot_type     = GGML_TYPE_F16,
         .nrows            = 1,
     },
     [GGML_TYPE_Q4_0] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_0_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_q4_0_q8_0_generic,
+        .vec_dot          = vec_dot_q4_0_q8_0_generic_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_0,
         .nrows            = 1,
     },
     [GGML_TYPE_Q4_1] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_1_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_q4_1_q8_1_generic,
+        .vec_dot          = vec_dot_q4_1_q8_1_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_1,
         .nrows            = 1,
     },
     [GGML_TYPE_Q5_0] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_0_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_q5_0_q8_0_generic,
+        .vec_dot          = vec_dot_q5_0_q8_0_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_0,
         .nrows            = 1,
     },
     [GGML_TYPE_Q5_1] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_1_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_q5_1_q8_1_generic,
+        .vec_dot          = vec_dot_q5_1_q8_1_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_1,
         .nrows            = 1,
     },
     [GGML_TYPE_Q8_0] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_0_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_q8_0_q8_0_generic,
+        .vec_dot          = vec_dot_q8_0_q8_0_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_0,
         .nrows            = 1,
     },
@@ -683,7 +683,7 @@ static const struct ggml_type_traits_dsp type_traits_dsp[GGML_TYPE_COUNT] = {
     [GGML_TYPE_IQ4_NL] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_0_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_iq4_nl_q8_0_generic,
+        .vec_dot          = vec_dot_iq4_nl_q8_0_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_0,
         .nrows            = 1,
     },
@@ -1424,6 +1424,12 @@ static inline float fp32_from_bits(uint32_t w) {
 }
 
 uint16_t ggml_compute_fp32_to_fp16(float f) {
+    if (ggml_dsp_use_hvx) {
+        __fp16 h = (__fp16)f;
+        uint16_t result;
+        memcpy(&result, &h, sizeof(result));
+        return result;
+    }
     const float scale_to_inf = fp32_from_bits(0x77800000U);
     const float scale_to_zero = fp32_from_bits(0x08800000U);
     float base = (fabsf(f) * scale_to_inf) * scale_to_zero;
@@ -1445,6 +1451,11 @@ uint16_t ggml_compute_fp32_to_fp16(float f) {
 }
 
 float ggml_compute_fp16_to_fp32(uint16_t h) {
+    if (ggml_dsp_use_hvx) {
+        __fp16 f;
+        memcpy(&f, &h, sizeof(f));
+        return (float)f;
+    }
     const uint32_t w = (uint32_t)h << 16;
     const uint32_t sign = w & UINT32_C(0x80000000);
     const uint32_t two_w = w + w;
@@ -1510,6 +1521,46 @@ ggml_bf16_t ggml_fp32_to_bf16(float x) {
 void ggml_fp16_to_fp32_row(const ggml_fp16_t * x, float * y, int64_t n) {
     for (int64_t i = 0; i < n; ++i) {
         y[i] = ggml_compute_fp16_to_fp32(x[i]);
+    }
+}
+
+void ggml_fp16_to_fp32_row_hvx(const ggml_fp16_t * x, float * y, int64_t n) {
+    const int fp16_per_vec = 128 / sizeof(uint16_t); // 64
+
+    if (n < fp16_per_vec || ((uintptr_t)x & 0x7F) != 0 || ((uintptr_t)y & 0x7F) != 0) {
+        for (int64_t i = 0; i < n; ++i) {
+            y[i] = ggml_compute_fp16_to_fp32(x[i]);
+        }
+        return;
+    }
+
+    const int nvec = n / fp16_per_vec;
+    const int nloe = n % fp16_per_vec;
+
+    const HVX_Vector * restrict vx = (const HVX_Vector *)x;
+    HVX_Vector * restrict vy = (HVX_Vector *)y;
+    const HVX_Vector one_f16 = Q6_Vh_vsplat_R(0x3C00); // 1.0 in fp16
+
+    for (int i = 0; i < nvec; ++i) {
+        HVX_Vector v_shuf = Q6_Vh_vshuff_Vh(vx[i]);
+
+#if __HVX_ARCH__ >= 79
+        HVX_VectorPair p = Q6_Wsf_vmpy_VhfVhf(v_shuf, one_f16);
+        // Swap hi/lo to match sequential element ordering
+        vy[2*i]     = Q6_V_hi_W(p);
+        vy[2*i + 1] = Q6_V_lo_W(p);
+#else
+        HVX_VectorPair p = Q6_Wqf32_vmpy_VhfVhf(v_shuf, one_f16);
+        vy[2*i]     = Q6_Vsf_equals_Vqf32(Q6_V_hi_W(p));
+        vy[2*i + 1] = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(p));
+#endif
+    }
+
+    if (nloe > 0) {
+        const int base = nvec * fp16_per_vec;
+        for (int64_t i = 0; i < nloe; ++i) {
+            y[base + i] = ggml_compute_fp16_to_fp32(x[base + i]);
+        }
     }
 }
 

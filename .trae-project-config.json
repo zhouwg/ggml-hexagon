@@ -168,14 +168,14 @@
     "reminder": "All commands must be executed locally"
   },
   "vec_dot_f32_hvx_performance_comparison": {
-    "title": "vec_dot_f32_hvx_ai vs vec_dot_f32_hvx_me Performance Comparison",
+    "title": "vec_dot_f32_hvx_impl vs vec_dot_f32_hvx_impl_me Performance Comparison",
     "description": "Used to compare performance differences between two HVX dot product implementations",
     "source_file": "ggml/src/ggml-hexagon/kernels/mulmat.c",
     "steps": [
       {
         "step": 1,
         "description": "Enable vec_dot_f32_hvx_ai",
-        "action": "Modify mulmat.c line 251-255: uncomment vec_dot_f32_hvx_ai, comment vec_dot_f32_hvx_me"
+        "action": "Modify function vec_dot_f32_hvx in mulmat.c : uncomment vec_dot_f32_hvx_impl, comment vec_dot_f32_hvx_impl_me"
       },
       {
         "step": 2,
@@ -199,8 +199,8 @@
       },
       {
         "step": 6,
-        "description": "Enable vec_dot_f32_hvx_me",
-        "action": "Modify mulmat.c line 251-255: comment vec_dot_f32_hvx_ai, uncomment vec_dot_f32_hvx_me"
+        "description": "Enable vec_dot_f32_hvx_impl_me",
+        "action": "Modify function vec_dot_f32_hvx in mulmat.c : comment vec_dot_f32_hvx_impl, uncomment vec_dot_f32_hvx_impl_me"
       },
       {
         "step": 7,
@@ -229,10 +229,10 @@
       }
     ],
     "performance_summary": {
-      "ai_version_faster": "vec_dot_f32_hvx_ai is significantly faster in most cases",
+      "ai_version_faster": "vec_dot_f32_hvx_impl is significantly faster in most cases",
       "large_matrix_speedup": "Up to 49% faster for 4096x4096 matrices",
       "small_matrix_speedup": "Up to 37% faster for small matrices",
-      "recommendation": "Use vec_dot_f32_hvx_ai for better performance"
+      "recommendation": "vec_dot_f32_hvx_impl for better performance"
     }
   },
   "mulmat_vtcm_hmx_performance_comparison": {
@@ -280,5 +280,26 @@
       "vtcm_limit": "Very large matrices (>4096) may fall back due to VTCM memory constraints"
     },
     "reminder": "All commands must be executed on the local development machine with Android phone connected via adb"
+  },
+  "mulmat_optimization_rules": {
+    "title": "MUL_MAT DSP-side Optimization Rules",
+    "focus_types": ["GGML_TYPE_BF16", "GGML_TYPE_Q8_0", "GGML_TYPE_Q4_0", "GGML_TYPE_Q5_0", "GGML_TYPE_IQ4_NL", "GGML_TYPE_F32", "GGML_TYPE_F16"],
+    "dsp_kernel_build": {
+      "description": "When only modifying files under ggml/src/ggml-hexagon/kernels/, use fast kernel-only build",
+      "command": "./scripts/build-kernels.sh",
+      "note": "This is significantly faster than full build. Only use ./scripts/build-run-android.sh build when non-kernel files are also modified."
+    },
+    "performance_testing": {
+      "description": "How to test and measure mulmat performance",
+      "test_command": "./scripts/build-run-android.sh run_testop MUL_MAT 3 [algo_type]",
+      "algo_types": {
+        "0": "HVX+multithread (default)",
+        "31": "sgemm (llamafile-style)",
+        "32": "VTCM+HMX",
+        "33": "VTCM+multithread"
+      },
+      "log_command": "adb logcat | grep CDSP0",
+      "note": "Use DSP-side log timing for performance analysis. Do NOT run ./scripts/build-run-android.sh run_perfop unless explicitly approved - it is very time-consuming."
+    }
   }
 }

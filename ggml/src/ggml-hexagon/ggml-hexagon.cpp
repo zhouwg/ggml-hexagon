@@ -6348,13 +6348,14 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     }
 
     switch (src0->type) {
-        case GGML_TYPE_Q4_0:
-        case GGML_TYPE_Q4_1:
-        case GGML_TYPE_Q5_0:
-        case GGML_TYPE_Q5_1:
-        case GGML_TYPE_Q8_0:
-        case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_BF16:
+        case GGML_TYPE_Q8_0:
+        case GGML_TYPE_Q4_0:
+        case GGML_TYPE_Q5_0:
+        case GGML_TYPE_IQ4_NL:
+#if 0
+        case GGML_TYPE_Q4_1:
+        case GGML_TYPE_Q5_1:
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q6_K:
         case GGML_TYPE_Q2_K:
@@ -6368,6 +6369,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
         case GGML_TYPE_IQ2_XS:
         case GGML_TYPE_IQ2_S:
         case GGML_TYPE_IQ1_S:
+#endif
             if (src0->ne[0] % 32) {
                 return false;
             }
@@ -6376,8 +6378,11 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
                 return false;  // typically the lm-head which would be too large for VTCM
             }
 
-            if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
-                return false;  // no huge batches or broadcasting (for now)
+            //if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
+            //    return false;  // no huge batches or broadcasting (for now)
+            //}
+            if (src1->ne[2] != 1 || src1->ne[3] != 1) {
+                return false;  // no broadcasting (for now)
             }
 
             // src0 (weights) must be repacked

@@ -516,7 +516,7 @@ void * ggmlop_get_work_data(size_t size) {
             free(g_work_data);
         }
         size = (size > MAX_WORK_SIZE) ? MAX_WORK_SIZE : size;
-        g_work_data = malloc(size);
+        g_work_data = memalign(128, size);
         if (g_work_data != NULL) {
             g_work_size = size;
         }
@@ -661,7 +661,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
 
 AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
+    //GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     if (!req) {
         GGMLHEXAGON_LOG_ERROR("invalid input: req=%p", req);
@@ -796,7 +796,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
     }
     __asm__ __volatile__("" ::: "memory");
 
-    GGMLHEXAGON_LOG_DEBUG("leave %s (dsp_execute_batch)", __func__);
+    //GGMLHEXAGON_LOG_DEBUG("leave %s (dsp_execute_batch)", __func__);
     return AEE_SUCCESS;
 }
 
