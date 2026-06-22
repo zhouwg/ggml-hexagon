@@ -8482,6 +8482,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 6, 4096, 5120, {1, 1}, {1, 1}));
+
 #endif
 
 #if 0
@@ -9210,6 +9211,72 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+
+    // LLM inference typical MUL_MAT sizes (Qwen3.5-2B-Q4_0, decode batch)
+    // test_mul_mat(type_a, type_b, M, N, K, bs, nr)
+    // weight[K, M] * activation[K, N] => output[M, N]
+    // N=192 (6*32, HMX-aligned) and N=200 (actual, may fallback from HMX)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 1536, 192, 12288, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 4096, 192, 1536, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 2048, 192, 1536, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 1536, 200, 12288, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 4096, 200, 1536, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 2048, 200, 1536, { 1,  1}, {1, 1}));
+
+    // Non-32-aligned N edge cases (HMX tile padding)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16,     GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q5_0,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,  GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}));
+
+    // Padded activation tensor (k_v > k): simulates LLM inference where src1->nb[1] > K*sizeof(float)
+    // This creates a non-contiguous view where row stride has padding
+    // k_v=2048 means nb[1]=2048*sizeof(float)=8192, but logical K=256
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16,     GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}, {0,1,2,3}, 2048));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}, {0,1,2,3}, 2048));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32,     GGML_TYPE_F32, 256, 13, 256, { 1,  1}, {1, 1}, {0,1,2,3}, 2048));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 256, 32, 256, { 1,  1}, {1, 1}, {0,1,2,3}, 2048));
+
+    // Large M quantized weight (requires M-chunk in HMX path)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 1536, 13, 12288, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0,    GGML_TYPE_F32, 4096, 13, 1536, { 1,  1}, {1, 1}));
+
+    // Gemma 4 E2B inference MUL_MAT sizes (Q4_0 weights, F32 activations)
+    // SWA attention layers (decode, N=1)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2048,   1, 1536, {1, 1}, {1, 1})); // Q proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  256,   1, 1536, {1, 1}, {1, 1})); // K proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  256,   1, 1536, {1, 1}, {1, 1})); // V proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536,   1, 2048, {1, 1}, {1, 1})); // O proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 6144,   1, 1536, {1, 1}, {1, 1})); // FFN gate
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 6144,   1, 1536, {1, 1}, {1, 1})); // FFN up
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536,   1, 6144, {1, 1}, {1, 1})); // FFN down
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1, GGML_TYPE_F32, 1536,   1, 6144, {1, 1}, {1, 1})); // FFN down (blk.0, Q4_1)
+    // Global attention layers (decode, N=1)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 4096,   1, 1536, {1, 1}, {1, 1})); // Q proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  512,   1, 1536, {1, 1}, {1, 1})); // K proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  512,   1, 1536, {1, 1}, {1, 1})); // V proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536,   1, 4096, {1, 1}, {1, 1})); // O proj
+    // Wide FFN layers (decode, N=1)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,12288,   1, 1536, {1, 1}, {1, 1})); // FFN gate
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,12288,   1, 1536, {1, 1}, {1, 1})); // FFN up
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536,   1,12288, {1, 1}, {1, 1})); // FFN down
+    // SWA attention layers (prefill, N=128)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2048, 128, 1536, {1, 1}, {1, 1})); // Q proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  256, 128, 1536, {1, 1}, {1, 1})); // K proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, 128, 2048, {1, 1}, {1, 1})); // O proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 6144, 128, 1536, {1, 1}, {1, 1})); // FFN gate
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, 128, 6144, {1, 1}, {1, 1})); // FFN down
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1, GGML_TYPE_F32, 1536, 128, 6144, {1, 1}, {1, 1})); // FFN down (blk.0, Q4_1)
+    // Global attention layers (prefill, N=128)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 4096, 128, 1536, {1, 1}, {1, 1})); // Q proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,  512, 128, 1536, {1, 1}, {1, 1})); // K proj
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, 128, 4096, {1, 1}, {1, 1})); // O proj
+    // Wide FFN layers (prefill, N=128)
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,12288, 128, 1536, {1, 1}, {1, 1})); // FFN gate
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, 128,12288, {1, 1}, {1, 1})); // FFN down
 
     //end jz'case
     return test_cases;

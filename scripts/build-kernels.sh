@@ -8,6 +8,8 @@ HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
 HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 TARGET=${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
+DEBUG_FLAG="-DNDEBUG -Wall"
+#DEBUG_FLAG=-g
 
 # ==============================================================================
 # Return codes:
@@ -56,7 +58,7 @@ cd ${PROJECT_ROOT_PATH}
 #echo "${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl"
 #${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
 
-cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=v79 HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH}
+cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=v79 HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} DEBUG_FLAG=${DEBUG_FLAG}
 if [  -f ${TARGET} ]; then
     is_so_file_changed ${TARGET}
     if [ $? -eq 0 ]; then

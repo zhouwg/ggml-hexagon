@@ -12,8 +12,8 @@ if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE -O3")
-set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE -O3")
+#set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE -O3")
+#set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE -O3")
 
 message("CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
 

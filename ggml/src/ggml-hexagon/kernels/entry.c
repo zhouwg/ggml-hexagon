@@ -863,11 +863,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         src0_dt.data     = (void *)(base + t0->data_offset);
         src0_dt.data_len = t0->data_len;
 
-        /* DSP-side DIAG: dump first 4 f32 values from src0 data */
-        if (src0_dt.data && src0_dt.data_len >= 16) {
-            const float * fv = (const float *)src0_dt.data;
-            GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+        if (1 == g_dump_diag_info) {
+            /* DSP-side DIAG: dump first 4 f32 values from src0 data */
+            if (src0_dt.data && src0_dt.data_len >= 16) {
+                const float * fv = (const float *)src0_dt.data;
+                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
                                  i, t0->data_offset, src0_dt.data, fv[0], fv[1], fv[2], fv[3]);
+            }
         }
 
         if (op->src1_idx >= 0) {
@@ -953,11 +955,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         /* Flush DSP cache after writing dst (so AP can read from DRAM) */
         dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
 
-        /* DSP-side DIAG: dump first 4 f32 values from dst data */
-        if (dst_dt.data && dst_dt.data_len >= 16) {
-            const float * fv = (const float *)dst_dt.data;
-            GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst  off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+        if (1 == g_dump_diag_info) {
+            /* DSP-side DIAG: dump first 4 f32 values from dst data */
+            if (dst_dt.data && dst_dt.data_len >= 16) {
+                const float * fv = (const float *)dst_dt.data;
+                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst  off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
                                  i, tens[op->dst_idx].data_offset, dst_dt.data, fv[0], fv[1], fv[2], fv[3]);
+            }
         }
     }
 

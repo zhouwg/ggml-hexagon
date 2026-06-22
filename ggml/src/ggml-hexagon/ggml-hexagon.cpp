@@ -366,6 +366,8 @@ struct hexagon_appcfg_t {
     const char * cfgfilename;
     const char * runtime_libpath;
     char version[GGMLHEXAGON_TMPBUF_LEN];
+    std::string enabled_ops;    // comma-separated list of ops to offload (empty = all supported ops)
+    std::string enabled_types;  // comma-separated list of weight types to offload for MUL_MAT (empty = all supported types)
 };
 
 static struct hexagon_appcfg_t g_hexagon_appcfg = {
@@ -742,14 +744,14 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_CONCAT, 0, nullptr, nullptr},
         {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_NORM, 0, nullptr, nullptr},
-        {false, GGML_OP_RMS_NORM, 0, nullptr, nullptr},
+        {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
         {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
         {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
         {false, GGML_OP_L2_NORM, 0, nullptr, nullptr},
         {true,  GGML_OP_MUL_MAT, 2, "ggmlop_dsp_mulmat", ggmlop_dsp_mulmat},
         {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
         {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-        {false, GGML_OP_SCALE, 0, nullptr, nullptr},
+        {true,  GGML_OP_SCALE, 1, "ggmlop_dsp_scale", nullptr},
         {false, GGML_OP_SET, 0, nullptr, nullptr},
         {false, GGML_OP_CPY, 0, nullptr, nullptr},
         {false, GGML_OP_CONT, 0, nullptr, nullptr},
@@ -803,7 +805,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
         {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
         {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
         {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-        {false, GGML_OP_UNARY, 0, nullptr, nullptr},
+        {true,  GGML_OP_UNARY, 2, "ggmlop_dsp_silu", nullptr},
         {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
         {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -817,6 +819,9 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
 
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_NONE].supported,     "GGML_OP_NONE is not true");
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_ADD].supported,      "GGML_OP_ADD is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_RMS_NORM].supported, "GGML_OP_RMS_NORM is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_SCALE].supported,    "GGML_OP_SCALE is not true");
+static_assert(ggmlhexagon_k_op_caps[GGML_OP_UNARY].supported,    "GGML_OP_UNARY is not true");
 static_assert(ggmlhexagon_k_op_caps[GGML_OP_MUL_MAT].supported,  "GGML_OP_MUL_MAT is not true");
 static_assert(std::size(ggmlhexagon_k_op_caps) == (static_cast<size_t>(GGML_OP_COUNT)),
               "pls check ggmlhexagon_k_op_caps and ensure is corresponding to latest ggml.h");
@@ -833,7 +838,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_ADD1,     0, nullptr, nullptr},
     {false, GGML_OP_ACC,      0, nullptr, nullptr},
     {true,  GGML_OP_SUB,      2, "ggmlop_dsp_sub",      nullptr},
-    {false, GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
+    {true,  GGML_OP_MUL,      2, "ggmlop_dsp_mul",      nullptr},
     {false, GGML_OP_DIV,      0, nullptr, nullptr},
     {false, GGML_OP_SQR,      0, nullptr, nullptr},
     {false, GGML_OP_SQRT,     0, nullptr, nullptr},
@@ -851,7 +856,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_CONCAT,   0, nullptr, nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
-    {false, GGML_OP_RMS_NORM, 0, nullptr, nullptr},
+    {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
     {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
@@ -859,7 +864,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     // ... all others false until DSP kernels are validated ...
     {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-    {false, GGML_OP_SCALE,    0, nullptr, nullptr},
+    {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale", nullptr},
     {false, GGML_OP_SET,      0, nullptr, nullptr},
     {false, GGML_OP_CPY,      0, nullptr, nullptr},
     {false, GGML_OP_CONT,     0, nullptr, nullptr},
@@ -913,7 +918,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
     {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
     {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-    {false, GGML_OP_UNARY,    0, nullptr, nullptr},
+    {true,  GGML_OP_UNARY,    1, "ggmlop_dsp_silu", nullptr},
     {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
     {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
@@ -2226,6 +2231,8 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "offload_cgraph_type", g_hexagon_appcfg.offload_cgraph_type, 2);
     hexagoncfg_instance.get_intvalue("cdsp", "dump_diag_info", g_hexagon_appcfg.dump_diag_info, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "ggml_dsp_use_hvx", g_hexagon_appcfg.ggml_dsp_use_hvx, 1);
+    hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
+    hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
 
     memcpy(g_hexagon_appcfg.version, version.c_str(), strlen(version.c_str()));
 
@@ -2363,6 +2370,10 @@ static bool ggmlhexagon_check_valid_appcfg() {
         GGMLHEXAGON_LOG_WARN("invalid ggml_dsp_use_hvx %d, reset to 1", g_hexagon_appcfg.ggml_dsp_use_hvx);
         g_hexagon_appcfg.ggml_dsp_use_hvx = 1;
     }
+    if (g_hexagon_appcfg.enable_q_mulmat > 1) {
+        GGMLHEXAGON_LOG_WARN("invalid enable_q_mulmat %d, reset to 1", g_hexagon_appcfg.enable_q_mulmat);
+        g_hexagon_appcfg.enable_q_mulmat = 1;
+    }
 
     if (!is_valid_appcfg) {
         GGMLHEXAGON_LOG_VERBOSE("it seems there is non-default configuration in ggml-hexagon.cfg, will using the default ggml backend accordingly");
@@ -2388,6 +2399,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     ggmlhexagon_get_timestring(timestamp);
     if (HWACCEL_CDSP == g_hexagon_appcfg.hwaccel_approach) {
         GGMLHEXAGON_LOG_INFO("offload quantize GGML_OP_MUL_MAT: %s", g_hexagon_appcfg.enable_q_mulmat ? "YES" : "NO");
+        GGMLHEXAGON_LOG_INFO("offload MUL_MAT types: %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
         GGMLHEXAGON_LOG_INFO("using rpc ion memory pool:        %s", g_hexagon_appcfg.enable_rpc_ion_mempool ? "YES" : "NO");
         GGMLHEXAGON_LOG_INFO("thread_counts with HWACCEL_CDSP:  %d", g_hexagon_appcfg.thread_counts);
         GGMLHEXAGON_LOG_INFO("mulmat algo type on cDSP:         %d", g_hexagon_appcfg.mulmat_algotype);
@@ -4618,13 +4630,13 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
         uint32_t K = src0->ne[0];               // Inner dimension
         uint32_t M = src0->ne[1];               // Rows of src0
         uint32_t N = src1->ne[1];               // Columns of src1
-        uint32_t BB0 = src0->ne[2] * src0->ne[3]; // src0 batch
-        uint32_t B1 = src1->ne[2] * src1->ne[3]; // src1 batch (drives output)
+        uint32_t batch0 = src0->ne[2] * src0->ne[3]; // src0 batch
+        uint32_t batch1 = src1->ne[2] * src1->ne[3]; // src1 batch (drives output)
 
         // Validate K only
         GGML_ASSERT(src0->ne[0] == src1->ne[0]); // K must match
 
-        // src0: [K, M, H0, B0] -> QNN: [B0, H0, M, K]
+        // src0: [K, M, H0, batch0] -> QNN: [batch0, H0, M, K]
         uint32_t src0_dims[] = {static_cast<uint32_t>(src0->ne[3]), static_cast<uint32_t>(src0->ne[2]),
                                 static_cast<uint32_t>(src0->ne[1]), static_cast<uint32_t>(src0->ne[0])
         };
@@ -4632,8 +4644,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, 4,
                                                   src0_dims, nullptr, 0);
 
-        // Reshape src0 to [B0, M, K]
-        uint32_t reshape0_out_dims[] = {BB0, M, K};
+        // Reshape src0 to [batch0, M, K]
+        uint32_t reshape0_out_dims[] = {batch0, M, K};
         p_reshape0_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "reshape0_out",
                                                        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                        reshape0_out_dims, nullptr, 0);
@@ -4645,13 +4657,13 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    reshape0_inputs, 1, reshape0_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape0_op));
 
-        // Tile src0 to match B1: [B0, M, K] -> [B1, M, K]
-        uint32_t tile0_out_dims[] = {B1, M, K};
+        // Tile src0 to match batch1: [batch0, M, K] -> [batch1, M, K]
+        uint32_t tile0_out_dims[] = {batch1, M, K};
         p_tile0_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "tile0_out",
                                                     QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                     tile0_out_dims, nullptr, 0);
 
-        uint32_t tile_multiples[] = {B1 / BB0, 1, 1};
+        uint32_t tile_multiples[] = {batch1 / batch0, 1, 1};
         uint32_t tile_dims[] = {3};
         Qnn_Tensor_t * p_tile_multiples = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "tile_multiples",
                                                                         QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, 1,
@@ -4665,7 +4677,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    tile0_inputs, 1, tile0_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, tile0_op));
 
-        // src1: [N, K, H1, B1] -> QNN: [B1, H1, N, K]
+        // src1: [N, K, H1, batch1] -> QNN: [batch1, H1, N, K]
         uint32_t src1_dims[] = {static_cast<uint32_t>(src1->ne[3]), static_cast<uint32_t>(src1->ne[2]),
                                 static_cast<uint32_t>(src1->ne[1]), static_cast<uint32_t>(src1->ne[0])
         };
@@ -4674,7 +4686,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                   src1_dims, nullptr, 0);
 
 
-        // Permute src1 to [B1, H1, K, N]
+        // Permute src1 to [batch1, H1, K, N]
         uint32_t perm_data[] = {0, 1, 3, 2};
         uint32_t perm_dims[] = {4};
         Qnn_Tensor_t * p_perm = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "perm",
@@ -4696,8 +4708,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    permute1_inputs, 1, permute1_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, permute1_op));
 
-        // Reshape src1 to [B1, K, N]
-        uint32_t reshape1_out_dims[] = {B1, K, N};
+        // Reshape src1 to [batch1, K, N]
+        uint32_t reshape1_out_dims[] = {batch1, K, N};
         p_reshape1_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "reshape1_out",
                                                        QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                        reshape1_out_dims, nullptr, 0);
@@ -4709,8 +4721,8 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    reshape1_inputs, 1, reshape1_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, reshape1_op));
 
-        // MatMul: [B1, M, K] x [B1, K, N] -> [B1, M, N]
-        uint32_t matmul_out_dims[] = {B1, M, N};
+        // MatMul: [batch1, M, K] x [batch1, K, N] -> [batch1, M, N]
+        uint32_t matmul_out_dims[] = {batch1, M, N};
         p_matmul_out = ggmlqnn_create_general_tensor(instance, graph_handle, nullptr, "matmul_out",
                                                      QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, 3,
                                                      matmul_out_dims, nullptr, 0);
@@ -4722,7 +4734,7 @@ static void ggmlqnn_compute_mul_mat_4d(ggml_backend_hexagon_context * ctx, ggml_
                                                                    matmul_inputs, 2, matmul_outputs, 1);
         CHECK_QNN_API(error, qnn_raw_interface.graphAddNode(graph_handle, matmul_op));
 
-        // Output: [N, M, H1, B1] -> QNN: [B1, H1, M, N]
+        // Output: [N, M, H1, batch1] -> QNN: [batch1, H1, M, N]
         uint32_t reshape2_out_dims[] = {static_cast<uint32_t>(dst->ne[3]), static_cast<uint32_t>(dst->ne[2]),
                                         static_cast<uint32_t>(dst->ne[1]), static_cast<uint32_t>(dst->ne[0])
         };
@@ -6327,6 +6339,58 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
 //  section-8: implementation of ggml-hexagon backend according to specification in ggml backend subsystem
 // =================================================================================================
 //ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
+
+// Check if a ggml_type is allowed by the enabled_types config filter
+// Returns true if the type is in the enabled list, or if the list is empty (all types allowed)
+// Only applies to quantized types and F16/BF16; F32 is always allowed
+static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
+    if (g_hexagon_appcfg.enabled_types.empty()) {
+        return true;
+    }
+    // F32 is always allowed
+    if (type == GGML_TYPE_F32) {
+        return true;
+    }
+    const char * type_name = ggml_type_name(type);
+    if (type_name == NULL) {
+        return false;
+    }
+    // Check if type_name appears as a whole word in the comma-separated list
+    const std::string & list = g_hexagon_appcfg.enabled_types;
+    size_t pos = 0;
+    while (pos < list.size()) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        std::string token = list.substr(pos, end - pos);
+        // trim whitespace
+        size_t start = token.find_first_not_of(" \t");
+        size_t last = token.find_last_not_of(" \t");
+        if (start != std::string::npos && last != std::string::npos) {
+            token = token.substr(start, last - start + 1);
+        }
+        // "all" keyword enables all types
+        if (token.size() == 3 &&
+            tolower((unsigned char)token[0]) == 'a' &&
+            tolower((unsigned char)token[1]) == 'l' &&
+            tolower((unsigned char)token[2]) == 'l') {
+            return true;
+        }
+        // case-insensitive compare (ggml_type_name returns lowercase, cfg may use Q4_0 or q4_0)
+        if (token.size() == strlen(type_name)) {
+            bool match = true;
+            for (size_t i = 0; i < token.size(); ++i) {
+                if (tolower((unsigned char)token[i]) != tolower((unsigned char)type_name[i])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
 static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
@@ -6344,6 +6408,10 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     }
 
     if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
+        return false;
+    }
+
+    if (!ggmlhexagon_type_is_enabled(src0->type)) {
         return false;
     }
 
@@ -6435,7 +6503,67 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     return true;
 }
 
+// Check if an op is allowed by the enabled_ops config filter
+// Returns true if the op is in the enabled list, or if the list is empty (all ops allowed)
+// Shape/meta ops are always allowed since they are zero-copy metadata operations
+static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
+    if (g_hexagon_appcfg.enabled_ops.empty()) {
+        return true;
+    }
+    // Always allow shape/meta ops (zero-copy, no backend execution needed)
+    switch (op) {
+        case GGML_OP_NONE:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_VIEW:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_CONT:
+        case GGML_OP_REPEAT:
+            return true;
+        default:
+            break;
+    }
+    const char * op_name = ggml_op_name(op);
+    // Check if op_name appears as a whole word in the comma-separated list
+    const std::string & list = g_hexagon_appcfg.enabled_ops;
+    size_t pos = 0;
+    while (pos < list.size()) {
+        size_t end = list.find(',', pos);
+        if (end == std::string::npos) end = list.size();
+        std::string token = list.substr(pos, end - pos);
+        // trim whitespace
+        size_t start = token.find_first_not_of(" \t");
+        size_t last = token.find_last_not_of(" \t");
+        if (start != std::string::npos && last != std::string::npos) {
+            token = token.substr(start, last - start + 1);
+        }
+        // "all" keyword enables all ops
+        if (token.size() == 3 &&
+            tolower((unsigned char)token[0]) == 'a' &&
+            tolower((unsigned char)token[1]) == 'l' &&
+            tolower((unsigned char)token[2]) == 'l') {
+            return true;
+        }
+        // case-insensitive compare
+        if (token.size() == strlen(op_name)) {
+            bool match = true;
+            for (size_t i = 0; i < token.size(); ++i) {
+                if (tolower((unsigned char)token[i]) != tolower((unsigned char)op_name[i])) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+    if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
+        return false;
+    }
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
     GGML_UNUSED(ctx);
     if (op_tensor->op == GGML_OP_NONE) {
@@ -6562,6 +6690,9 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 // This allows the scheduler to form larger subgraphs with more ops per batch,
 // reducing FastRPC call overhead (the dominant cost).
 static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+    if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
+        return false;
+    }
     GGML_UNUSED(dev);
     if (op_tensor->op == GGML_OP_NONE) {
         return true;

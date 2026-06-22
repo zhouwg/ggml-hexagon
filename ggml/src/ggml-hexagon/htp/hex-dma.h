@@ -310,11 +310,11 @@ static inline bool dma_queue_push(dma_queue *q, dma_ptr dptr, size_t dst_stride,
 #endif
 
 static inline bool dma_queue_push_ddr_to_vtcm(dma_queue * q, dma_ptr dptr, size_t dst_row_size, size_t src_row_size, size_t nrows) {
-    return dma_queue_push(q, dptr, dst_row_size, src_row_size, src_row_size, nrows);
+    return dma_queue_push(q, dptr, dst_row_size, src_row_size, dst_row_size, nrows);
 }
 
 static inline bool dma_queue_push_vtcm_to_ddr(dma_queue * q, dma_ptr dptr, size_t dst_row_size, size_t src_row_size, size_t nrows) {
-    return dma_queue_push(q, dptr, dst_row_size, src_row_size, dst_row_size, nrows);
+    return dma_queue_push(q, dptr, dst_row_size, src_row_size, src_row_size, nrows);
 }
 
 #define DMA_CACHE_MAX_SIZE 64U

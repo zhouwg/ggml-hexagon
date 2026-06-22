@@ -179,9 +179,9 @@ extern "C" {
 
 //NPU performance will be slower when enable GGMLHEXAGON_DEBUG
 #ifndef NDEBUG
-#define GGMLHEXAGON_DEBUG               0
-#else
 #define GGMLHEXAGON_DEBUG               1
+#else
+#define GGMLHEXAGON_DEBUG               0
 #endif
 
 #define GGMLHEXAGON_LOGBUF_LEN          4096
