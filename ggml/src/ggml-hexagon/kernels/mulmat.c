@@ -3249,6 +3249,13 @@ void transfer_output_chunk_fp16_to_fp32(float *restrict dst, const __fp16 *restr
     }
 }
 
+// Helper: convert float to __fp16 via ggml_fp16_t bit pattern
+// ggml_compute_fp32_to_fp16 returns uint16_t (raw FP16 bits), not __fp16
+static inline void fp32_to_fp16_store(__fp16 *dst, float val) {
+    ggml_fp16_t bits = ggml_compute_fp32_to_fp16(val);
+    memcpy(dst, &bits, sizeof(__fp16));
+}
+
 static void dequantize_q4_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_q4_0 *restrict src,
                                          int n_cols, int k) {
     const int k_tiles = k / HMX_FP16_TILE_N_COLS;
@@ -3265,8 +3272,8 @@ static void dequantize_q4_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
 
         for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
             int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
-            const block_q4_0 *col_blocks = (row_global < n_cols) ?
-                                           src + row_global * nb_per_col + kt * (HMX_FP16_TILE_N_COLS / QK4_0) : NULL;
+            const block_q4_0 *row_blocks = (row_global < n_cols) ?
+                                           src + row_global * nb_per_col : NULL;
 
             for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
                 int col_global = kt * HMX_FP16_TILE_N_COLS + j;  // global K index
@@ -3274,14 +3281,20 @@ static void dequantize_q4_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
                 int elem_idx = col_global % QK4_0;
 
                 float val = 0.0f;
-                if (col_blocks && col_global < k) {
-                    float d = ggml_compute_fp16_to_fp32(col_blocks[block_idx].d);
-                    int8_t q = (col_blocks[block_idx].qs[elem_idx / 2] >> ((elem_idx % 2) * 4)) & 0x0F;
+                if (row_blocks && col_global < k) {
+                    float d = ggml_compute_fp16_to_fp32(row_blocks[block_idx].d);
+                    // Q4_0: qs[j] lower nibble -> element j, upper nibble -> element j+16
+                    int8_t q;
+                    if (elem_idx < 16) {
+                        q = (row_blocks[block_idx].qs[elem_idx] & 0x0F);
+                    } else {
+                        q = (row_blocks[block_idx].qs[elem_idx - 16] >> 4);
+                    }
                     val = (q - 8) * d;
                 }
 
                 // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
-                tile_base[(j / 2) * 64 + i * 2 + (j % 2)] = ggml_compute_fp32_to_fp16(val);
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
             }
         }
     }
@@ -3303,8 +3316,8 @@ static void dequantize_q4_1_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
 
         for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
             int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
-            const block_q4_1 *col_blocks = (row_global < n_cols) ?
-                                           src + row_global * nb_per_col + kt * (HMX_FP16_TILE_N_COLS / QK4_1) : NULL;
+            const block_q4_1 *row_blocks = (row_global < n_cols) ?
+                                           src + row_global * nb_per_col : NULL;
 
             for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
                 int col_global = kt * HMX_FP16_TILE_N_COLS + j;  // global K index
@@ -3312,15 +3325,21 @@ static void dequantize_q4_1_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
                 int elem_idx = col_global % QK4_1;
 
                 float val = 0.0f;
-                if (col_blocks && col_global < k) {
-                    float d = ggml_compute_fp16_to_fp32(col_blocks[block_idx].d);
-                    float m = ggml_compute_fp16_to_fp32(col_blocks[block_idx].m);
-                    int8_t q = (col_blocks[block_idx].qs[elem_idx / 2] >> ((elem_idx % 2) * 4)) & 0x0F;
+                if (row_blocks && col_global < k) {
+                    float d = ggml_compute_fp16_to_fp32(row_blocks[block_idx].d);
+                    float m = ggml_compute_fp16_to_fp32(row_blocks[block_idx].m);
+                    // Q4_1: qs[j] lower nibble -> element j, upper nibble -> element j+16
+                    int8_t q;
+                    if (elem_idx < 16) {
+                        q = (row_blocks[block_idx].qs[elem_idx] & 0x0F);
+                    } else {
+                        q = (row_blocks[block_idx].qs[elem_idx - 16] >> 4);
+                    }
                     val = q * d + m;
                 }
 
                 // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
-                tile_base[(j / 2) * 64 + i * 2 + (j % 2)] = ggml_compute_fp32_to_fp16(val);
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
             }
         }
     }
@@ -3342,8 +3361,8 @@ static void dequantize_q8_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
 
         for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
             int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
-            const block_q8_0 *col_blocks = (row_global < n_cols) ?
-                                           src + row_global * nb_per_col + kt * (HMX_FP16_TILE_N_COLS / QK8_0) : NULL;
+            const block_q8_0 *row_blocks = (row_global < n_cols) ?
+                                           src + row_global * nb_per_col : NULL;
 
             for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
                 int col_global = kt * HMX_FP16_TILE_N_COLS + j;  // global K index
@@ -3351,13 +3370,138 @@ static void dequantize_q8_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_
                 int elem_idx = col_global % QK8_0;
 
                 float val = 0.0f;
-                if (col_blocks && col_global < k) {
-                    float d = ggml_compute_fp16_to_fp32(col_blocks[block_idx].d);
-                    val = col_blocks[block_idx].qs[elem_idx] * d;
+                if (row_blocks && col_global < k) {
+                    float d = ggml_compute_fp16_to_fp32(row_blocks[block_idx].d);
+                    val = row_blocks[block_idx].qs[elem_idx] * d;
                 }
 
                 // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
-                tile_base[(j / 2) * 64 + i * 2 + (j % 2)] = ggml_compute_fp32_to_fp16(val);
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
+            }
+        }
+    }
+}
+
+static void dequantize_q5_0_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_q5_0 *restrict src,
+                                         int n_cols, int k) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;
+    const int n_tot_tiles = n_col_tiles * k_tiles;
+    const int nb_per_col = k / QK5_0;
+
+    // Process all tiles (matching convert_weight_f32_to_fp16_tiles structure)
+    for (int t = 0; t < n_tot_tiles; ++t) {
+        int ct = t / k_tiles;  // N tile index (column tile)
+        int kt = t % k_tiles;  // K tile index (row tile)
+
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
+            int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
+            const block_q5_0 *row_blocks = (row_global < n_cols) ?
+                                           src + row_global * nb_per_col : NULL;
+
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
+                int col_global = kt * HMX_FP16_TILE_N_COLS + j;  // global K index
+                int block_idx = col_global / QK5_0;
+                int elem_idx = col_global % QK5_0;
+
+                float val = 0.0f;
+                if (row_blocks && col_global < k) {
+                    float d = ggml_compute_fp16_to_fp32(row_blocks[block_idx].d);
+                    uint32_t qh;
+                    memcpy(&qh, row_blocks[block_idx].qh, sizeof(qh));
+                    // Q5_0: qs[j] lower nibble -> element j, upper nibble -> element j+16
+                    // qh bits: bit j -> element j (5th bit), bit (j+16) -> element j+16 (5th bit)
+                    int8_t q;
+                    if (elem_idx < 16) {
+                        q = (row_blocks[block_idx].qs[elem_idx] & 0x0F) | (((qh >> elem_idx) & 1) << 4);
+                    } else {
+                        q = (row_blocks[block_idx].qs[elem_idx - 16] >> 4) | (((qh >> elem_idx) & 1) << 4);
+                    }
+                    val = (q - 16) * d;
+                }
+
+                // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
+            }
+        }
+    }
+}
+
+static void dequantize_iq4_nl_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_iq4_nl *restrict src,
+                                            int n_cols, int k) {
+    static const int8_t kvalues_iq4nl[16] = {
+        -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+    };
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;
+    const int n_tot_tiles = n_col_tiles * k_tiles;
+    const int nb_per_col = k / QK4_NL;
+
+    // Process all tiles (matching convert_weight_f32_to_fp16_tiles structure)
+    for (int t = 0; t < n_tot_tiles; ++t) {
+        int ct = t / k_tiles;  // N tile index (column tile)
+        int kt = t % k_tiles;  // K tile index (row tile)
+
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
+            int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
+            const block_iq4_nl *row_blocks = (row_global < n_cols) ?
+                                              src + row_global * nb_per_col : NULL;
+
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
+                int col_global = kt * HMX_FP16_TILE_N_COLS + j;  // global K index
+                int block_idx = col_global / QK4_NL;
+                int elem_idx = col_global % QK4_NL;
+
+                float val = 0.0f;
+                if (row_blocks && col_global < k) {
+                    float d = ggml_compute_fp16_to_fp32(row_blocks[block_idx].d);
+                    // IQ4_NL: qs[j] lower nibble -> element j, upper nibble -> element j+16
+                    int8_t q;
+                    if (elem_idx < 16) {
+                        q = (row_blocks[block_idx].qs[elem_idx] & 0x0F);
+                    } else {
+                        q = (row_blocks[block_idx].qs[elem_idx - 16] >> 4);
+                    }
+                    val = kvalues_iq4nl[q] * d;
+                }
+
+                // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
+            }
+        }
+    }
+}
+
+// BF16 weight: convert each element BF16 -> FP32 -> FP16, store in column-pair interleaved tile format
+static void convert_weight_bf16_to_fp16_tiles(__fp16 *restrict vtcm_dst, const ggml_bf16_t *restrict src,
+                                               int n_cols, int k, int row_stride) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;
+    const int n_tot_tiles = n_col_tiles * k_tiles;
+
+    // Process all tiles (matching convert_weight_f32_to_fp16_tiles structure)
+    for (int t = 0; t < n_tot_tiles; ++t) {
+        int ct = t / k_tiles;  // N tile index (column tile)
+        int kt = t % k_tiles;  // K tile index (row tile)
+
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {  // 32 rows per tile (N dimension)
+            int row_global = ct * HMX_FP16_TILE_N_ROWS + i;  // global N index
+            const ggml_bf16_t *row = (row_global < n_cols) ?
+                                     src + row_global * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {  // 32 columns per tile (K dimension)
+                float val = 0.0f;
+                if (row) {
+                    val = ggml_compute_bf16_to_fp32(row[j]);
+                }
+                // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
             }
         }
     }
@@ -3775,20 +3919,23 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) {
+    // src0 (weight) types supported by HMX path
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_BF16 &&
+        src0->type != GGML_TYPE_Q4_0 && src0->type != GGML_TYPE_Q4_1 && src0->type != GGML_TYPE_Q5_0 &&
+        src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_IQ4_NL) {
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
-        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
+        GGMLHEXAGON_LOG_INFO("src0 type %d not supported by HMX, falling back to VTCM multithread mode\n", src0->type);
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
-    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16 &&
-        src1->type != GGML_TYPE_Q4_0 && src1->type != GGML_TYPE_Q4_1 && src1->type != GGML_TYPE_Q8_0) {
+    // src1 (activation) types supported by HMX path
+    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_BF16) {
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
-        GGMLHEXAGON_LOG_INFO("falling back to VTCM multithread mode\n");
+        GGMLHEXAGON_LOG_INFO("src1 type %d not supported by HMX, falling back to VTCM multithread mode\n", src1->type);
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -3844,13 +3991,18 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     // src0 = weight [K, M], src1 = activation [K, N]
     // We chunk both M (weight columns) and N (activation columns)
     //
-    // Budget: weight_fp32_buf + weight_tiles + reusable_buf + act_tiles + scales <= vtcm_size
+    // For F32 weight: weight_fp32_buf + weight_tiles + reusable_buf + act_tiles + scales <= vtcm_size
     //   weight_fp32_buf = M_chunk * K * 4  (fp32 input for weight conversion)
     //   weight_tiles    = M_chunk * K * 2  (fp16 tiles)
     //   act_tiles       = N_chunk * K * 2  (fp16 tiles)
     //   output_tiles    = M_chunk * N_chunk * 2 (fp16, time-shared with act_fp32_buf)
     //   reusable_buf    = max(act_fp32_buf, output_tiles)
     //   act_fp32_buf    = N_chunk * K * 4
+    //
+    // For quantized/BF16 weight: no weight_fp32_buf needed (dequantize directly to fp16 tiles)
+
+    const bool src0_needs_fp32_buf = (src0->type == GGML_TYPE_F32);
+    const bool src1_needs_fp32_buf = (src1->type == GGML_TYPE_F32);
 
     const size_t vec_dot_size = K * sizeof(__fp16);
     const size_t scales_size  = 256;
@@ -3861,18 +4013,19 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     size_t N_chunk_n_rows = 0;
 
     for (size_t mc = M_aligned; mc >= HMX_FP16_TILE_N_COLS; mc -= HMX_FP16_TILE_N_COLS) {
-        const size_t w_fp32  = hex_align_up(mc * K * sizeof(float), HMX_FP16_TILE_SIZE);
+        const size_t w_fp32  = src0_needs_fp32_buf ? hex_align_up(mc * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
         const size_t w_tiles = hex_align_up(mc * vec_dot_size, HMX_FP16_TILE_SIZE);
         const size_t remain  = vtcm_size - w_fp32 - w_tiles - scales_size;
         if (remain <= 0) continue;
 
-        // N * K * 2 + max(N * K * 4, mc * N * 2) <= remain
-        // When K*4 >= mc*2 (i.e. K*2 >= mc), act_fp32_buf dominates:
-        //   N * K * 6 <= remain  =>  N = remain / (K * 6)
-        // Otherwise output dominates:
-        //   N * (K * 2 + mc * 2) <= remain  =>  N = remain / (K * 2 + mc * 2)
-        const size_t per_n = (K * (size_t)4 >= mc * 2) ? K * 6 : K * 2 + mc * 2;
-        size_t nc = hex_align_down(remain / per_n, HMX_FP16_TILE_N_ROWS);
+        // N * K * 2 + max(act_fp32_buf, output_tiles) <= remain
+        // act_fp32_buf is needed only when src1 is F32
+        const size_t act_fp32_per_n = src1_needs_fp32_buf ? K * sizeof(float) : 0;
+        const size_t per_n_act  = K * sizeof(__fp16);  // act_tiles
+        const size_t per_n_reusable = (act_fp32_per_n > mc * sizeof(__fp16)) ? act_fp32_per_n : mc * sizeof(__fp16);
+        const size_t per_n = per_n_act + per_n_reusable;
+
+        size_t nc = (per_n > 0) ? hex_align_down(remain / per_n, HMX_FP16_TILE_N_ROWS) : HMX_FP16_TILE_N_ROWS;
         if (nc == 0) nc = HMX_FP16_TILE_N_ROWS;
 
         // Clamp N_chunk to N
@@ -3880,7 +4033,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
         if (nc == 0 && N > 0) nc = HMX_FP16_TILE_N_ROWS;
 
         // Verify it actually fits
-        const size_t a_fp32   = hex_align_up(nc * K * sizeof(float), HMX_FP16_TILE_SIZE);
+        const size_t a_fp32   = src1_needs_fp32_buf ? hex_align_up(nc * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
         const size_t a_tiles  = hex_align_up(nc * vec_dot_size, HMX_FP16_TILE_SIZE);
         const size_t o_tiles  = hex_align_up(nc * mc * sizeof(__fp16), HMX_FP16_TILE_SIZE);
         const size_t reusable = (a_fp32 > o_tiles) ? a_fp32 : o_tiles;
@@ -3902,9 +4055,9 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     }
 
     // Recompute exact sizes for chosen chunks
-    const size_t weight_fp32_buf_size = hex_align_up(M_chunk_n_cols * K * sizeof(float), HMX_FP16_TILE_SIZE);
+    const size_t weight_fp32_buf_size = src0_needs_fp32_buf ? hex_align_up(M_chunk_n_cols * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
     const size_t weight_area_size     = hex_align_up(M_chunk_n_cols * vec_dot_size, HMX_FP16_TILE_SIZE);
-    const size_t act_fp32_buf_size    = hex_align_up(N_chunk_n_rows * K * sizeof(float), HMX_FP16_TILE_SIZE);
+    const size_t act_fp32_buf_size    = src1_needs_fp32_buf ? hex_align_up(N_chunk_n_rows * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
     const size_t act_area_size        = hex_align_up(N_chunk_n_rows * vec_dot_size, HMX_FP16_TILE_SIZE);
     const size_t output_area_size     = hex_align_up(N_chunk_n_rows * M_chunk_n_cols * sizeof(__fp16), HMX_FP16_TILE_SIZE);
     const size_t reusable_buf_size    = (act_fp32_buf_size > output_area_size) ? act_fp32_buf_size : output_area_size;
@@ -3971,15 +4124,24 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
             // Convert from VTCM fp32 buffer to fp16 tiles (interleaved format)
             convert_weight_f32_to_fp16_tiles(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
+        } else if (src0->type == GGML_TYPE_BF16) {
+            const ggml_bf16_t *weight_chunk = (const ggml_bf16_t *)((const char *)src0->data + mc * src0_row_stride);
+            convert_weight_bf16_to_fp16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
         } else if (src0->type == GGML_TYPE_Q4_0) {
             const block_q4_0 *weight_chunk = (const block_q4_0 *)((const char *)src0->data + mc * src0_row_stride);
             dequantize_q4_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
         } else if (src0->type == GGML_TYPE_Q4_1) {
             const block_q4_1 *weight_chunk = (const block_q4_1 *)((const char *)src0->data + mc * src0_row_stride);
             dequantize_q4_1_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+        } else if (src0->type == GGML_TYPE_Q5_0) {
+            const block_q5_0 *weight_chunk = (const block_q5_0 *)((const char *)src0->data + mc * src0_row_stride);
+            dequantize_q5_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
         } else if (src0->type == GGML_TYPE_Q8_0) {
             const block_q8_0 *weight_chunk = (const block_q8_0 *)((const char *)src0->data + mc * src0_row_stride);
             dequantize_q8_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+        } else if (src0->type == GGML_TYPE_IQ4_NL) {
+            const block_iq4_nl *weight_chunk = (const block_iq4_nl *)((const char *)src0->data + mc * src0_row_stride);
+            dequantize_iq4_nl_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
         }
 
         // Pipeline: use DMA to prefetch next activation while HMX computes current
@@ -3994,6 +4156,30 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             if (src1_is_f16) {
                 const __fp16 *act_chunk = (const __fp16 *)((const char *)src1->data + nr * src1_row_stride);
                 transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+            } else if (src1->type == GGML_TYPE_BF16) {
+                const ggml_bf16_t *act_chunk = (const ggml_bf16_t *)((const char *)src1->data + nr * src1_row_stride);
+                // BF16 -> FP16: convert each element directly
+                // Reuse activation tile format (row-pair interleaved)
+                const int k_tiles = K / HMX_FP16_TILE_N_COLS;
+                const int n_row_tiles = (N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
+                for (int rt = 0; rt < n_row_tiles * k_tiles; ++rt) {
+                    int ct = rt / k_tiles;
+                    int kt = rt % k_tiles;
+                    __fp16 *tile_base = vtcm_activation + rt * HMX_FP16_TILE_N_ELMS;
+                    for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+                        int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+                        int row1 = row0 + 1;
+                        const ggml_bf16_t *r0 = (row0 < N_rows) ? act_chunk + row0 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
+                        const ggml_bf16_t *r1 = (row1 < N_rows) ? act_chunk + row1 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
+                        for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                            float v0 = r0 ? ggml_compute_bf16_to_fp32(r0[j]) : 0.0f;
+                            float v1 = r1 ? ggml_compute_bf16_to_fp32(r1[j]) : 0.0f;
+                            // Row-pair interleaved: tile[j*64 + i*2] = row0[j], tile[j*64 + i*2 + 1] = row1[j]
+                            fp32_to_fp16_store(&tile_base[j * 64 + i * 2], v0);
+                            fp32_to_fp16_store(&tile_base[j * 64 + i * 2 + 1], v1);
+                        }
+                    }
+                }
             } else if (src1->type == GGML_TYPE_F32) {
                 // Wait for pending DMA (from previous iteration's prefetch) or do sync copy
                 if (act_dma_pending) {
@@ -4021,8 +4207,9 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
             // Prefetch next activation chunk via DMA (overlaps with next iteration's compute)
             // NOTE: this must be after output writeback since reusable_buf is shared
+            // Only F32 activation uses DMA prefetch (BF16/F16 don't need fp32 buffer)
             size_t nr_next = nr + N_chunk_n_rows;
-            if (nr_next < N && !src1_is_f16) {
+            if (nr_next < N && src1_needs_fp32_buf) {
                 const float *act_chunk_next = (const float *)((const char *)src1->data + nr_next * src1_row_stride);
                 dma_queue_push_ddr_to_vtcm(dma,
                     dma_make_ptr(reusable_buf.fp32, act_chunk_next),
