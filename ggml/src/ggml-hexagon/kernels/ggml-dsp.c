@@ -800,6 +800,10 @@ void ggml_type_traits_dsp_init(int use_hvx) {
     ggml_dsp_use_hvx = use_hvx;
 }
 
+int ggml_get_dsp_use_hvx(void) {
+    return ggml_dsp_use_hvx;
+}
+
 const struct ggml_type_traits_dsp * ggml_get_type_traits_dsp(enum ggml_type type) {
     assert(type >= 0);
     assert(type < GGML_TYPE_COUNT);
@@ -1744,7 +1748,7 @@ static inline uint8_t ggml_fp32_to_ue4m3(float x) {
     return (uint8_t) ((ue4m3_exp << 3) | ue4m3_man);
 }
 
-static inline void ggml_critical_section_start() {
+static inline void ggml_critical_section_start(void) {
 }
 
 static inline void ggml_critical_section_end(void) {

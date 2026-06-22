@@ -1971,6 +1971,7 @@ GGML_API void           ggml_quantize_free(void);
 GGML_API const struct ggml_type_traits *     ggml_get_type_traits(enum ggml_type type);
 GGML_API const struct ggml_type_traits_dsp * ggml_get_type_traits_dsp(enum ggml_type type);
 GGML_API void                                ggml_type_traits_dsp_init(int use_hvx);
+GGML_API int                                 ggml_get_dsp_use_hvx(void);
 
 GGML_API void           quantize_row_f32_to_f16_ref(const float * GGML_RESTRICT x, uint16_t * GGML_RESTRICT y, int n);
 GGML_API void           quantize_row_q1_0_ref(const float * GGML_RESTRICT x, block_q1_0 * GGML_RESTRICT y, int64_t k);
