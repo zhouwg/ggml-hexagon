@@ -316,11 +316,11 @@ class tinyBLAS_Fast {
 
 #if defined(__HVX__)
 
-// Load 32 bytes from memory into an HVX_Vector (upper 96 bytes zeroed)
-static inline HVX_Vector load_32bytes(const void *p) {
-    int8_t __attribute__((aligned(128))) buf[128] = {};
-    memcpy(buf, p, 32);
-    return *(HVX_Vector *)buf;
+// Load first N bytes from memory into an HVX_Vector (remaining bytes zeroed)
+// Uses predicate to zero-extend: p16 for 16 bytes, p32 for 32 bytes
+template <int N>
+static inline HVX_Vector load_bytes(const void *p) {
+    return Q6_V_vand_QV(Q6_Q_vsetq_R(N), *(const HVX_UVector *)p);
 }
 
 // Reduce first 8 int32 values of an HVX_Vector to a single int32
@@ -460,42 +460,92 @@ class tinyBLAS_Q0_Fast {
 
     // Load Q8_0 block qs values (32 int8) into HVX_Vector
     inline HVX_Vector load_q8(const block_q8_0 *b) {
-        return load_32bytes(b->qs);
+        return load_bytes<32>(b->qs);
     }
 
     // Load and dequantize A block for different quantized types
 
     // Q8_0: direct load (already int8)
     inline HVX_Vector load_a(const block_q8_0 *b) {
-        return load_32bytes(b->qs);
+        return load_bytes<32>(b->qs);
     }
 
-    // Q4_0: dequantize nibbles to int8 (nibble - 8)
+    // Q4_0: dequantize nibbles to int8 (nibble - 8) using HVX
+    // Must apply p16 after vsub to zero positions 16-127 (vsub on zero bytes gives -8, not 0)
     inline HVX_Vector load_a(const block_q4_0 *b) {
-        int8_t __attribute__((aligned(128))) dequant[128] = {};
-        const uint8_t *qs = b->qs;
-        for (int j = 0; j < 16; ++j) {
-            dequant[j]      = (qs[j] & 0x0F) - 8;
-            dequant[j + 16] = (qs[j] >> 4)   - 8;
-        }
-        return *(HVX_Vector *)dequant;
+        const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+        const HVX_Vector voff  = Q6_Vb_vsplat_R(8);
+        const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)b->qs);
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+        HVX_Vector lo_val = Q6_V_vand_QV(p16, Q6_Vb_vsub_VbVb(lo_nib, voff));
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+        HVX_Vector hi_val = Q6_V_vand_QV(p16, Q6_Vb_vsub_VbVb(hi_nib, voff));
+
+        HVX_Vector hi_shifted = Q6_V_vror_VR(hi_val, 112);
+        return Q6_V_vor_VV(lo_val, hi_shifted);
     }
 
-    // Q5_0: dequantize nibbles + qh bits to int8
+    // Q5_0: dequantize nibbles + qh bits to int8 using HVX
     inline HVX_Vector load_a(const block_q5_0 *b) {
-        int8_t __attribute__((aligned(128))) dequant[128] = {};
-        const uint8_t *qs = b->qs;
+        const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+        const HVX_Vector v16   = Q6_Vb_vsplat_R(16);
+        const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)b->qs);
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+        HVX_Vector lo_val = Q6_V_vand_QV(p16, Q6_Vb_vsub_VbVb(lo_nib, v16));
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+        HVX_Vector hi_val = Q6_V_vand_QV(p16, Q6_Vb_vsub_VbVb(hi_nib, v16));
+
+        HVX_Vector hi_shifted = Q6_V_vror_VR(hi_val, 112);
+        HVX_Vector result = Q6_V_vor_VV(lo_val, hi_shifted);
+
+        // Add qh bits (5th bit adds 16 to the value)
         uint32_t qh;
         memcpy(&qh, b->qh, sizeof(qh));
-        for (int j = 0; j < 16; ++j) {
-            int8_t lo = (qs[j] & 0x0F) - 16;
-            int8_t hi = (qs[j] >> 4)   - 16;
-            lo += (qh >> j)        & 1 ? 16 : 0;
-            hi += (qh >> (j + 16)) & 1 ? 16 : 0;
-            dequant[j]      = lo;
-            dequant[j + 16] = hi;
+        if (qh != 0) {
+            int8_t __attribute__((aligned(128))) tmp[128];
+            *(HVX_Vector *)tmp = result;
+            for (int j = 0; j < 16; ++j) {
+                tmp[j]      += (qh >> j)        & 1 ? 16 : 0;
+                tmp[j + 16] += (qh >> (j + 16)) & 1 ? 16 : 0;
+            }
+            result = *(HVX_Vector *)tmp;
         }
-        return *(HVX_Vector *)dequant;
+
+        return result;
+    }
+
+    // IQ4_NL: dequantize nibbles using vlut32 lookup table
+    // vlut32 with Rt=0 accesses even bytes of Vv: Vv[offset*2]
+    // Table must be interleaved (value, 0, value, 0, ...) for vlut32 alignment
+    // Must apply p16 after vlut32 to zero positions 16-127 (vlut32 on zero idx gives kvalues[0])
+    inline HVX_Vector load_a(const block_iq4_nl *b) {
+        static const uint8_t __attribute__((aligned(128))) kvalues_iq4nl_lut[] = {
+            0x81, 0, 0x98, 0, 0xAD, 0, 0xBF, 0, 0xCF, 0, 0xDD, 0, 0xEA, 0, 0xF6, 0,
+            0x01, 0, 0x0D, 0, 0x19, 0, 0x26, 0, 0x35, 0, 0x45, 0, 0x59, 0, 0x71, 0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+            0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+        };
+        const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+        const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+
+        HVX_Vector lut = *(const HVX_Vector *)kvalues_iq4nl_lut;
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)b->qs);
+
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+        HVX_Vector lo_val = Q6_V_vand_QV(p16, Q6_Vb_vlut32_VbVbI(lo_nib, lut, 0));
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+        HVX_Vector hi_val = Q6_V_vand_QV(p16, Q6_Vb_vlut32_VbVbI(hi_nib, lut, 0));
+
+        HVX_Vector hi_shifted = Q6_V_vror_VR(hi_val, 112);
+        return Q6_V_vor_VV(lo_val, hi_shifted);
     }
 
     const int ith;
@@ -592,6 +642,21 @@ bool ggmldsp_llamafile_sgemm(const struct ggmldsp_compute_params * params, struc
 #if defined(__HVX__)
         tinyBLAS_Q0_Fast<block_q5_0> tb{ params,
             k, (const block_q5_0 *)A, lda,
+            (const block_q8_0 *)B, ldb,
+            (float *)C, ldc};
+        tb.matmul(m, n);
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    case GGML_TYPE_IQ4_NL: {
+        if (Btype != GGML_TYPE_Q8_0)
+            return false;
+#if defined(__HVX__)
+        tinyBLAS_Q0_Fast<block_iq4_nl> tb{ params,
+            k, (const block_iq4_nl *)A, lda,
             (const block_q8_0 *)B, ldb,
             (float *)C, ldc};
         tb.matmul(m, n);

@@ -4070,15 +4070,19 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
         supported = true;
     } else if (type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q5_0) {
         supported = true;
+    } else if (type == GGML_TYPE_F16 || type == GGML_TYPE_BF16) {
+        supported = true;
+    } else if (type == GGML_TYPE_IQ4_NL) {
+        supported = true;
     }
     if (!supported) {
         GGMLHEXAGON_LOG_INFO("sgemm: type %d not supported, fallback", type);
         goto fallback;
     }
 
-    // For F32xF32, k must be multiple of 32 (HVX_Vector holds 32 floats)
-    if (type == GGML_TYPE_F32 && (src0->ne[0] % 32 != 0)) {
-        GGMLHEXAGON_LOG_INFO("sgemm: F32 k=%d not multiple of 32, fallback", src0->ne[0]);
+    // For F32/F16/BF16, k must be multiple of 32 (HVX_Vector holds 32 floats)
+    if ((type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16) && (src0->ne[0] % 32 != 0)) {
+        GGMLHEXAGON_LOG_INFO("sgemm: k=%d not multiple of 32, fallback", src0->ne[0]);
         goto fallback;
     }
 
@@ -4114,9 +4118,54 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
     const size_t type_size = ggml_type_size(type);
     const size_t vec_dot_type_size = ggml_type_size(vec_dot_type);
 
-    // Quantize src1 to vec_dot_type if needed
+    // For F16/BF16: pre-convert to F32, then use F32 sgemm
+    // This avoids the F32->F16->F32 round-trip through quantize
+    bool use_f32_sgemm = (type == GGML_TYPE_F16 || type == GGML_TYPE_BF16);
+    float * f32_A = NULL;
+    float * f32_B = NULL;
+
+    if (use_f32_sgemm) {
+        const size_t f32_A_size = (size_t)ne01 * ne00 * sizeof(float);
+        const size_t f32_B_size = (size_t)ne11 * ne00 * sizeof(float) * ne12 * ne13;
+        f32_A = (float *)ggmlop_get_work_data(f32_A_size + f32_B_size);
+        if (f32_A == NULL) {
+            GGMLHEXAGON_LOG_INFO("sgemm: F16/BF16 work buffer alloc failed, fallback");
+            goto fallback;
+        }
+        f32_B = f32_A + (size_t)ne01 * ne00;
+
+        // Convert src0 (A) from F16/BF16 to F32
+        for (int i = 0; i < ne01; ++i) {
+            const void * src_row = (const char *)src0->data + i * nb01;
+            if (type == GGML_TYPE_F16) {
+                ggml_fp16_to_fp32_row_hvx((const ggml_fp16_t *)src_row, f32_A + i * ne00, ne00);
+            } else {
+                ggml_bf16_to_fp32_row_hvx((const ggml_bf16_t *)src_row, f32_A + i * ne00, ne00);
+            }
+        }
+
+        // Convert src1 (B) to F32
+        for (int i13 = 0; i13 < ne13; ++i13) {
+            for (int i12 = 0; i12 < ne12; ++i12) {
+                for (int i11 = 0; i11 < ne11; ++i11) {
+                    const void * src_row = (const char *)src1->data + i13 * nb13 + i12 * nb12 + i11 * nb11;
+                    float * dst_row = f32_B + ((i13 * ne12 + i12) * ne11 + i11) * ne00;
+                    if (src1->type == GGML_TYPE_F32) {
+                        memcpy(dst_row, src_row, ne00 * sizeof(float));
+                    } else if (src1->type == GGML_TYPE_F16) {
+                        ggml_fp16_to_fp32_row_hvx((const ggml_fp16_t *)src_row, dst_row, ne00);
+                    } else if (src1->type == GGML_TYPE_BF16) {
+                        ggml_bf16_to_fp32_row_hvx((const ggml_bf16_t *)src_row, dst_row, ne00);
+                    }
+                }
+            }
+        }
+    }
+
+    // Quantize src1 to vec_dot_type if needed (for quantized types only)
+    // F16/BF16 skip this step - they convert directly to F32 instead
     const void * wdata = src1->data;
-    if (src1->type != vec_dot_type) {
+    if (!use_f32_sgemm && src1->type != vec_dot_type) {
         const size_t row_size = ggml_row_size(vec_dot_type, ne00);
         const size_t q8_size = row_size * ne11 * ne12 * ne13;
         void * q8_data = ggmlop_get_work_data(q8_size);
@@ -4143,13 +4192,23 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
     struct sgemm_params s_params;
     s_params.m     = ne01;
     s_params.n     = ne11;
-    s_params.k     = ne00 / blck_size;
-    s_params.lda   = nb01 / type_size;
-    s_params.ldb   = row_size / vec_dot_type_size;
     s_params.ldc   = nb1 / sizeof(float);
-    s_params.Atype = type;
-    s_params.Btype = vec_dot_type;
     s_params.Ctype = GGML_TYPE_F32;
+
+    if (use_f32_sgemm) {
+        // F16/BF16: use pre-converted F32 buffers
+        s_params.k     = ne00;
+        s_params.lda   = ne00;
+        s_params.ldb   = ne00;
+        s_params.Atype = GGML_TYPE_F32;
+        s_params.Btype = GGML_TYPE_F32;
+    } else {
+        s_params.k     = ne00 / blck_size;
+        s_params.lda   = nb01 / type_size;
+        s_params.ldb   = row_size / vec_dot_type_size;
+        s_params.Atype = type;
+        s_params.Btype = vec_dot_type;
+    }
 
     // VTCM buffering for quantized types
     // sgemm is designed for CPU cache; on DSP without VTCM, every load hits DDR.
@@ -4189,24 +4248,29 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
 
     for (int i13 = 0; i13 < ne13; ++i13) {
         for (int i12 = 0; i12 < ne12; ++i12) {
-            const void * A_src = (const char *)src0->data + (i12 / r2) * nb02 + (i13 / r3) * nb03;
-            const void * B_src = (const char *)wdata + (i12 * ne11 + i13 * ne12 * ne11) * row_size;
-            s_params.C = (char *)dst->data + i12 * nb2 + i13 * nb3;
-
-            if (use_vtcm) {
-                // DMA transfer: DDR -> VTCM (bypasses cache, avoids coherence issues)
-                dma_queue_push_ddr_to_vtcm(vtcm_dma,
-                    dma_make_ptr(vtcm_A, A_src), nb01, nb01, ne01);
-                dma_queue_pop(vtcm_dma);
-                dma_queue_push_ddr_to_vtcm(vtcm_dma,
-                    dma_make_ptr(vtcm_B, B_src), row_size, row_size, ne11);
-                dma_queue_pop(vtcm_dma);
-                s_params.A = vtcm_A;
-                s_params.B = vtcm_B;
+            if (use_f32_sgemm) {
+                // F16/BF16: use pre-converted F32 buffers
+                s_params.A = f32_A;
+                s_params.B = f32_B + (i12 * ne11 + i13 * ne12 * ne11) * ne00;
             } else {
-                s_params.A = A_src;
-                s_params.B = B_src;
+                const void * A_src = (const char *)src0->data + (i12 / r2) * nb02 + (i13 / r3) * nb03;
+                const void * B_src = (const char *)wdata + (i12 * ne11 + i13 * ne12 * ne11) * row_size;
+
+                if (use_vtcm) {
+                    dma_queue_push_ddr_to_vtcm(vtcm_dma,
+                        dma_make_ptr(vtcm_A, A_src), nb01, nb01, ne01);
+                    dma_queue_pop(vtcm_dma);
+                    dma_queue_push_ddr_to_vtcm(vtcm_dma,
+                        dma_make_ptr(vtcm_B, B_src), row_size, row_size, ne11);
+                    dma_queue_pop(vtcm_dma);
+                    s_params.A = vtcm_A;
+                    s_params.B = vtcm_B;
+                } else {
+                    s_params.A = A_src;
+                    s_params.B = B_src;
+                }
             }
+            s_params.C = (char *)dst->data + i12 * nb2 + i13 * nb3;
 
             if (n_threads <= 1) {
                 struct ggmldsp_compute_params cparams = {0, 1};

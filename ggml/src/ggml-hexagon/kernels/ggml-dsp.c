@@ -1546,13 +1546,14 @@ void ggml_fp16_to_fp32_row_hvx(const ggml_fp16_t * x, float * y, int64_t n) {
 
 #if __HVX_ARCH__ >= 79
         HVX_VectorPair p = Q6_Wsf_vmpy_VhfVhf(v_shuf, one_f16);
-        // Swap hi/lo to match sequential element ordering
-        vy[2*i]     = Q6_V_hi_W(p);
-        vy[2*i + 1] = Q6_V_lo_W(p);
+        // vmpy puts even-position results (original fp16[0..31]) in V_lo,
+        // odd-position results (original fp16[32..63]) in V_hi
+        vy[2*i]     = Q6_V_lo_W(p);
+        vy[2*i + 1] = Q6_V_hi_W(p);
 #else
         HVX_VectorPair p = Q6_Wqf32_vmpy_VhfVhf(v_shuf, one_f16);
-        vy[2*i]     = Q6_Vsf_equals_Vqf32(Q6_V_hi_W(p));
-        vy[2*i + 1] = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(p));
+        vy[2*i]     = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(p));
+        vy[2*i + 1] = Q6_Vsf_equals_Vqf32(Q6_V_hi_W(p));
 #endif
     }
 
@@ -1573,6 +1574,48 @@ void ggml_fp32_to_fp16_row(const float * x, ggml_fp16_t * y, int64_t n) {
 void ggml_bf16_to_fp32_row(const ggml_bf16_t * x, float * y, int64_t n) {
     for (int64_t i = 0; i < n; ++i) {
         y[i] = ggml_compute_bf16_to_fp32(x[i]);
+    }
+}
+
+void ggml_bf16_to_fp32_row_hvx(const ggml_bf16_t * x, float * y, int64_t n) {
+    const int bf16_per_vec = 128 / sizeof(uint16_t); // 64
+
+    if (n < bf16_per_vec || ((uintptr_t)x & 0x7F) != 0 || ((uintptr_t)y & 0x7F) != 0) {
+        for (int64_t i = 0; i < n; ++i) {
+            y[i] = ggml_compute_bf16_to_fp32(x[i]);
+        }
+        return;
+    }
+
+    const int nvec = n / bf16_per_vec;
+    const int nloe = n % bf16_per_vec;
+
+    const HVX_Vector * restrict vx = (const HVX_Vector *)x;
+    HVX_Vector * restrict vy = (HVX_Vector *)y;
+
+    for (int i = 0; i < nvec; ++i) {
+        HVX_Vector v = vx[i];
+        // vshuff interleaves first 32 and last 32 halfwords
+        // After vshuff: even positions = bf16[0..31], odd positions = bf16[32..63]
+        // As 32-bit words: word[k] = bf16[k] | (bf16[k+32] << 16)
+        HVX_Vector v_shuf = Q6_Vh_vshuff_Vh(v);
+
+        // vasl by 16: lower halfword (bf16[k]) becomes fp32(bf16[k])
+        HVX_Vector lo = Q6_Vw_vasl_VwR(v_shuf, 16);
+
+        // vasr by 16 then vasl by 16: upper halfword (bf16[k+32]) becomes fp32(bf16[k+32])
+        HVX_Vector hi = Q6_Vw_vasl_VwR(Q6_Vw_vasr_VwR(v_shuf, 16), 16);
+
+        // lo has fp32[0..31], hi has fp32[32..63]
+        vy[2*i]     = lo;
+        vy[2*i + 1] = hi;
+    }
+
+    if (nloe > 0) {
+        const int base = nvec * bf16_per_vec;
+        for (int64_t i = 0; i < nloe; ++i) {
+            y[base + i] = ggml_compute_bf16_to_fp32(x[base + i]);
+        }
     }
 }
 
