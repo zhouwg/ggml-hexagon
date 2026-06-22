@@ -3078,6 +3078,39 @@ static void transfer_activation_chunk_f16_to_f16_tiles(__fp16 *restrict vtcm_dst
     __asm__ __volatile__("" ::: "memory");
 }
 
+// HVX-accelerated F16 activation transfer using vscatter for row-pair interleaved tile format
+static void transfer_activation_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const __fp16 *restrict src,
+                                                            int n_rows, int k, int row_stride) {
+    const int n_row_tiles = (n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+
+    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
+    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
+    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
+    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+
+    for (int t = 0; t < n_row_tiles * k_tiles; ++t) {
+        int rt = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int row0 = rt * HMX_FP16_TILE_N_ROWS + i;
+            int row1 = row0 + 1;
+            const __fp16 *r0 = (row0 < n_rows) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+            const __fp16 *r1 = (row1 < n_rows) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+
+            HVX_Vector v0 = r0 ? hvx_vmemu(r0) : Q6_V_vzero();
+            HVX_Vector v1 = r1 ? hvx_vmemu(r1) : Q6_V_vzero();
+
+            const HVX_Vector v_off0 = Q6_Vw_vadd_VwVw(v_scat_base, Q6_V_vsplat_R(i * 4));
+            const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+        }
+    }
+}
+
 // Convert weight chunk from fp32 to fp16 tiles
 // Uses FP16 Crouton layout (column-pair interleaved format for weight)
 // Reference: htp/hmx-matmul-ops.c convert_f16_weight_to_fp16_tiles_task,
@@ -3176,6 +3209,39 @@ static void transfer_weight_chunk_f16_to_f16_tiles(__fp16 *restrict vtcm_dst, co
         }
     }
     __asm__ __volatile__("" ::: "memory");
+}
+
+// HVX-accelerated F16 weight transfer using vscatter for column-pair interleaved tile format
+static void transfer_weight_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const __fp16 *restrict src,
+                                                        int n_cols, int k, int row_stride) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = n_cols / HMX_FP16_TILE_N_COLS;
+
+    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
+    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
+    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
+    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+
+    for (int t = 0; t < n_col_tiles * k_tiles; ++t) {
+        int ct = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+            int row1 = row0 + 1;
+            const __fp16 *r0 = (row0 < n_cols) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+            const __fp16 *r1 = (row1 < n_cols) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+
+            HVX_Vector v0 = r0 ? hvx_vmemu(r0) : Q6_V_vzero();
+            HVX_Vector v1 = r1 ? hvx_vmemu(r1) : Q6_V_vzero();
+
+            const HVX_Vector v_off0 = Q6_Vw_vadd_VwVw(v_scat_base, Q6_V_vsplat_R(i * 4));
+            const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+        }
+    }
 }
 
 void core_dot_chunk_fp16(__fp16 *restrict output, const __fp16 *restrict activation,
@@ -3906,6 +3972,57 @@ static void convert_weight_bf16_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst, con
     }
 }
 
+// Activation BF16: convert to FP16 tiles using HVX (row-pair interleaved format)
+static void convert_activation_bf16_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst, const ggml_bf16_t *restrict src,
+                                                       int n_rows, int k, int row_stride) {
+    const int n_row_tiles = (n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+
+    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
+    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
+    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
+    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+
+    for (int t = 0; t < n_row_tiles * k_tiles; ++t) {
+        int rt = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int row0 = rt * HMX_FP16_TILE_N_ROWS + i;
+            int row1 = row0 + 1;
+            const ggml_bf16_t *r0 = (row0 < n_rows) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+            const ggml_bf16_t *r1 = (row1 < n_rows) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+
+            HVX_Vector v0, v1;
+            if (r0) {
+                HVX_Vector vbf0 = hvx_vmemu(r0);
+                HVX_Vector v_shuf0 = Q6_Vh_vshuff_Vh(vbf0);
+                HVX_Vector vf0_lo = Q6_Vw_vasl_VwR(v_shuf0, 16);
+                HVX_Vector vf0_hi = Q6_Vw_vasl_VwR(Q6_Vw_vasr_VwR(v_shuf0, 16), 16);
+                v0 = hvx_vec_f32_to_f16(vf0_lo, vf0_hi);
+            } else {
+                v0 = Q6_V_vzero();
+            }
+
+            if (r1) {
+                HVX_Vector vbf1 = hvx_vmemu(r1);
+                HVX_Vector v_shuf1 = Q6_Vh_vshuff_Vh(vbf1);
+                HVX_Vector vf1_lo = Q6_Vw_vasl_VwR(v_shuf1, 16);
+                HVX_Vector vf1_hi = Q6_Vw_vasl_VwR(Q6_Vw_vasr_VwR(v_shuf1, 16), 16);
+                v1 = hvx_vec_f32_to_f16(vf1_lo, vf1_hi);
+            } else {
+                v1 = Q6_V_vzero();
+            }
+
+            const HVX_Vector v_off0 = Q6_Vw_vadd_VwVw(v_scat_base, Q6_V_vsplat_R(i * 4));
+            const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+        }
+    }
+}
+
 // ============================================================
 // Parallel data conversion helpers for VTCM+HMX
 // ============================================================
@@ -4512,7 +4629,11 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
         const int use_hvx = ggml_get_dsp_use_hvx();
         if (src0_is_f16) {
             const __fp16 *weight_chunk = (const __fp16 *)((const char *)src0->data + mc * src0_row_stride);
-            transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
+            if (use_hvx) {
+                transfer_weight_chunk_f16_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
+            } else {
+                transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
+            }
         } else if (src0->type == GGML_TYPE_F32) {
             const float *weight_chunk = (const float *)((const char *)src0->data + mc * src0_row_stride);
 
@@ -4579,28 +4700,36 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             // Convert activation chunk (src1) to fp16 tiles
             if (src1_is_f16) {
                 const __fp16 *act_chunk = (const __fp16 *)((const char *)src1->data + nr * src1_row_stride);
-                transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+                if (use_hvx) {
+                    transfer_activation_chunk_f16_to_f16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+                } else {
+                    transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+                }
             } else if (src1->type == GGML_TYPE_BF16) {
                 const ggml_bf16_t *act_chunk = (const ggml_bf16_t *)((const char *)src1->data + nr * src1_row_stride);
-                // BF16 -> FP16: convert each element directly
-                // Reuse activation tile format (row-pair interleaved)
-                const int k_tiles = K / HMX_FP16_TILE_N_COLS;
-                const int n_row_tiles = (N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
-                for (int rt = 0; rt < n_row_tiles * k_tiles; ++rt) {
-                    int ct = rt / k_tiles;
-                    int kt = rt % k_tiles;
-                    __fp16 *tile_base = vtcm_activation + rt * HMX_FP16_TILE_N_ELMS;
-                    for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
-                        int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
-                        int row1 = row0 + 1;
-                        const ggml_bf16_t *r0 = (row0 < N_rows) ? act_chunk + row0 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
-                        const ggml_bf16_t *r1 = (row1 < N_rows) ? act_chunk + row1 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
-                        for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
-                            float v0 = r0 ? ggml_compute_bf16_to_fp32(r0[j]) : 0.0f;
-                            float v1 = r1 ? ggml_compute_bf16_to_fp32(r1[j]) : 0.0f;
-                            // Row-pair interleaved: tile[j*64 + i*2] = row0[j], tile[j*64 + i*2 + 1] = row1[j]
-                            fp32_to_fp16_store(&tile_base[j * 64 + i * 2], v0);
-                            fp32_to_fp16_store(&tile_base[j * 64 + i * 2 + 1], v1);
+                if (use_hvx) {
+                    convert_activation_bf16_to_fp16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(ggml_bf16_t));
+                } else {
+                    // BF16 -> FP16: convert each element directly
+                    // Reuse activation tile format (row-pair interleaved)
+                    const int k_tiles = K / HMX_FP16_TILE_N_COLS;
+                    const int n_row_tiles = (N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
+                    for (int rt = 0; rt < n_row_tiles * k_tiles; ++rt) {
+                        int ct = rt / k_tiles;
+                        int kt = rt % k_tiles;
+                        __fp16 *tile_base = vtcm_activation + rt * HMX_FP16_TILE_N_ELMS;
+                        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+                            int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+                            int row1 = row0 + 1;
+                            const ggml_bf16_t *r0 = (row0 < N_rows) ? act_chunk + row0 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
+                            const ggml_bf16_t *r1 = (row1 < N_rows) ? act_chunk + row1 * (src1_row_stride / sizeof(ggml_bf16_t)) + kt * HMX_FP16_TILE_N_COLS : NULL;
+                            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                                float v0 = r0 ? ggml_compute_bf16_to_fp32(r0[j]) : 0.0f;
+                                float v1 = r1 ? ggml_compute_bf16_to_fp32(r1[j]) : 0.0f;
+                                // Row-pair interleaved: tile[j*64 + i*2] = row0[j], tile[j*64 + i*2 + 1] = row1[j]
+                                fp32_to_fp16_store(&tile_base[j * 64 + i * 2], v0);
+                                fp32_to_fp16_store(&tile_base[j * 64 + i * 2 + 1], v1);
+                            }
                         }
                     }
                 }

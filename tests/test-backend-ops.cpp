@@ -9208,6 +9208,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_IQ4_NL,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1,    GGML_TYPE_F32, 1024, 1024, 1024, { 1,  1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_1,    GGML_TYPE_F32, 2048, 2048, 2048, { 1,  1}, {1, 1}));
 
     //end jz'case
     return test_cases;

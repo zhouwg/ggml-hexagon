@@ -6353,8 +6353,8 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q5_0:
         case GGML_TYPE_IQ4_NL:
-#if 0
         case GGML_TYPE_Q4_1:
+#if 0
         case GGML_TYPE_Q5_1:
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q6_K:
