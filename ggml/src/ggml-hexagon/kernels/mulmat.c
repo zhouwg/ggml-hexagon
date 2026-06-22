@@ -159,57 +159,20 @@ static int nearest_int(float fval) {
     return (int)(fval + (fval >= 0 ? 0.5f : -0.5f));
 }
 
-static inline float horizontal_sum_safe(HVX_Vector vec) {
-    float __attribute__((aligned(VLEN))) buffer[32];
-    float sum = 0.0f;
-    union {
-        HVX_Vector v;
-        float f[32];
-    } converter;
-    converter.v = vec;
-    #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        sum += converter.f[i];
-    }
-    return sum;
-}
-
-static inline float horizontal_sum_hvx_1(HVX_Vector vec) {
-    HVX_VectorPair shuffled = Q6_W_vshuff_VVR(vec, vec, 64);
-    HVX_Vector sum = Q6_Vsf_vadd_VsfVsf(Q6_V_lo_W(shuffled), Q6_V_hi_W(shuffled));
-
-    shuffled = Q6_W_vshuff_VVR(sum, sum, 32);
-    sum = Q6_Vsf_vadd_VsfVsf(Q6_V_lo_W(shuffled), Q6_V_hi_W(shuffled));
-
-    shuffled = Q6_W_vshuff_VVR(sum, sum, 16);
-    sum = Q6_Vsf_vadd_VsfVsf(Q6_V_lo_W(shuffled), Q6_V_hi_W(shuffled));
-
-    shuffled = Q6_W_vshuff_VVR(sum, sum, 8);
-    sum = Q6_Vsf_vadd_VsfVsf(Q6_V_lo_W(shuffled), Q6_V_hi_W(shuffled));
-
-    shuffled = Q6_W_vshuff_VVR(sum, sum, 4);
-    sum = Q6_Vsf_vadd_VsfVsf(Q6_V_lo_W(shuffled), Q6_V_hi_W(shuffled));
-
-    int32_t result = Q6_R_vextract_VR(sum, 0);
-    float f_result;
-    memcpy(&f_result, &result, sizeof(float));
-    return f_result;
-}
-
-static inline float horizontal_sum_hvx_2(HVX_Vector v) {
-#if defined(v68) || defined(v69) || defined(v73) || defined(v75)
+float horizontal_sum_f32(HVX_Vector v) {
+#if __HEXAGON_ARCH__ >= 79
+  v = Q6_Vsf_vadd_VsfVsf(v, Q6_V_vror_VR(v, 64));
+  v = Q6_Vsf_vadd_VsfVsf(v, Q6_V_vror_VR(v, 32));
+  v = Q6_Vsf_vadd_VsfVsf(v, Q6_V_vror_VR(v, 16));
+  v = Q6_Vsf_vadd_VsfVsf(v, Q6_V_vror_VR(v, 8));
+  v = Q6_Vsf_vadd_VsfVsf(v, Q6_V_vror_VR(v, 4));
+#else
   v = Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 64));
   v = Q6_Vqf32_vadd_Vqf32Vqf32(v, Q6_V_vror_VR(v, 32));
   v = Q6_Vqf32_vadd_Vqf32Vqf32(v, Q6_V_vror_VR(v, 16));
   v = Q6_Vqf32_vadd_Vqf32Vqf32(v, Q6_V_vror_VR(v, 8));
   v = Q6_Vqf32_vadd_Vqf32Vqf32(v, Q6_V_vror_VR(v, 4));
   v = Q6_Vsf_equals_Vqf32(v);
-#else
-  v = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 64)));
-  v = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 32)));
-  v = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 16)));
-  v = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 8)));
-  v = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(v, Q6_V_vror_VR(v, 4)));
 #endif
   return *((float*)&v);
 }
@@ -260,7 +223,7 @@ static inline void vec_dot_f32_hvx_impl_me(int n, float * GGML_RESTRICT s, const
     const size_t left           = n % FLOATS_PER_VECTOR;
     const size_t blocks         = block * FLOATS_PER_VECTOR;
 
-#if defined(v68) || defined(v69) || defined(v73) || defined(v75)
+#if !(__HEXAGON_ARCH__ >= 79)
     if (qurt_hvx_lock(QURT_HVX_MODE_128B) != 0) {
         FARF(ALWAYS, "failed hvx lock\n");
         return;
@@ -302,11 +265,9 @@ static inline void vec_dot_f32_hvx_impl_me(int n, float * GGML_RESTRICT s, const
     }
     sout = Q6_Vsf_equals_Vqf32(qf32);
 
-    //sumf = horizontal_sum_hvx_1(sout);
-    sumf = horizontal_sum_hvx_2(sout);
-    //sumf = horizontal_sum_safe(sout);
+    sumf = horizontal_sum_f32(sout);
 
-#if defined(v68) || defined(v69) || defined(v73) || defined(v75)
+#if !(__HEXAGON_ARCH__ >= 79)
     qurt_hvx_unlock();
 #endif
     if (left > 0) {
@@ -436,7 +397,7 @@ void vec_dot_f16_f16_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void *G
         HVX_Vector acc_lo = Q6_V_lo_W(acc);
         HVX_Vector acc_hi = Q6_V_hi_W(acc);
         HVX_Vector sum_v = Q6_Vsf_vadd_VsfVsf(acc_lo, acc_hi);
-        sumf = horizontal_sum_hvx_2(sum_v);
+        sumf = horizontal_sum_f32(sum_v);
 
         if (nloe > 0) {
             const int base = nvec * fp16_per_vec;
@@ -1241,7 +1202,7 @@ void vec_dot_bf16_bf16_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void 
         }
 
         HVX_Vector sum_v = Q6_Vsf_vadd_VsfVsf(acc0, acc1);
-        sumf = horizontal_sum_hvx_2(sum_v);
+        sumf = horizontal_sum_f32(sum_v);
 
         if (nloe > 0) {
             const int base = nvec * bf16_per_vec;

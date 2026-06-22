@@ -293,10 +293,10 @@
       "description": "How to test and measure mulmat performance",
       "test_command": "./scripts/build-run-android.sh run_testop MUL_MAT 3 [algo_type]",
       "algo_types": {
-        "0": "HVX+multithread (default)",
+        "0": "HVX + multithread",
         "31": "sgemm (llamafile-style)",
-        "32": "VTCM+HMX",
-        "33": "VTCM+multithread"
+        "32": "HMX",
+        "33": "VTCM + multithread"
       },
       "log_command": "adb logcat | grep CDSP0",
       "note": "Use DSP-side log timing for performance analysis. Do NOT run ./scripts/build-run-android.sh run_perfop unless explicitly approved - it is very time-consuming."

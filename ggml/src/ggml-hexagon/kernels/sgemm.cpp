@@ -112,26 +112,11 @@ inline HVX_Vector madd(HVX_Vector a, HVX_Vector b, HVX_Vector c) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // VECTORIZED HORIZONTAL SUM
+// Uses the unified horizontal_sum_f32 from ggml-dsp.h / mulmat.c
 
 #if defined(__HVX__)
-static inline float hsum_hvx_fast(HVX_Vector x) {
-    // qf32 accumulate with vror for horizontal reduction
-#if defined(v68) || defined(v69) || defined(v73) || defined(v75)
-    x = Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 64));
-    x = Q6_Vqf32_vadd_Vqf32Vqf32(x, Q6_V_vror_VR(x, 32));
-    x = Q6_Vqf32_vadd_Vqf32Vqf32(x, Q6_V_vror_VR(x, 16));
-    x = Q6_Vqf32_vadd_Vqf32Vqf32(x, Q6_V_vror_VR(x, 8));
-    x = Q6_Vqf32_vadd_Vqf32Vqf32(x, Q6_V_vror_VR(x, 4));
-    x = Q6_Vsf_equals_Vqf32(x);
-#else
-    x = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 64)));
-    x = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 32)));
-    x = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 16)));
-    x = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 8)));
-    x = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf(x, Q6_V_vror_VR(x, 4)));
-#endif
-    return *((float*)&x);
-}
+// horizontal_sum_f32 is now provided by mulmat.c via ggml-dsp.h declaration
+// horizontal_sum_f32(HVX_Vector v)
 #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -257,7 +242,7 @@ class tinyBLAS_Fast {
         }
         for (int64_t j = 0; j < RN; ++j)
             for (int64_t i = 0; i < RM; ++i) {
-                C[ldc * (jj + j) + (ii + i)] = hsum_hvx_fast(Cv[j][i]);
+                C[ldc * (jj + j) + (ii + i)] = horizontal_sum_f32(Cv[j][i]);
             }
     }
 

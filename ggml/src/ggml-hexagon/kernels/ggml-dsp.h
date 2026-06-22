@@ -2133,6 +2133,8 @@ GGML_API void vec_dot_q5_0_q8_0_hvx       (int n, float * GGML_RESTRICT s, size_
 GGML_API void vec_dot_q5_1_q8_1_hvx       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);
 
 // quantize HVX-accelerated implementations
+GGML_API float horizontal_sum_f32(HVX_Vector v);
+
 GGML_API void quantize_row_bf16_hvx          (const float * GGML_RESTRICT x, ggml_bf16_t * GGML_RESTRICT y, int n);
 GGML_API void quantize_row_q8_0_hvx          (const float * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int n);
 GGML_API void quantize_row_q8_1_hvx          (const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int n);
