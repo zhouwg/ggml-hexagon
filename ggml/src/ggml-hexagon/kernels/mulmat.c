@@ -706,56 +706,9 @@ void vec_dot_q8_0_q8_0_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void 
 
     float sumf = 0;
 
-    // Process 4 blocks at a time: 4 * 32 = 128 bytes = 1 HVX_Vector
-    const int nb4 = nb / 4 * 4;
-    int ib = 0;
-
-    for (; ib < nb4; ib += 4) {
-        // Load 4 blocks of x qs (128 bytes, 1 HVX_Vector)
-        // Each block_q8_0 has 2-byte scale + 32-byte qs = 34 bytes
-        // qs fields are at offset 2 within each block
-        const HVX_UVector * vx_ptr = (const HVX_UVector *)x[ib].qs;
-        const HVX_UVector * vy_ptr = (const HVX_UVector *)y[ib].qs;
-
-        // Load 128 bytes of x qs (4 blocks contiguous in qs field)
-        // Note: block_q8_0.qs is at offset 2, blocks are 34 bytes apart
-        // So qs data is NOT contiguous - need individual loads
-        HVX_Vector vx0 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)x[ib+0].qs);
-        HVX_Vector vx1 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)x[ib+1].qs);
-        HVX_Vector vx2 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)x[ib+2].qs);
-        HVX_Vector vx3 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)x[ib+3].qs);
-
-        HVX_Vector vy0 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)y[ib+0].qs);
-        HVX_Vector vy1 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)y[ib+1].qs);
-        HVX_Vector vy2 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)y[ib+2].qs);
-        HVX_Vector vy3 = Q6_V_vand_QV(Q6_Q_vsetq_R(32), *(const HVX_UVector *)y[ib+3].qs);
-
-        HVX_Vector rsum0 = Q6_Vw_vrmpy_VbVb(vx0, vy0);
-        HVX_Vector rsum1 = Q6_Vw_vrmpy_VbVb(vx1, vy1);
-        HVX_Vector rsum2 = Q6_Vw_vrmpy_VbVb(vx2, vy2);
-        HVX_Vector rsum3 = Q6_Vw_vrmpy_VbVb(vx3, vy3);
-
-        int32_t __attribute__((aligned(128))) tmp[32];
-        int32_t sumi[4] = {0, 0, 0, 0};
-
-        *(HVX_Vector *)tmp = rsum0;
-        for (int j = 0; j < 8; ++j) sumi[0] += tmp[j];
-        *(HVX_Vector *)tmp = rsum1;
-        for (int j = 0; j < 8; ++j) sumi[1] += tmp[j];
-        *(HVX_Vector *)tmp = rsum2;
-        for (int j = 0; j < 8; ++j) sumi[2] += tmp[j];
-        *(HVX_Vector *)tmp = rsum3;
-        for (int j = 0; j < 8; ++j) sumi[3] += tmp[j];
-
-        sumf += (float)sumi[0] * ggml_compute_fp16_to_fp32(x[ib+0].d) * ggml_compute_fp16_to_fp32(y[ib+0].d)
-              + (float)sumi[1] * ggml_compute_fp16_to_fp32(x[ib+1].d) * ggml_compute_fp16_to_fp32(y[ib+1].d)
-              + (float)sumi[2] * ggml_compute_fp16_to_fp32(x[ib+2].d) * ggml_compute_fp16_to_fp32(y[ib+2].d)
-              + (float)sumi[3] * ggml_compute_fp16_to_fp32(x[ib+3].d) * ggml_compute_fp16_to_fp32(y[ib+3].d);
-    }
-
-    // Handle remaining blocks
     const HVX_VectorPred p32 = Q6_Q_vsetq_R(32);
-    for (; ib < nb; ++ib) {
+
+    for (int ib = 0; ib < nb; ++ib) {
         HVX_Vector vx_vec = Q6_V_vand_QV(p32, *(const HVX_UVector *)x[ib].qs);
         HVX_Vector vy_vec = Q6_V_vand_QV(p32, *(const HVX_UVector *)y[ib].qs);
         HVX_Vector rsum = Q6_Vw_vrmpy_VbVb(vx_vec, vy_vec);
@@ -2466,7 +2419,8 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
 
     const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
-    float tmp[32];
+    const struct ggml_type_traits_dsp * traits = ggml_get_type_traits_dsp(type);
+    const ggml_vec_dot_t vec_dot_fn = traits->vec_dot;
 
     for (int32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int32_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
@@ -2488,19 +2442,28 @@ static void ggml_compute_forward_mul_mat_one_chunk(const ggml_tensor *src0, cons
 
                 const int32_t block_rows = MIN(iir0 + blck_0, ir0_end) - iir0;
 
-                for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
-                    const int32_t row_idx = ir0 - iir0;
-
-                    const struct ggml_type_traits_dsp * traits = ggml_get_type_traits_dsp(type);
-                    if (traits->vec_dot) {
-                        traits->vec_dot(ne00, &tmp[row_idx], 0,
-                                        src0_row + ir0 * nb01, 0,
-                                        src1_col, 0, 1);
+                if (num_rows_per_vec_dot == 1 && vec_dot_fn) {
+                    for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
+                        if (ir0 + 1 < ir0_end) {
+                            l2fetch(src0_row + (ir0 + 1) * nb01, nb01, nb01, 1, 0);
+                        }
+                        vec_dot_fn(ne00, &dst_col[ir0], 0,
+                                    src0_row + ir0 * nb01, 0,
+                                    src1_col, 0, 1);
                     }
-                }
-
-                for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
-                    memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), (MIN(iir0 + blck_0, ir0_end) - iir0) * sizeof(float));
+                } else {
+                    float tmp[32];
+                    for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                        const int32_t row_idx = ir0 - iir0;
+                        if (vec_dot_fn) {
+                            vec_dot_fn(ne00, &tmp[row_idx], 0,
+                                            src0_row + ir0 * nb01, 0,
+                                            src1_col, 0, 1);
+                        }
+                    }
+                    for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                        memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), block_rows * sizeof(float));
+                    }
                 }
             }
         }
@@ -2783,10 +2746,11 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
 
     const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
+    const struct ggml_type_traits_dsp * traits = ggml_get_type_traits_dsp(type);
+    const ggml_vec_dot_t vec_dot_fn = traits->vec_dot;
+
     const size_t max_rows_in_vtcm = (vtcm_size / sizeof(float)) / ne00;
     const int32_t rows_per_vtcm_block = MIN(max_rows_in_vtcm, VTCM_BLOCK_ROWS);
-
-    float tmp[32];
 
     for (int32_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int32_t iir0_base = ir0_start; iir0_base < ir0_end; iir0_base += rows_per_vtcm_block) {
@@ -2822,19 +2786,26 @@ static void ggml_compute_forward_mul_mat_vtcm_chunk(const ggml_tensor *src0, con
                         memcpy(vtcm_buf, src0_row + iir0 * nb01, copy_size);
                     }
 
-                    for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
-                        const int32_t row_idx = ir0 - iir0;
-
-                        const struct ggml_type_traits_dsp * traits = ggml_get_type_traits_dsp(type);
-                        if (traits->vec_dot) {
-                            traits->vec_dot(ne00, &tmp[row_idx], 0,
-                                            vtcm_buf + row_idx * nb01, 0,
-                                            src1_col, 0, 1);
+                    if (num_rows_per_vec_dot == 1 && vec_dot_fn) {
+                        for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0++) {
+                            const int32_t row_idx = ir0 - iir0;
+                            vec_dot_fn(ne00, &dst_col[ir0], 0,
+                                        vtcm_buf + row_idx * nb01, 0,
+                                        src1_col, 0, 1);
                         }
-                    }
-
-                    for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
-                        memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), block_rows * sizeof(float));
+                    } else {
+                        float tmp[32];
+                        for (int32_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < iir0_end; ir0 += num_rows_per_vec_dot) {
+                            const int32_t row_idx = ir0 - iir0;
+                            if (vec_dot_fn) {
+                                vec_dot_fn(ne00, &tmp[row_idx], 0,
+                                                vtcm_buf + row_idx * nb01, 0,
+                                                src1_col, 0, 1);
+                            }
+                        }
+                        for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                            memcpy(&dst_col[iir0 + cn * nb1 / nb0], tmp + (cn * 16), block_rows * sizeof(float));
+                        }
                     }
                 }
             }
