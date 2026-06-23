@@ -883,6 +883,15 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             src1_dt_buf.data     = (void *)(base + t1->data_offset);
             src1_dt_buf.data_len = t1->data_len;
             src1_dt_ptr = &src1_dt_buf;
+
+            if (1 == g_dump_diag_info) {
+                if (src1_dt_buf.data && src1_dt_buf.data_len >= 16 && src1_dt_buf.type == 0) {
+                    const float * fv = (const float *)src1_dt_buf.data;
+                    GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src1 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f] ne=[%d,%d,%d,%d]",
+                                     i, t1->data_offset, src1_dt_buf.data, fv[0], fv[1], fv[2], fv[3],
+                                     (int)src1_dt_buf.ne[0], (int)src1_dt_buf.ne[1], (int)src1_dt_buf.ne[2], (int)src1_dt_buf.ne[3]);
+                }
+            }
         }
         if (op->src2_idx >= 0) {
             const hex_tensor_desc * t2 = &tens[op->src2_idx];

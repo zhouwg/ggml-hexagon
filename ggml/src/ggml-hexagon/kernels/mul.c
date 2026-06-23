@@ -67,6 +67,39 @@ static inline void ggml_mul_f32_hvx(const int n, float * z,
     }
 }
 
+/* HVX-accelerated F32 multiply with scalar broadcast.
+ * y_scalar is broadcast to all elements. */
+static inline void ggml_mul_f32_hvx_scalar(const int n, float * z,
+                                            const float * x,
+                                            float y_scalar) {
+    const size_t FLOATS_PER_VECTOR = 128 / sizeof(float);
+    const size_t block = n / FLOATS_PER_VECTOR;
+    const size_t left  = n % FLOATS_PER_VECTOR;
+
+    if ((((uintptr_t)z | (uintptr_t)x) % ALIGN_128_BYTE) != 0) {
+        for (int i = 0; i < n; ++i) z[i] = x[i] * y_scalar;
+        return;
+    }
+
+    HVX_Vector * va = (HVX_Vector *)x;
+    HVX_Vector * vc = (HVX_Vector *)z;
+    HVX_Vector vb = Q6_V_vsplat_R(*(const uint32_t *)&y_scalar);
+
+    for (size_t i = 0; i < block; ++i) {
+#if __HEXAGON_ARCH__ >= 79
+        *vc++ = Q6_Vsf_vmpy_VsfVsf(*va++, vb);
+#else
+        *vc++ = Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf(*va++, vb));
+#endif
+    }
+
+    if (left > 0) {
+        const size_t off = block * FLOATS_PER_VECTOR;
+        for (size_t i = 0; i < left; ++i)
+            z[i + off] = x[i + off] * y_scalar;
+    }
+}
+
 /* Scalar F16 multiply: fp16->fp32->mul->fp16 for each element.
  * Matches the precision of the reference implementation. */
 static inline void ggml_mul_f16_scalar(const int n, uint16_t * z,
@@ -171,6 +204,25 @@ static void mul_thread_func_vtcm(void * data) {
                                   (const float *)src0_row,
                                   (const float *)src1_row);
             }
+        } else if (src0->ne[0] == 1 || src1->ne[0] == 1) {
+            const int64_t ir0 = start_idx / ne0;
+            const int64_t ir1 = (end_idx + ne0 - 1) / ne0;
+
+            for (int64_t ir = ir0; ir < ir1 && ir < nr; ++ir) {
+                const uint8_t * src0_row, * src1_row;
+                uint8_t * dst_row;
+                mul_compute_row_ptrs(src0, src1, dst, ir, &src0_row, &src1_row, &dst_row);
+
+                if (src1->ne[0] == 1) {
+                    float scalar = *(const float *)src1_row;
+                    ggml_mul_f32_hvx_scalar(ne0, (float *)dst_row,
+                                            (const float *)src0_row, scalar);
+                } else {
+                    float scalar = *(const float *)src0_row;
+                    ggml_mul_f32_hvx_scalar(ne0, (float *)dst_row,
+                                            (const float *)src1_row, scalar);
+                }
+            }
         } else {
             for (int64_t i = start_idx; i < end_idx; ++i) {
                 int64_t i0 = i % ne0;
@@ -253,6 +305,22 @@ static void ggml_mul_singlethread(const ggml_tensor * src0, const ggml_tensor * 
                 ggml_mul_f32_hvx(ne0, (float *)dst_row,
                                   (const float *)src0_row,
                                   (const float *)src1_row);
+            }
+        } else if (src0->ne[0] == 1 || src1->ne[0] == 1) {
+            for (int64_t ir = 0; ir < nr; ++ir) {
+                const uint8_t * src0_row, * src1_row;
+                uint8_t * dst_row;
+                mul_compute_row_ptrs(src0, src1, dst, ir, &src0_row, &src1_row, &dst_row);
+
+                if (src1->ne[0] == 1) {
+                    float scalar = *(const float *)src1_row;
+                    ggml_mul_f32_hvx_scalar(ne0, (float *)dst_row,
+                                            (const float *)src0_row, scalar);
+                } else {
+                    float scalar = *(const float *)src0_row;
+                    ggml_mul_f32_hvx_scalar(ne0, (float *)dst_row,
+                                            (const float *)src1_row, scalar);
+                }
             }
         } else {
             const int64_t n = ggml_nelements(dst);

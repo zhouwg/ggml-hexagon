@@ -6655,6 +6655,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return false;
             if (!ggml_are_same_shape(src0, op_tensor))
                 return false;
+            return true;
         }
         case GGML_OP_RMS_NORM:
         {
@@ -6804,11 +6805,12 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         }
         case GGML_OP_SOFT_MAX:
         {
-            // Unary (with optional mask src1): src0(f32) -> dst(f32)
-            // Mask (src1 != NULL) not yet supported on DSP
+            // Softmax with optional mask (src1): src0(f32) -> dst(f32)
+            // Mask (src1) can be F16 or F32
             if (src0->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
                 return false;
-            if (src1 != nullptr) return false; // mask not supported yet
+            if (src1 != nullptr && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_F32)
+                return false;
             return true;
         }
         case GGML_OP_UNARY:
@@ -8105,6 +8107,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
 
     // ---- DIAGNOSTIC: dump tensor data locations and sample values ----
     if (1 == g_hexagon_appcfg.dump_diag_info) {
+        uint32_t n_mirrored = 0, n_no_mirror = 0;
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             const char * dp = (const char *)t->data;
@@ -8113,10 +8116,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             else location = "HEAP";
             uint32_t offset = (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size)
                               ? (uint32_t)(dp - ion_base) : 0xFFFFFFFFu;
-            GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u",
+            const hex_tensor_desc * td = &tens_out[i];
+            GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u td_off=0x%x flags=%d",
                                  i, (int)t->type,
                                  (int)t->ne[0], (int)t->ne[1], (int)t->ne[2], (int)t->ne[3],
-                                 (void *)dp, location, offset, (uint32_t)ggml_nbytes(t));
+                                 (int)t->nb[0], (int)t->nb[1], (int)t->nb[2], (int)t->nb[3],
+                                 (void *)dp, location, offset, (uint32_t)ggml_nbytes(t),
+                                 td->data_offset, td->flags);
+            if (td->flags == 1) n_mirrored++;
+            if (td->flags == 0 && location[0] == 'H') n_no_mirror++;
             // dump first 4 f32 values from src tensors (if f32 type and has data)
             if (t->data && ggml_nbytes(t) >= 16) {
                 const float * fv = (const float *)t->data;
@@ -8126,6 +8134,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
                                      i, fv[0], fv[1], fv[2], fv[3], op_param0);
             }
         }
+        GGMLHEXAGON_LOG_WARN("DIAG summary: mirrored=%u no_mirror=%u mempool_usage=%zu/%zu bytes",
+                             n_mirrored, n_no_mirror, ctx->rpc_mempool_usage, ctx->rpc_mempool_len);
     }
 
     // copy entire batch descriptor to ION mempool
@@ -8277,6 +8287,32 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             uint32_t moff = kv.second.first;
             uint32_t max_len = kv.second.second;
             memcpy(orig_data, (const char *)ctx->rpc_mempool + moff, max_len);
+        }
+
+        // Post-copy-back verification: check last op's dst tensor
+        if (1 == g_hexagon_appcfg.dump_diag_info && n_ops > 0) {
+            const hex_op_desc & last_op = hex_ops[n_ops - 1];
+            uint32_t last_dst_idx = last_op.dst_idx;
+            if (last_dst_idx < n_tensors) {
+                ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
+                if (dst_tensor && dst_tensor->data && ggml_nbytes(dst_tensor) >= 16) {
+                    const float * ptr_vals = (const float *)dst_tensor->data;
+                    // Find ION offset
+                    uint32_t ion_off = 0;
+                    for (const auto & m : mirrors) {
+                        if ((uint32_t)m.tensor_idx == last_dst_idx) { ion_off = m.mirror_offset; break; }
+                    }
+                    if (ion_off == 0 && dst_tensor->data >= (void *)ion_base && dst_tensor->data < (void *)(ion_base + ion_size)) {
+                        ion_off = (uint32_t)((const char *)dst_tensor->data - ion_base);
+                    }
+                    const float * ion_vals = (const float *)((const char *)ctx->rpc_mempool + ion_off);
+                    GGMLHEXAGON_LOG_WARN("[POST-COPY] op[%u] dst[t%d]: ION=[%.4f, %.4f, %.4f, %.4f] HEAP=[%.4f, %.4f, %.4f, %.4f] ion_off=0x%x",
+                                         n_ops - 1, last_dst_idx,
+                                         ion_vals[0], ion_vals[1], ion_vals[2], ion_vals[3],
+                                         ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3],
+                                         ion_off);
+                }
+            }
         }
     }
 
