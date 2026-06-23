@@ -11,7 +11,7 @@ typedef struct {
 } silu_thread_data_t;
 
 // Safe SiLU: clamp x to avoid expf() overflow on Hexagon DSP.
-// expf(88) ≈ 1.65e38 near FLT_MAX, expf(-88) ≈ 0.
+// expf(88) ~ 1.65e38 near FLT_MAX, expf(-88) ~ 0.
 // Beyond this range, sigmoid saturates to 0 or 1 anyway.
 static inline float silu_f32(float x) {
     // Clamp to safe range where expf won't overflow/underflow badly
@@ -27,20 +27,49 @@ static void silu_thread_func(void * data) {
     const int64_t start_idx = tdata->start_idx;
     const int64_t end_idx = tdata->end_idx;
 
-    if (src0->type == GGML_TYPE_F16) {
-        uint16_t * dst_ptr  = (uint16_t *)dst->data;
-        uint16_t * src0_ptr = (uint16_t *)src0->data;
+    const int64_t ne0 = dst->ne[0], ne1 = dst->ne[1];
+    const int64_t ne2 = dst->ne[2], ne3 = dst->ne[3];
 
+    if (src0->type == GGML_TYPE_F16) {
         for (int64_t i = start_idx; i < end_idx; ++i) {
-            float x = ggml_compute_fp16_to_fp32(src0_ptr[i]);
-            dst_ptr[i] = ggml_compute_fp32_to_fp16(silu_f32(x));
+            int64_t i0 = i % ne0;
+            int64_t r  = i / ne0;
+            int64_t i1 = r % ne1;
+            int64_t r2 = r / ne1;
+            int64_t i2 = r2 % ne2;
+            int64_t i3 = r2 / ne2;
+
+            int64_t off0 = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+            int64_t offd = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
+
+            float x = ggml_compute_fp16_to_fp32(*(const uint16_t *)((const uint8_t *)src0->data + off0));
+            *(uint16_t *)((uint8_t *)dst->data + offd) = ggml_compute_fp32_to_fp16(silu_f32(x));
         }
     } else {
-        float * dst_ptr  = (float *)dst->data;
-        float * src0_ptr = (float *)src0->data;
+        // F32 contiguous fast path
+        bool contig = (src0->nb[0] == sizeof(float) && src0->nb[1] == src0->ne[0]*sizeof(float) &&
+                       dst->nb[0] == sizeof(float) && dst->nb[1] == dst->ne[0]*sizeof(float));
 
-        for (int64_t i = start_idx; i < end_idx; ++i) {
-            dst_ptr[i] = silu_f32(src0_ptr[i]);
+        if (contig) {
+            float * dst_ptr  = (float *)dst->data;
+            float * src0_ptr = (float *)src0->data;
+            for (int64_t i = start_idx; i < end_idx; ++i) {
+                dst_ptr[i] = silu_f32(src0_ptr[i]);
+            }
+        } else {
+            for (int64_t i = start_idx; i < end_idx; ++i) {
+                int64_t i0 = i % ne0;
+                int64_t r  = i / ne0;
+                int64_t i1 = r % ne1;
+                int64_t r2 = r / ne1;
+                int64_t i2 = r2 % ne2;
+                int64_t i3 = r2 / ne2;
+
+                int64_t off0 = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+                int64_t offd = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
+
+                *(float *)((uint8_t *)dst->data + offd) = silu_f32(*(const float *)((const uint8_t *)src0->data + off0));
+            }
         }
     }
 
@@ -56,21 +85,48 @@ static void ggml_compute_forward_silu_f32(
     uint64_t start_time = ggml_time_us();
 
     const int64_t n = ggml_nelements(dst);
+    const int64_t ne0 = dst->ne[0], ne1 = dst->ne[1];
+    const int64_t ne2 = dst->ne[2], ne3 = dst->ne[3];
 
     if (src0->type == GGML_TYPE_F16) {
-        uint16_t * dst_ptr  = (uint16_t *)dst->data;
-        uint16_t * src0_ptr = (uint16_t *)src0->data;
-
         for (int64_t i = 0; i < n; ++i) {
-            float x = ggml_compute_fp16_to_fp32(src0_ptr[i]);
-            dst_ptr[i] = ggml_compute_fp32_to_fp16(silu_f32(x));
+            int64_t i0 = i % ne0;
+            int64_t r  = i / ne0;
+            int64_t i1 = r % ne1;
+            int64_t r2 = r / ne1;
+            int64_t i2 = r2 % ne2;
+            int64_t i3 = r2 / ne2;
+
+            int64_t off0 = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+            int64_t offd = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
+
+            float x = ggml_compute_fp16_to_fp32(*(const uint16_t *)((const uint8_t *)src0->data + off0));
+            *(uint16_t *)((uint8_t *)dst->data + offd) = ggml_compute_fp32_to_fp16(silu_f32(x));
         }
     } else {
-        float * dst_ptr  = (float *)dst->data;
-        float * src0_ptr = (float *)src0->data;
+        bool contig = (src0->nb[0] == sizeof(float) && src0->nb[1] == src0->ne[0]*sizeof(float) &&
+                       dst->nb[0] == sizeof(float) && dst->nb[1] == dst->ne[0]*sizeof(float));
 
-        for (int64_t i = 0; i < n; ++i) {
-            dst_ptr[i] = silu_f32(src0_ptr[i]);
+        if (contig) {
+            float * dst_ptr  = (float *)dst->data;
+            float * src0_ptr = (float *)src0->data;
+            for (int64_t i = 0; i < n; ++i) {
+                dst_ptr[i] = silu_f32(src0_ptr[i]);
+            }
+        } else {
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t i0 = i % ne0;
+                int64_t r  = i / ne0;
+                int64_t i1 = r % ne1;
+                int64_t r2 = r / ne1;
+                int64_t i2 = r2 % ne2;
+                int64_t i3 = r2 / ne2;
+
+                int64_t off0 = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
+                int64_t offd = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
+
+                *(float *)((uint8_t *)dst->data + offd) = silu_f32(*(const float *)((const uint8_t *)src0->data + off0));
+            }
         }
     }
 
@@ -93,7 +149,7 @@ static int ggmlop_dsp_silu_singlethread(remote_handle64 h, const ggml_tensor * s
 static int ggmlop_dsp_silu_multithread(remote_handle64 h, const ggml_tensor * src0, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
 
-    const int64_t n = ggml_nelements(src0);
+    const int64_t n = ggml_nelements(dst);
     int num_threads = num_workers;
 
     if (num_threads <= 1 || n < num_threads * 512) {

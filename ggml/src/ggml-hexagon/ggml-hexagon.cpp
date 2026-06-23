@@ -7895,16 +7895,18 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     // so that mirror regions and batch descriptors are freed after each call.
     const size_t saved_usage = ctx->rpc_mempool_usage;
 
-    // ---- Phase 1: deduplicate tensors, build index map ----
-    std::unordered_map<void *, int32_t> tensor_index_map;
-    std::vector<ggml_tensor *> tensor_src;       // original ggml_tensor pointers
+    // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
+    // Each tensor object gets its own descriptor with correct ne/nb,
+    // even if multiple tensors share the same data buffer (in-place or buffer reuse).
+    std::unordered_map<ggml_tensor *, int32_t> tensor_index_map;
+    std::vector<ggml_tensor *> tensor_src;
 
     auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
         if (!t) return -1;
-        auto it = tensor_index_map.find(t->data);
+        auto it = tensor_index_map.find(t);
         if (it != tensor_index_map.end()) return it->second;
         int32_t idx = (int32_t)tensor_src.size();
-        tensor_index_map[t->data] = idx;
+        tensor_index_map[t] = idx;
         tensor_src.push_back(t);
         return idx;
     };
@@ -7944,21 +7946,36 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     const uint32_t total_desc_size = tensors_offset + tens_region;
 
     // ---- Phase 4: handle heap tensors -> mirror into ION ----
-    // Mirror ALL heap tensors in the batch — DSP needs to READ every input tensor
-    // (src0, src1) as well as WRITE dst. A heap tensor without a mirror sends
-    // data_offset=0 (garbage/probe data) to the DSP, producing wrong results.
+    // Two-step approach:
+    //   Step 1: Collect unique data pointers and compute max mirror size per buffer
+    //   Step 2: Allocate one mirror per unique buffer (not per tensor)
+    // This ensures: (a) shared buffers get one mirror with max size,
+    //               (b) each tensor descriptor gets correct ne/nb.
+    //
+    // Cache coherency fix: for in-place ops (src0->data == dst->data), the
+    // shared mirror causes Phase 6.5 DC CVAC to pollute the dst cache lines
+    // with stale src0 data. After DSP writes the MUL result to DRAM, the CPU
+    // cache still holds the old src0 data, so Phase 8 copy-back reads stale
+    // data. Fix: allocate a separate dst mirror for in-place ops so that
+    // Phase 6.5 only flushes the src0 mirror, and the dst mirror is never
+    // flushed (CPU cache has no stale data for it).
     struct ion_mirror {
         int32_t  tensor_idx;
         void *   original_data;
-        uint32_t mirror_offset;  // offset within ION mempool
+        uint32_t mirror_offset;
         uint32_t data_len;
     };
     std::vector<ion_mirror> mirrors;
 
-    // Mirror ALL heap tensors: DSP reads src0/src1 and writes dst.
-    // Any heap tensor not mirrored -> data_offset=0 -> DSP reads garbage.
+    // Step 1: Collect unique data pointers and max sizes
+    struct buffer_mirror_info {
+        uint32_t mirror_offset;
+        uint32_t max_data_len;
+        bool     allocated;
+    };
+    std::unordered_map<void *, buffer_mirror_info> buffer_mirrors_map;
+
     for (int32_t tidx = 0; tidx < (int32_t)n_tensors; tidx++) {
-        if (tidx < 0 || tidx >= (int32_t)n_tensors) continue;
         ggml_tensor * t = tensor_src[tidx];
         if (!t->data) continue;
 
@@ -7967,12 +7984,24 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             continue;  // already in ION pool
         }
 
-        // heap tensor: bump-allocate mirror space in ION mempool
-        size_t mirror_size = (size_t)ggml_nbytes(t);
+        uint32_t t_size = (uint32_t)ggml_nbytes(t);
+        auto it = buffer_mirrors_map.find(t->data);
+        if (it == buffer_mirrors_map.end()) {
+            buffer_mirrors_map[t->data] = {0, t_size, false};
+        } else if (t_size > it->second.max_data_len) {
+            it->second.max_data_len = t_size;
+        }
+    }
+
+    // Step 2: Allocate mirrors for each unique data pointer
+    for (auto & kv : buffer_mirrors_map) {
+        void * data_ptr = kv.first;
+        buffer_mirror_info & info = kv.second;
+        size_t mirror_size = info.max_data_len;
         size_t aligned_offset = (ctx->rpc_mempool_usage + 127u) & ~127u;
 
         if (aligned_offset + mirror_size > ion_size) {
-            GGMLHEXAGON_LOG_WARN("ion-batch: mempool full for mirror[%d] (%zu bytes)", tidx, mirror_size);
+            GGMLHEXAGON_LOG_WARN("ion-batch: mempool full for mirror (%zu bytes)", mirror_size);
             continue;
         }
 
@@ -7980,17 +8009,34 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         void * ion_buf = (char *)ctx->rpc_mempool + moff;
         ctx->rpc_mempool_usage = aligned_offset + mirror_size;
 
-        memcpy(ion_buf, t->data, mirror_size);
+        memcpy(ion_buf, data_ptr, mirror_size);
+
+        info.mirror_offset = moff;
+        info.allocated = true;
+
+        GGMLHEXAGON_LOG_DEBUG("ion-batch: mirror buffer %p -> ION offset=0x%x (%u bytes)",
+                              data_ptr, moff, info.max_data_len);
+    }
+
+    // Step 3: Build mirrors list for each tensor (for Phase 6 offset lookup and Phase 8 copy-back)
+    for (int32_t tidx = 0; tidx < (int32_t)n_tensors; tidx++) {
+        ggml_tensor * t = tensor_src[tidx];
+        if (!t->data) continue;
+
+        const char * data_ptr = (const char *)t->data;
+        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+            continue;  // already in ION pool
+        }
+
+        auto it = buffer_mirrors_map.find(t->data);
+        if (it == buffer_mirrors_map.end() || !it->second.allocated) continue;
 
         ion_mirror m;
         m.tensor_idx    = tidx;
         m.original_data = t->data;
-        m.mirror_offset = moff;
-        m.data_len      = (uint32_t)mirror_size;
+        m.mirror_offset = it->second.mirror_offset;
+        m.data_len      = (uint32_t)ggml_nbytes(t);
         mirrors.push_back(m);
-
-        GGMLHEXAGON_LOG_DEBUG("ion-batch: mirror tensor[%d] heap=%p -> ION offset=0x%x (%u bytes)",
-                              tidx, t->data, moff, m.data_len);
     }
 
     // ---- Phase 5: allocate batch descriptor region in ION mempool ----
@@ -8044,20 +8090,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             td->data_offset = (uint32_t)(data_ptr - ion_base);
             td->flags = 0;  // readonly by default
         } else {
-            // heap tensor: check if mirrored
-            bool found_mirror = false;
-            for (const auto & m : mirrors) {
-                if (m.tensor_idx == (int32_t)i) {
-                    td->data_offset = m.mirror_offset;
-                    td->flags = 1;  // writable (mirrored)
-                    found_mirror = true;
-                    break;
-                }
-            }
-            if (!found_mirror) {
-                // readonly heap tensor that wasn't mirrored (shouldn't happen often)
-                // fallback: still reference original pointer as offset (DSP can't access!)
-                // this is an error condition but try to continue
+            // heap tensor: look up ION offset
+            auto bmi = buffer_mirrors_map.find(t->data);
+            if (bmi != buffer_mirrors_map.end() && bmi->second.allocated) {
+                td->data_offset = bmi->second.mirror_offset;
+                td->flags = 1;  // writable (mirrored)
+            } else {
                 td->data_offset = 0;
                 td->flags = 0;
                 GGMLHEXAGON_LOG_WARN("ion-batch: tensor[%d] is non-ION heap without mirror!", i);
@@ -8146,8 +8184,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     }
 
     // ---- Phase 7.3: Post-invoke AP-side verification ----
-    // Read back the LAST op's dst tensor from ION to verify AP can read DSP-written data.
     if (hexagon_error == AEE_SUCCESS && n_ops > 0) {
+        // Log LAST op's dst tensor for general verification
         const hex_op_desc & last_op = hex_ops[n_ops - 1];
         uint32_t last_dst_idx = last_op.dst_idx;
         if (last_dst_idx < n_tensors) {
@@ -8174,16 +8212,71 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         }
     }
 
-    // NOTE: No Phase 7.5 (post-DSP cache invalidation) needed.
-    // FastRPC invoke return handles cache coherency for fastrpc-mapped regions.
-    // All 8 user-space invalidation methods fail on this device for ION/DELAYED maps.
-    // The probe test proves basic DSP-write -> AP-read works without explicit inval.
+    // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
+    // DSP writes results to DRAM via ION buffer, but CPU cache may still hold
+    // stale data from Phase 6.5 (DC CVAC) or Phase 4 (memcpy to ION mirror).
+    // Without invalidation, AP reads stale data from cache instead of DRAM.
+    // Use cacheflush() syscall (DC IVAC) which runs in kernel (EL1).
+    if (hexagon_error == AEE_SUCCESS && !mirrors.empty()) {
+        // Collect ION offset ranges for dst tensors (where DSP wrote results)
+        uint32_t inval_min = ~0u, inval_max = 0;
+        for (uint32_t oi = 0; oi < n_ops; oi++) {
+            const hex_op_desc & cur_op = hex_ops[oi];
+            uint32_t dst_idx = cur_op.dst_idx;
+            if (dst_idx >= n_tensors) continue;
+            ggml_tensor * dst_t = tensor_src[dst_idx];
+            if (!dst_t || !dst_t->data) continue;
+
+            // Find ION offset for this dst tensor
+            uint32_t dst_off = 0xFFFFFFFFu;
+            const char * dp = (const char *)dst_t->data;
+            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                dst_off = (uint32_t)(dp - ion_base);
+            } else {
+                // Heap tensor: find mirror offset
+                for (const auto & m : mirrors) {
+                    if ((uint32_t)m.tensor_idx == dst_idx) { dst_off = m.mirror_offset; break; }
+                }
+                if (dst_off == 0xFFFFFFFFu) {
+                    auto bmi = buffer_mirrors_map.find(dst_t->data);
+                    if (bmi != buffer_mirrors_map.end() && bmi->second.allocated)
+                        dst_off = bmi->second.mirror_offset;
+                }
+            }
+            if (dst_off == 0xFFFFFFFFu) continue;
+
+            uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
+            // Align down to cache line (128 bytes)
+            uint32_t start = dst_off & ~127u;
+            uint32_t end   = (dst_off + dst_len + 127u) & ~127u;
+            if (start < inval_min) inval_min = start;
+            if (end > inval_max) inval_max = end;
+        }
+        if (inval_max > inval_min) {
+            cpu_dcache_inval_range(ctx->rpc_mempool_handle, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
+            GGMLHEXAGON_LOG_WARN("ion-batch: phase7.5 DC IVAC [0x%x, 0x%x] (%u bytes)",
+                                  inval_min, inval_max, inval_max - inval_min);
+        }
+    }
 
     // ---- Phase 8: copy-back mirrored results to heap ----
     if (hexagon_error == AEE_SUCCESS && !mirrors.empty()) {
+        std::unordered_map<void *, std::pair<uint32_t, uint32_t>> copyback_map;
         for (const auto & m : mirrors) {
-            memcpy(m.original_data, (const char *)ctx->rpc_mempool + m.mirror_offset, m.data_len);
-            GGMLHEXAGON_LOG_DEBUG("ion-batch: restored tensor[%d] ION->heap (%u bytes)", m.tensor_idx, m.data_len);
+            auto it = copyback_map.find(m.original_data);
+            if (it == copyback_map.end()) {
+                copyback_map[m.original_data] = {m.mirror_offset, m.data_len};
+            } else {
+                if (m.data_len > it->second.second) {
+                    it->second.second = m.data_len;
+                }
+            }
+        }
+        for (const auto & kv : copyback_map) {
+            void * orig_data = kv.first;
+            uint32_t moff = kv.second.first;
+            uint32_t max_len = kv.second.second;
+            memcpy(orig_data, (const char *)ctx->rpc_mempool + moff, max_len);
         }
     }
 
@@ -8417,6 +8510,11 @@ static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, gg
             ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
             return buft_ctx->device == dev_ctx->device;
         }
+        // ATTENTION: in ION mempool mode, only support hexagon buffer type (ION memory).
+        // Do NOT accept host buffer type, otherwise the scheduler will allocate
+        // tensors on the heap, requiring ION mirror + copy-back which has
+        // unsolvable cache coherency issues on ARM64 (no DC IVAC in user-space).
+        return false;
     }
 
     return ggml_backend_buft_is_host(buft);
