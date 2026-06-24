@@ -264,7 +264,7 @@ static int ggmlop_dsp_sub_multithread(remote_handle64 h, const ggml_tensor * src
 int ggmlop_dsp_sub(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
     char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_SUB, src0, src1, tempbuf, 256);
+    ggml_get_opkey(GGML_OP_SUB, src0, src1, tempbuf, 256);
 
     int64_t begin_time = ggml_time_us();
     if (ggmlop_get_thread_counts() > 1) {

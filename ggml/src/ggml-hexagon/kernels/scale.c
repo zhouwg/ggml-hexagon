@@ -203,7 +203,7 @@ int ggmlop_dsp_scale(remote_handle64 h, const ggml_tensor * src0, ggml_tensor * 
                          (long long)src0->ne[2], (long long)src0->ne[3]);
 
     char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_SCALE, src0, NULL, tempbuf, 256);
+    ggml_get_opkey(GGML_OP_SCALE, src0, NULL, tempbuf, 256);
 
     int64_t begin_time = ggml_time_us();
     if (ggmlop_get_thread_counts() > 1) {

@@ -4,7 +4,7 @@ this self-contained file is part of JZ's ggml-hexagon:
     - ported from original ggml(https://github.com/ggml-org/ggml)
     - ggml-dsp.h can be easily ported to other xPU(x86/arm/riscv... CPU, POSIX friendly DSP / NPU)
 
-          - v0.99.01 - 2026-06-20
+          - v0.99.02 - 2026-06-24
 Jeff Zhou - zhouwg2000@gmail.com
 GitHub:   - https://github.com/zhouwg/ggml-hexagon
 */
@@ -190,9 +190,9 @@ extern "C" {
 
 #if GGMLHEXAGON_DEBUG
 
-#define GGMLHEXAGON_LOG_DEBUG(...)      ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_DEBUG(...)      ggml_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLDSP_LOG_DEBUG(...)          ggmlhexagon_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_DEBUG(...)          ggml_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #else
 
@@ -202,17 +202,17 @@ extern "C" {
 
 #endif
 
-#define GGMLDSP_LOG_INFO(...)           ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_INFO, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_INFO(...)           ggml_log_always(GGMLHEXAGON_LOG_LEVEL_INFO, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLDSP_LOG_WARN(...)           ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_WARN(...)           ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLDSP_LOG_ERROR(...)          ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLDSP_LOG_ERROR(...)          ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLHEXAGON_LOG_INFO(...)       ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_INFO(...)       ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLHEXAGON_LOG_WARN(...)       ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_WARN(...)       ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
-#define GGMLHEXAGON_LOG_ERROR(...)      ggmlhexagon_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)      ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 
 // vendor's platform
@@ -230,6 +230,8 @@ extern "C" {
 #define VLEN_FP16                       (VSIZE_BYTES / SIZEOF_FP16)
 #define VTCM_BLOCK_ROWS                 16
 #define VTCM_BLOCK_COLS                 16
+#define hvx_vmem(A)                     *((HVX_Vector *)(A))
+#define hvx_vmemu(A)                    *((HVX_UVector *)(A))
 
 // ggml-core
 typedef double                          ggml_float;
@@ -2080,14 +2082,14 @@ GGML_API void           ggml_bf16_to_fp32_row_hvx(const ggml_bf16_t *, float *, 
 GGML_API void           ggml_fp32_to_bf16_row_ref(const float *, ggml_bf16_t *, int64_t);
 GGML_API void           ggml_fp32_to_bf16_row(const float *, ggml_bf16_t *, int64_t);
 
-// JZ
+//JZ
 
-GGML_API void           ggmlhexagon_dump_tensor_elements(const ggml_tensor * tensor);
-GGML_API void           ggmlhexagon_dump_tensor(const ggml_tensor * tensor, int dump_tensor_data);
-GGML_API void           ggmlhexagon_log_internal(int level, const char *file, const char *func, int line, const char *format, ...);
-GGML_API void           ggmlhexagon_log_always(int level, const char *file, const char *func, int line, const char *format, ...);
-GGML_API size_t         ggmlhexagon_get_op_index(const struct ggml_tensor * tensor);
-GGML_API void           ggmlhexagon_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, const struct ggml_tensor * src1, char * buf, size_t buf_size);
+GGML_API void           ggml_dump_tensor_elements(const ggml_tensor * tensor);
+GGML_API void           ggml_dump_tensor(const ggml_tensor * tensor, int dump_tensor_data);
+GGML_API void           ggml_log_internal(int level, const char *file, const char *func, int line, const char *format, ...);
+GGML_API void           ggml_log_always(int level, const char *file, const char *func, int line, const char *format, ...);
+GGML_API size_t         ggml_get_op_index(const struct ggml_tensor * tensor);
+GGML_API void           ggml_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, const struct ggml_tensor * src1, char * buf, size_t buf_size);
 
 GGML_API int            ggmlop_get_thread_counts(void);
 GGML_API int            ggmlop_get_mulmat_algotype(void);
@@ -2150,6 +2152,42 @@ GGML_API void quantize_row_q5_1_hvx          (const float * GGML_RESTRICT x, blo
 GGML_API void quantize_row_iq4_nl_hvx        (const float * GGML_RESTRICT x, block_iq4_nl * GGML_RESTRICT y, int n);
 GGML_API void quantize_row_q8_K_hvx          (const float * GGML_RESTRICT x, block_q8_K * GGML_RESTRICT y, int n);
 GGML_API void quantize_f32_to_f16_row_hvx    (const float * GGML_RESTRICT x, uint16_t * GGML_RESTRICT y, int n);
+
+static HVX_INLINE_ALWAYS void l2fetch(const void * p, uint32_t stride,
+                           uint32_t width, uint32_t height,
+                           uint32_t dir) {
+    uint64_t control = HEXAGON_V64_CREATE_H(dir, stride, width, height);
+    __asm__ __volatile__ (" l2fetch(%0,%1) " : :"r"(p),"r"(control));
+}
+
+static HVX_INLINE_ALWAYS int32_t is_aligned(void * addr, uint32_t align) {
+    return ((size_t) addr & (align - 1)) == 0;
+}
+
+static inline float ggml_compute_bf16_to_fp32(ggml_bf16_t h) {
+    union {
+        float f;
+        uint32_t i;
+    } u;
+    u.i = (uint32_t)h.bits << 16;
+    return u.f;
+}
+
+static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
+    ggml_bf16_t h;
+    union {
+        float f;
+        uint32_t i;
+    } u;
+    u.f = s;
+    if ((u.i & 0x7fffffff) > 0x7f800000) { /* nan */
+        h.bits = (u.i >> 16) | 64; /* force to quiet */
+        return h;
+    }
+    h.bits = (u.i + (0x7fff + ((u.i >> 16) & 1))) >> 16;
+    return h;
+}
+
 
 #ifdef  __cplusplus
 }

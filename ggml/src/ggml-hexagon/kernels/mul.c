@@ -11,13 +11,6 @@ typedef struct {
     worker_synctoken_t *synctoken;
 } mul_thread_data_t;
 
-static HVX_INLINE_ALWAYS void l2fetch(const void * p, uint32_t stride,
-                           uint32_t width, uint32_t height,
-                           uint32_t dir) {
-    uint64_t control = HEXAGON_V64_CREATE_H(dir, stride, width, height);
-    __asm__ __volatile__ (" l2fetch(%0,%1) " : :"r"(p),"r"(control));
-}
-
 /* HVX-accelerated F32 element-wise multiply.
  * NOTE: z and x may alias (in-place operation z==x is allowed).
  * Do NOT use GGML_RESTRICT here -- the compiler may reorder reads/writes
@@ -419,7 +412,7 @@ static int ggmlop_dsp_mul_multithread(remote_handle64 h, const ggml_tensor * src
 
 int ggmlop_dsp_mul(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_MUL, src0, src1, tempbuf, 256);
+    ggml_get_opkey(GGML_OP_MUL, src0, src1, tempbuf, 256);
     int64_t begin_time = ggml_time_us();
 
     if (ggmlop_get_thread_counts() > 1) {

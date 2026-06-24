@@ -482,7 +482,7 @@ int ggmlop_dsp_test_hmx(remote_handle64 h, const dsptensor* src0, const dsptenso
     GGMLHEXAGON_LOG_INFO("==============enter %s (self-contained HMX)===========\n", __func__);
 
     char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
+    ggml_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
     int64_t begin_time = ggml_time_us();
 
     if (!src0 || !src1 || !dst) {

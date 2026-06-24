@@ -79,8 +79,8 @@ static void ggml_compute_forward_rms_norm_f32(
 
     int64_t start_time = ggml_time_us();
 
-    ggmlhexagon_dump_tensor(src0, 1);
-    ggmlhexagon_dump_tensor(dst, 1);
+    ggml_dump_tensor(src0, 1);
+    ggml_dump_tensor(dst, 1);
 
     float eps;
     memcpy(&eps, dst->op_params, sizeof(float));

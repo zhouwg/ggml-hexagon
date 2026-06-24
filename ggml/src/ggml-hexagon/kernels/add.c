@@ -10,22 +10,9 @@ typedef struct {
     worker_synctoken_t *synctoken;
 } add_thread_data_t;
 
-static HVX_INLINE_ALWAYS void l2fetch(const void * p, uint32_t stride,
-                           uint32_t width, uint32_t height,
-                           uint32_t dir) {
-    uint64_t control = HEXAGON_V64_CREATE_H(dir, stride, width, height);
-    __asm__ __volatile__ (" l2fetch(%0,%1) " : :"r"(p),"r"(control));
-}
-
-static HVX_INLINE_ALWAYS int32_t is_aligned(void * addr, uint32_t align)
-{
-    return ((size_t) addr & (align - 1)) == 0;
-}
-
 static inline void ggml_add_f32_scale (const int n, float * z, const float * x, const float * y) {
     for (int i = 0; i < n; ++i) z[i]  = x[i] + y[i];
 }
-
 
 static inline void ggml_add_f32_hvx(const int n, float * GGML_RESTRICT z, const float * GGML_RESTRICT x, const float * GGML_RESTRICT y) {
     HVX_Vector * va;
@@ -348,7 +335,7 @@ static int ggmlop_dsp_add_multithread(remote_handle64 h, const ggml_tensor * src
 int ggmlop_dsp_add(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
     char tempbuf[256];
-    ggmlhexagon_get_opkey(GGML_OP_ADD, src0, src1, tempbuf, 256);
+    ggml_get_opkey(GGML_OP_ADD, src0, src1, tempbuf, 256);
 
     int64_t begin_time = ggml_time_us();
     if (ggmlop_get_thread_counts() > 1) {
