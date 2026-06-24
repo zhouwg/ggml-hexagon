@@ -24,6 +24,15 @@ static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently 
 
 static void * g_hexagon_power_ctx           = NULL;
 static void * g_ion_dsp_base                = NULL;
+static size_t g_ion_dsp_size                = 0;     // ION total size (bytes)
+
+// FP16 weight cache: uses ION shared memory tail region for caching
+// converted FP16 weight tiles (avoids repeated Q4_0->FP16 conversion)
+// Cache region: [g_ion_cache_base, g_ion_dsp_base + g_ion_size)
+// Grows from cache_base forward (monotonic bump allocator)
+static void * g_ion_cache_base          = NULL;  // DSP VA of cache region start
+static size_t g_ion_cache_size          = 0;     // cache region size in bytes
+static size_t g_ion_cache_offset        = 0;     // monotonic allocation offset within cache
 
 /* Cache line size for Hexagon DSP L2 cache */
 #define DSP_CACHE_LINE_SIZE  128
@@ -33,7 +42,7 @@ static void * g_ion_dsp_base                = NULL;
  * Must be called after DSP writes (so AP can read) and before DSP reads
  * (so AP writes are visible). Uses Q6_dccleaninva_A per cache line.
  */
-static void dsp_cache_flush_range(void * addr, size_t size) {
+void ggmlop_dsp_cache_flush_range(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
@@ -225,6 +234,38 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
             // TEMPORARILY DISABLED FOR DEBUGGING - memset(g_vtcm_base, 0, g_vtcm_size);
             // NOTE: HMX lock is managed per-operation in mulmat.c, not here
             //HAP_compute_res_hmx_lock(g_compute_res_ctx_id);
+        }
+    }
+
+    /* Step 4: probe DSP memory for information only (no allocation) */
+    {
+        struct HAP_mem_stats mem_stats;
+        memset(&mem_stats, 0, sizeof(mem_stats));
+        int ret = HAP_mem_get_stats(&mem_stats);
+        if (ret == 0) {
+            FARF(ALWAYS, "DSP HAP_mem_stats: bytes_free=%llu, bytes_used=%llu, seg_free=%llu, seg_used=%llu",
+                 (unsigned long long)mem_stats.bytes_free, (unsigned long long)mem_stats.bytes_used,
+                 (unsigned long long)mem_stats.seg_free, (unsigned long long)mem_stats.seg_used);
+        } else {
+            FARF(ALWAYS, "HAP_mem_get_stats failed: %d", ret);
+        }
+
+        // Probe available DSP heap (information only, no allocation)
+        size_t max_avail_mb = 0;
+        for (int mb = 2048; mb >= 16; mb -= 16) {
+            void * ptr = malloc((size_t)mb * 1024 * 1024);
+            if (ptr) {
+                FARF(ALWAYS, "DSP malloc probe: %d MB succeeded at %p", mb, ptr);
+                free(ptr);
+                max_avail_mb = mb;
+                break;
+            }
+        }
+        if (max_avail_mb == 0) {
+            FARF(ALWAYS, "DSP malloc probe: even 16 MB failed!");
+        } else {
+            FARF(ALWAYS, "DSP malloc probe: max available = %zu MB (for work data only, cache uses ION)",
+                 max_avail_mb);
         }
     }
 
@@ -532,6 +573,24 @@ void * ggmlop_get_vtcm_pool(size_t * size) {
     return g_vtcm_base;
 }
 
+// Allocate from the ION-based FP16 weight cache region
+// Returns pointer to allocated region in ION shared memory, or NULL if full
+void * ggmlop_cache_mempool_alloc(size_t size) {
+    if (!g_ion_cache_base || size == 0) {
+        return NULL;
+    }
+    // Align to 128 bytes (cache line size)
+    size = (size + 127) & ~(size_t)127;
+    if (g_ion_cache_offset + size > g_ion_cache_size) {
+        FARF(ALWAYS, "ION cache: full, cannot allocate %zu bytes (offset=%zu, size=%zu)",
+             size, g_ion_cache_offset, g_ion_cache_size);
+        return NULL;
+    }
+    void * ptr = (char *)g_ion_cache_base + g_ion_cache_offset;
+    g_ion_cache_offset += size;
+    return ptr;
+}
+
 
 // Ensure VTCM resource is available (for cache mode)
 // Must be called before using VTCM in each operation
@@ -819,19 +878,37 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     if (batch_size == 0) {
         GGMLHEXAGON_LOG_INFO("[DSP-PROBE] testing ION R/W at base=%p", g_ion_dsp_base);
 
-        // Step 1: Read what AP wrote (AP→DSP direction)
+        // Step 1: Read what AP wrote (AP->DSP direction)
         // Invalidate DSP cache before reading
         Q6_dccleaninva_A((void *)base);
         uint8_t ap_val = ((const uint8_t *)base)[0];
-        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] AP→DSP: read base+0 = 0x%02x", ap_val);
+        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] AP->DSP: read base+0 = 0x%02x", ap_val);
 
-        // Step 2: Write pattern for AP to verify (DSP→AP direction)
+        // Step 2: Write pattern for AP to verify (DSP->AP direction)
         memset((void *)base, 0xAB, 16);
         memset((void *)(base + 64), 0xCD, 16);
         // Flush DSP L2 cache so AP can see the written data (ION is non-coherent)
         Q6_dccleaninva_A((void *)base);
         Q6_dccleaninva_A((void *)(base + 64));
         __asm__ __volatile__("" ::: "memory");
+        return AEE_SUCCESS;
+    }
+
+    /* Cache setup mode: batch_size == 0xFFFF, batch_offset = cache_offset in ION */
+    if (batch_size == 0xFFFF) {
+        uint32_t cache_offset = batch_offset;
+        if (cache_offset > 0 && g_ion_dsp_base != NULL && g_ion_dsp_size > 0) {
+            g_ion_cache_base = (char *)g_ion_dsp_base + cache_offset;
+            g_ion_cache_size = g_ion_dsp_size - (size_t)cache_offset;
+            g_ion_cache_offset = 0;
+            GGMLHEXAGON_LOG_INFO("[DSP-CACHE] FP16 weight cache: base=%p, offset=0x%x, size=%zu MB",
+                                 g_ion_cache_base, cache_offset, g_ion_cache_size / (1024*1024));
+        } else {
+            g_ion_cache_base = NULL;
+            g_ion_cache_size = 0;
+            GGMLHEXAGON_LOG_WARN("[DSP-CACHE] no cache region (cache_offset=%u, ion_size=%zu)",
+                                 cache_offset, g_ion_dsp_size);
+        }
         return AEE_SUCCESS;
     }
 
@@ -921,9 +998,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         dst_dt.data_len = td->data_len;
 
         /* Cache maintenance for non-coherent ION memory:
-         * - Invalidate DSP cache before reading src (AP wrote data into ION) */
-        dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) dsp_cache_flush_range(src1_dt_buf.data, src1_dt_buf.data_len);
+         * - Invalidate DSP cache before reading src (AP wrote data into ION)
+         * - Skip for weights (flags==2): read-only, DSP cache retains data */
+        if (src0_dt.flags != 2) {
+            ggmlop_dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
+        }
+        if (src1_dt_ptr) ggmlop_dsp_cache_flush_range(src1_dt_buf.data, src1_dt_buf.data_len);
+        if (src2_dt_ptr) ggmlop_dsp_cache_flush_range(src2_dt_buf.data, src2_dt_buf.data_len);
 
         int op_ret = 0;
         switch (op->opcode) {
@@ -962,7 +1043,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         if (op_ret != 0) return op_ret;
 
         /* Flush DSP cache after writing dst (so AP can read from DRAM) */
-        dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
+        ggmlop_dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
 
         if (1 == g_dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from dst data */
@@ -990,7 +1071,7 @@ AEEResult ggmlop_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t s
     int32_t fd = (int32_t)ion_fd;
     uint64_t size = ((uint64_t)size_hi << 32) | (uint64_t)size_lo;
 
-    GGMLHEXAGON_LOG_INFO("[ION-REG-SCALAR] fd=%d, size=%llu bytes (%dMB)",
+    GGMLHEXAGON_LOG_INFO("[ION-REG] fd=%d, size=%llu bytes (%dMB)",
                          fd, (unsigned long long)size, (int32_t)(size >> 20));
 
 #if __HVX_ARCH__ > 73
@@ -1001,11 +1082,15 @@ AEEResult ggmlop_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t s
 
     if (va == (void *)-1) {
         g_ion_dsp_base = NULL;
-        GGMLHEXAGON_LOG_ERROR("[ION-REG-SCALAR] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
+        GGMLHEXAGON_LOG_ERROR("[ION-REG] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
         return AEE_EFAILED;
     }
 
     g_ion_dsp_base = va;
-    GGMLHEXAGON_LOG_INFO("[ION-REG-SCALAR] HAP_mmap2 OK: va=%p (fd=%d)", va, fd);
+    g_ion_dsp_size = (size_t)size;
+    GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB)", va, fd, g_ion_dsp_size / (1024*1024));
+
+    // FP16 weight cache region will be set up via NONE op with cache metadata
+    // (see GGML_OP_NONE handling in ggmlop_dsp_execute_task)
     return AEE_SUCCESS;
 }

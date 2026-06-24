@@ -1,6 +1,8 @@
 #include "ggml-dsp.h"
 #include "worker_pool.h"
 #include "sgemm.h"
+#include <stdlib.h>
+#include <string.h>
 #include "../htp/hvx-base.h"   // for Qualcomm's official hvx_vec_f32_to_f16 with vdeal
 #include "../htp/hvx-reduce.h" // for Qualcomm's official hvx_vec_reduce_max_f32
 #include "../htp/hvx-repl.h"   // for hvx_vec_repl_f16, hvx_vec_repl_2x_f16
@@ -12,6 +14,59 @@ union ui32f { int32_t i; float f; };
 #define HMX_FP16_TILE_N_COLS 32
 #define HMX_FP16_TILE_N_ELMS 1024
 #define HMX_FP16_TILE_SIZE (HMX_FP16_TILE_N_ELMS * sizeof(__fp16))
+
+// FP16 weight cache: stores converted FP16 tiles in ION shared memory tail region
+// Keyed by src0->data pointer (stable ION address for same weight tensor)
+// Uses ggmlop_cache_mempool_alloc() which allocates from ION tail region
+#define FP16_WEIGHT_CACHE_MAX_ENTRIES 64
+// Only cache weights whose FP16 tile size exceeds this threshold (bytes)
+// Small weights convert quickly and waste cache space; large weights benefit most
+#define FP16_WEIGHT_CACHE_MIN_SIZE  (18 * 1024 * 1024)  // 18 MB
+
+typedef struct {
+    void *   src0_data;     // key: src0->data pointer (ION DSP address)
+    void *   fp16_ptr;      // ION-based FP16 tile buffer (from ggmlop_cache_mempool_alloc)
+    uint32_t fp16_size;     // size of FP16 tile buffer in bytes
+    int32_t  M;             // weight columns at cache time
+    int32_t  K;             // inner dimension at cache time
+    int      type;          // weight type at cache time
+} fp16_weight_cache_entry_t;
+
+static fp16_weight_cache_entry_t g_fp16_weight_cache[FP16_WEIGHT_CACHE_MAX_ENTRIES];
+static int g_fp16_weight_cache_count = 0;
+
+static fp16_weight_cache_entry_t * fp16_weight_cache_lookup(void * src0_data) {
+    for (int i = 0; i < g_fp16_weight_cache_count; i++) {
+        if (g_fp16_weight_cache[i].src0_data == src0_data) {
+            return &g_fp16_weight_cache[i];
+        }
+    }
+    return NULL;
+}
+
+static fp16_weight_cache_entry_t * fp16_weight_cache_insert(void * src0_data, uint32_t fp16_size, int32_t M, int32_t K, int type) {
+    if (g_fp16_weight_cache_count >= FP16_WEIGHT_CACHE_MAX_ENTRIES) {
+        GGMLHEXAGON_LOG_INFO("FP16 weight cache: table full (%d entries), cannot cache",
+                             FP16_WEIGHT_CACHE_MAX_ENTRIES);
+        return NULL;
+    }
+    // Allocate from ION cache region (no size limit, ION tail has ~1.5GB)
+    void * ptr = ggmlop_cache_mempool_alloc(fp16_size);
+    if (!ptr) {
+        GGMLHEXAGON_LOG_INFO("FP16 weight cache: ION alloc(%u) failed, cannot cache", fp16_size);
+        return NULL;
+    }
+    fp16_weight_cache_entry_t * entry = &g_fp16_weight_cache[g_fp16_weight_cache_count++];
+    entry->src0_data = src0_data;
+    entry->fp16_ptr  = ptr;
+    entry->fp16_size = fp16_size;
+    entry->M         = M;
+    entry->K         = K;
+    entry->type      = type;
+    GGMLHEXAGON_LOG_INFO("FP16 weight cache: ION alloc %u bytes at %p for src0=%p (M=%d, K=%d, type=%d)",
+                         fp16_size, ptr, src0_data, M, K, type);
+    return entry;
+}
 
 // vscatter offsets for writing FP16 values directly into column-pair interleaved tile format.
 // word[i] = i*128 maps column-pair i to byte offset i*128 in the tile.
@@ -3096,6 +3151,40 @@ static void transfer_activation_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm
 // - Organized as 16 column pairs, each pair has 64 fp16
 // - Within each column pair: interleaved format
 // - tile[(j/2)*64 + i*2 + (j%2)] = tile[i, j]
+static void convert_weight_f32_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst, const float *restrict src,
+                                                   int n_cols, int k, int col_stride) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+
+    for (int t = 0; t < n_col_tiles * k_tiles; ++t) {
+        int ct = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int m_idx0 = ct * HMX_FP16_TILE_N_COLS + i;
+            int m_idx1 = m_idx0 + 1;
+            const float *r0 = (m_idx0 < n_cols) ? src + m_idx0 * col_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+            const float *r1 = (m_idx1 < n_cols) ? src + m_idx1 * col_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+
+            HVX_Vector v0 = r0 ? *(const HVX_Vector *)r0 : Q6_V_vzero();
+            HVX_Vector v1 = r1 ? *(const HVX_Vector *)r1 : Q6_V_vzero();
+            HVX_Vector v_fp16 = hvx_vec_f32_to_f16(v0, v1);
+
+            // v_fp16 has 64 FP16: [row0[0..31], row1[0..31]] (after vdeal)
+            __fp16 tmp[64] __attribute__((aligned(128)));
+            *(HVX_Vector *)tmp = v_fp16;
+
+            // Column-pair interleaved format: tile[(j/2)*64 + i*2 + (j%2)]
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                tile_base[(j / 2) * 64 + i * 2 + (j % 2)] = tmp[j];
+                tile_base[(j / 2) * 64 + (i + 1) * 2 + (j % 2)] = tmp[32 + j];
+            }
+        }
+    }
+    __asm__ __volatile__("" ::: "memory");
+}
+
 static void convert_weight_f32_to_fp16_tiles(__fp16 *restrict vtcm_dst, const float *restrict src,
                                               int n_cols, int k, int col_stride) {
     // CRITICAL FIX: vtcm_weight_fp32_buf has [M, K] layout after copying from src0
@@ -3673,6 +3762,79 @@ static void dequantize_q4_0_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const bl
             const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
             Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
             Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+        }
+    }
+}
+
+// x4x2 format: dequantize one 32-element sub-block to 32 FP16
+// x4x2 layout: [quants: K/2 bytes][scales: nb*16 bytes] per row
+// Each 256-element logical block has 8 sub-blocks of 32 elements
+// Sub-blocks 0-3 use low nibble, sub-blocks 4-7 use high nibble
+static inline HVX_Vector dequantize_x4x2_q4_0_group_hvx(const uint8_t *packed_32, bool upper_nibbles, const __fp16 *scale) {
+    HVX_Vector vq = hvx_vmemu(packed_32);
+    const HVX_Vector mask_h4 = Q6_Vb_vsplat_R(0x0F);
+    const HVX_Vector i8 = Q6_Vb_vsplat_R(8);
+    HVX_Vector v_scales = hvx_vec_repl_f16(hvx_vmemu(scale));
+
+    HVX_Vector v_quants = Q6_Vub_vlsr_VubR(vq, 4 * upper_nibbles);
+    v_quants = Q6_V_vand_VV(v_quants, mask_h4);
+
+    HVX_Vector v_int8 = Q6_Vb_vsub_VbVb(v_quants, i8);
+    HVX_Vector v0 = Q6_V_lo_W(Q6_Wh_vunpack_Vb(v_int8));
+    HVX_Vector v_hf = Q6_Vhf_equals_Vh(v0);
+
+    return Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(v_hf, v_scales));
+}
+
+// x4x2 format: dequantize Q4_0x4x2 weight chunk to FP16 tiles
+// src points to x4x2 data (quants first, then scales per row)
+// row_stride is the same as Q4_0 row stride (same total size)
+static void dequantize_x4x2_q4_0_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const uint8_t *restrict src,
+                                                     int n_cols, int k, size_t row_stride) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+    const int qrow_size = k / 2;       // quants region size per row
+    const int dblk_size = 8 * 2;       // scales per 256-element block: 8 * fp16
+    const int scale_step = (int)sizeof(__fp16);  // 2 bytes per scale
+
+    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
+    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
+    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
+    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+
+    for (int t = 0; t < n_col_tiles * k_tiles; ++t) {
+        int ct = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        // x4x2 addressing: determine which 256-element block and sub-block
+        unsigned blk_idx   = (kt * 32) / 256;
+        unsigned sub_blk   = (kt * 32) % 256 / 32;
+        bool upper         = (sub_blk >= 4);
+        unsigned packed_off = blk_idx * 128 + (upper ? (sub_blk - 4) : sub_blk) * 32;
+        unsigned scale_off  = qrow_size + blk_idx * dblk_size + sub_blk * scale_step;
+
+        HVX_Vector v_off = v_scat_base;
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+            int row1 = row0 + 1;
+
+            HVX_Vector v0 = Q6_V_vzero();
+            HVX_Vector v1 = Q6_V_vzero();
+
+            if (row0 < n_cols) {
+                const uint8_t *r0 = src + row0 * row_stride;
+                v0 = dequantize_x4x2_q4_0_group_hvx(r0 + packed_off, upper, (const __fp16 *)(r0 + scale_off));
+            }
+            if (row1 < n_cols) {
+                const uint8_t *r1 = src + row1 * row_stride;
+                v1 = dequantize_x4x2_q4_0_group_hvx(r1 + packed_off, upper, (const __fp16 *)(r1 + scale_off));
+            }
+
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off, v0);
+            v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off, v1);
+            v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
         }
     }
 }
@@ -4387,9 +4549,11 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
     // src0 (weight) types supported by HMX path
     // F16 weight temporarily disabled in HMX path for debugging
+    // Type 200 = Q4_0x4x2 (AP-side repacked format for efficient HVX dequantization)
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_BF16 &&
         src0->type != GGML_TYPE_Q4_0 && src0->type != GGML_TYPE_Q4_1 && src0->type != GGML_TYPE_Q5_0 &&
-        src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_IQ4_NL) {
+        src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_IQ4_NL &&
+        src0->type != GGML_TYPE_Q4_0x4x2) {
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
@@ -4534,7 +4698,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     const size_t reusable_buf_size    = (act_fp32_buf_size > output_area_size) ? act_fp32_buf_size : output_area_size;
     const size_t total_vtcm_needed    = act_area_size + weight_area_size + reusable_buf_size + weight_fp32_buf_size + scales_size;
 
-    const char * src0_type_name = ggml_get_type_traits((enum ggml_type)src0->type)->type_name;
+    const char * src0_type_name = (src0->type == GGML_TYPE_Q4_0x4x2) ? "Q4_0x4x2" : ggml_get_type_traits((enum ggml_type)src0->type)->type_name;
     GGMLHEXAGON_LOG_INFO("VTCM check: (src0 %s)M=%d, N=%d, K=%d, vtcm_size=%zu, M_chunk=%zu, N_chunk=%zu, total_needed=%zu (act=%zu, weight=%zu, reusable=%zu, weight_fp32=%zu, scales=%zu)",
                          src0_type_name,
                          M, N, K, vtcm_size, M_chunk_n_cols, N_chunk_n_rows, total_vtcm_needed, act_area_size, weight_area_size, reusable_buf_size, weight_fp32_buf_size, scales_size);
@@ -4578,71 +4742,126 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     // Inner loop: iterate over N (activation columns)
     // Weight uses column-pair interleaved format, Activation uses row-pair interleaved format
 
+    // FP16 weight cache: lookup by src0->data pointer (stable ION address)
+    const int cache_enabled = src0->op_params[0];
+    const int use_hvx = ggml_get_dsp_use_hvx();
+    fp16_weight_cache_entry_t * cache_entry = NULL;
+    int cache_is_hit = 0;
+
+    if (cache_enabled) {
+        cache_entry = fp16_weight_cache_lookup(src0->data);
+        if (cache_entry && cache_entry->M == M && cache_entry->K == K && cache_entry->type == src0->type) {
+            cache_is_hit = 1;
+            GGMLHEXAGON_LOG_INFO("FP16 weight cache: HIT, src0=%p, size=%u", src0->data, cache_entry->fp16_size);
+        } else {
+            cache_entry = NULL;  // mismatch, treat as miss
+            GGMLHEXAGON_LOG_INFO("FP16 weight cache: MISS, src0=%p, M=%d, K=%d, type=%d",
+                                 src0->data, M, K, src0->type);
+        }
+    }
+
     for (size_t mc = 0; mc < M; mc += M_chunk_n_cols) {
         const size_t M_cols = (M - mc) > M_chunk_n_cols ? M_chunk_n_cols : (M - mc);
         const size_t M_col_tiles = (M_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
 
-        // Convert weight chunk (src0) to fp16 tiles using interleaved format
-        const int use_hvx = ggml_get_dsp_use_hvx();
-        if (src0_is_f16) {
-            const __fp16 *weight_chunk = (const __fp16 *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                transfer_weight_chunk_f16_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
-            } else {
-                transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
-            }
-        } else if (src0->type == GGML_TYPE_F32) {
-            const float *weight_chunk = (const float *)((const char *)src0->data + mc * src0_row_stride);
+        // Compute cache offset for this M chunk
+        const size_t chunk_cache_offset = (mc / HMX_FP16_TILE_N_COLS) * n_dot_tiles * HMX_FP16_TILE_SIZE;
+        const size_t chunk_cache_size = M_col_tiles * n_dot_tiles * HMX_FP16_TILE_SIZE;
 
-            // DMA async: push weight fp32 rows from DDR to VTCM
-            dma_queue_push_ddr_to_vtcm(dma,
-                dma_make_ptr(vtcm_weight_fp32_buf, weight_chunk),
-                K * sizeof(float), src0_row_stride, M_cols);
-            dma_queue_pop(dma);  // wait for DMA completion
+        // Check if we can read from FP16 weight cache
+        if (cache_is_hit && cache_entry) {
+            // Cache hit: copy FP16 tiles from ION cache to VTCM
+            // ION cache is in DSP L2 cache from previous write, no invalidate needed
+            memcpy(vtcm_weight, (uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, chunk_cache_size);
+        } else {
+            // Cache miss: convert weight chunk (src0) to fp16 tiles using interleaved format
+            if (src0_is_f16) {
+                const __fp16 *weight_chunk = (const __fp16 *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    transfer_weight_chunk_f16_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
+                } else {
+                    transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
+                }
+            } else if (src0->type == GGML_TYPE_F32) {
+                const float *weight_chunk = (const float *)((const char *)src0->data + mc * src0_row_stride);
 
-            // Convert from VTCM fp32 buffer to fp16 tiles (interleaved format)
-            convert_weight_f32_to_fp16_tiles(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
-        } else if (src0->type == GGML_TYPE_BF16) {
-            const ggml_bf16_t *weight_chunk = (const ggml_bf16_t *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                convert_weight_bf16_to_fp16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
-            } else {
-                convert_weight_bf16_to_fp16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
+                // DMA async: push weight fp32 rows from DDR to VTCM
+                dma_queue_push_ddr_to_vtcm(dma,
+                    dma_make_ptr(vtcm_weight_fp32_buf, weight_chunk),
+                    K * sizeof(float), src0_row_stride, M_cols);
+                dma_queue_pop(dma);  // wait for DMA completion
+
+                // Convert from VTCM fp32 buffer to fp16 tiles (interleaved format)
+                if (use_hvx) {
+                    convert_weight_f32_to_fp16_tiles_hvx(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
+                } else {
+                    convert_weight_f32_to_fp16_tiles(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
+                }
+            } else if (src0->type == GGML_TYPE_BF16) {
+                const ggml_bf16_t *weight_chunk = (const ggml_bf16_t *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    convert_weight_bf16_to_fp16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
+                } else {
+                    convert_weight_bf16_to_fp16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
+                }
+            } else if (src0->type == GGML_TYPE_Q4_0) {
+                const block_q4_0 *weight_chunk = (const block_q4_0 *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    dequantize_q4_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
+                } else {
+                    dequantize_q4_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+                }
+            } else if (src0->type == GGML_TYPE_Q4_1) {
+                const block_q4_1 *weight_chunk = (const block_q4_1 *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    dequantize_q4_1_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
+                } else {
+                    dequantize_q4_1_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+                }
+            } else if (src0->type == GGML_TYPE_Q5_0) {
+                const block_q5_0 *weight_chunk = (const block_q5_0 *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    dequantize_q5_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
+                } else {
+                    dequantize_q5_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+                }
+            } else if (src0->type == GGML_TYPE_Q8_0) {
+                const block_q8_0 *weight_chunk = (const block_q8_0 *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    dequantize_q8_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
+                } else {
+                    dequantize_q8_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+                }
+            } else if (src0->type == GGML_TYPE_IQ4_NL) {
+                const block_iq4_nl *weight_chunk = (const block_iq4_nl *)((const char *)src0->data + mc * src0_row_stride);
+                if (use_hvx) {
+                    dequantize_iq4_nl_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
+                } else {
+                    dequantize_iq4_nl_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+                }
+            } else if (src0->type == GGML_TYPE_Q4_0x4x2) {
+                // Q4_0x4x2: AP-side repacked format for efficient HVX dequantization
+                const uint8_t *weight_chunk = (const uint8_t *)((const char *)src0->data + mc * src0_row_stride);
+                dequantize_x4x2_q4_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride);
             }
-        } else if (src0->type == GGML_TYPE_Q4_0) {
-            const block_q4_0 *weight_chunk = (const block_q4_0 *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                dequantize_q4_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-            } else {
-                dequantize_q4_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-            }
-        } else if (src0->type == GGML_TYPE_Q4_1) {
-            const block_q4_1 *weight_chunk = (const block_q4_1 *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                dequantize_q4_1_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-            } else {
-                dequantize_q4_1_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-            }
-        } else if (src0->type == GGML_TYPE_Q5_0) {
-            const block_q5_0 *weight_chunk = (const block_q5_0 *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                dequantize_q5_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-            } else {
-                dequantize_q5_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-            }
-        } else if (src0->type == GGML_TYPE_Q8_0) {
-            const block_q8_0 *weight_chunk = (const block_q8_0 *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                dequantize_q8_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-            } else {
-                dequantize_q8_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-            }
-        } else if (src0->type == GGML_TYPE_IQ4_NL) {
-            const block_iq4_nl *weight_chunk = (const block_iq4_nl *)((const char *)src0->data + mc * src0_row_stride);
-            if (use_hvx) {
-                dequantize_iq4_nl_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-            } else {
-                dequantize_iq4_nl_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
+
+            // Write converted FP16 tiles to ION cache region
+            if (cache_enabled && !cache_is_hit && !cache_entry) {
+                // First chunk: allocate cache and copy this chunk
+                const size_t M_padded_cache = ((size_t)M + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS * HMX_FP16_TILE_N_COLS;
+                const uint32_t total_fp16_size = (uint32_t)((M_padded_cache / HMX_FP16_TILE_N_COLS) * n_dot_tiles * HMX_FP16_TILE_SIZE);
+                // Only cache weights above minimum size threshold
+                if (total_fp16_size >= FP16_WEIGHT_CACHE_MIN_SIZE) {
+                    cache_entry = fp16_weight_cache_insert(src0->data, total_fp16_size, M, K, src0->type);
+                }
+                if (cache_entry) {
+                    memcpy((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, vtcm_weight, chunk_cache_size);
+                    ggmlop_dsp_cache_flush_range((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, chunk_cache_size);
+                }
+            } else if (cache_enabled && !cache_is_hit && cache_entry) {
+                // Subsequent chunks: just copy to already-allocated cache
+                memcpy((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, vtcm_weight, chunk_cache_size);
+                ggmlop_dsp_cache_flush_range((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, chunk_cache_size);
             }
         }
 
@@ -5030,7 +5249,11 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const st
     int  mulmat_algo = ggmlop_get_mulmat_algotype();
     ggmlhexagon_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
     int64_t begin_time = ggml_time_us();
-    if (mulmat_algo == 32) {
+    if (mulmat_algo == 30) {
+        GGMLHEXAGON_LOG_INFO("mulmat using HMX x4x2 mode(ggml_dsp_use_hvx=%d)", ggml_get_dsp_use_hvx());
+        // algotype=30: AP side repacks Q4_0 -> x4x2 (type=200), DSP uses same HMX path
+        ret = ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
+    } else if (mulmat_algo == 32) {
         GGMLHEXAGON_LOG_INFO("mulmat using HMX mode(ggml_dsp_use_hvx=%d)", ggml_get_dsp_use_hvx());
         ret = ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
     } else if (mulmat_algo == 31) {

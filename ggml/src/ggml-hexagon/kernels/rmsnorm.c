@@ -39,16 +39,32 @@ static void rmsnorm_thread_func(void * data) {
     int64_t end_idx = tdata->end_idx;
     float eps = tdata->eps;
 
-    // each "row" is ne00 elements, indexed by flat row index
     int64_t ne00 = src0->ne[0];
+    int64_t ne01 = src0->ne[1];
+    int64_t ne02 = src0->ne[2];
+    int64_t ne03 = src0->ne[3];
     size_t nb01 = src0->nb[1];
-    size_t nb1 = dst->nb[1];
+    size_t nb02 = src0->nb[2];
+    size_t nb03 = src0->nb[3];
+    size_t nb1  = dst->nb[1];
+    size_t nb2  = dst->nb[2];
+    size_t nb3  = dst->nb[3];
 
-    for (int64_t idx = start_idx; idx < end_idx; ++idx) {
-        const float * x = (const float *)((const uint8_t *)src0->data + idx * nb01);
-        float * y = (float *)((uint8_t *)dst->data + idx * nb1);
-        rmsnorm_f32_scalar(ne00, y, x, eps);
+    // iterate rows using 3-level index to handle non-contiguous strides
+    int64_t row = 0;
+    for (int64_t i3 = 0; i3 < ne03; i3++) {
+        for (int64_t i2 = 0; i2 < ne02; i2++) {
+            for (int64_t i1 = 0; i1 < ne01; i1++) {
+                if (row < start_idx) { row++; continue; }
+                if (row >= end_idx) goto done;
+                const float * x = (const float *)((const uint8_t *)src0->data + i1*nb01 + i2*nb02 + i3*nb03);
+                float * y = (float *)((uint8_t *)dst->data + i1*nb1 + i2*nb2 + i3*nb3);
+                rmsnorm_f32_scalar(ne00, y, x, eps);
+                row++;
+            }
+        }
     }
+done:
 
     if (tdata->synctoken != NULL) {
         worker_pool_synctoken_jobdone(tdata->synctoken);
@@ -72,6 +88,19 @@ static void ggml_compute_forward_rms_norm_f32(
 
     int64_t ne00 = src0->ne[0];
     int64_t nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
+
+    GGMLHEXAGON_LOG_INFO("RMS_NORM: src0 ne=[%lld,%lld,%lld,%lld] nb=[%d,%d,%d,%d] data=%p data_len=%d",
+                         (long long)src0->ne[0], (long long)src0->ne[1],
+                         (long long)src0->ne[2], (long long)src0->ne[3],
+                         src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
+                         src0->data, src0->data_len);
+    GGMLHEXAGON_LOG_INFO("RMS_NORM: dst  ne=[%lld,%lld,%lld,%lld] nb=[%d,%d,%d,%d] data=%p data_len=%d",
+                         (long long)dst->ne[0], (long long)dst->ne[1],
+                         (long long)dst->ne[2], (long long)dst->ne[3],
+                         dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3],
+                         dst->data, dst->data_len);
+    GGMLHEXAGON_LOG_INFO("RMS_NORM: eps=%f, contiguous=%d, nrows=%lld",
+                         eps, ggml_is_contiguous(src0), (long long)nrows);
 
     if (ggmlop_get_thread_counts() > 1 && nrows >= ggmlop_get_thread_counts() * 2) {
         int num_threads = ggmlop_get_thread_counts();
@@ -114,11 +143,25 @@ static void ggml_compute_forward_rms_norm_f32(
 
         worker_pool_synctoken_wait(&synctoken);
     } else {
-        // single-threaded: iterate all rows
-        for (int64_t r = 0; r < nrows; ++r) {
-            const float * x = (const float *)((const uint8_t *)src0->data + r * src0->nb[1]);
-            float * y = (float *)((uint8_t *)dst->data + r * dst->nb[1]);
-            rmsnorm_f32_scalar(ne00, y, x, eps);
+        // single-threaded: iterate all rows with proper stride computation
+        int64_t ne01 = src0->ne[1];
+        int64_t ne02 = src0->ne[2];
+        int64_t ne03 = src0->ne[3];
+        size_t nb01 = src0->nb[1];
+        size_t nb02 = src0->nb[2];
+        size_t nb03 = src0->nb[3];
+        size_t nb1  = dst->nb[1];
+        size_t nb2  = dst->nb[2];
+        size_t nb3  = dst->nb[3];
+
+        for (int64_t i3 = 0; i3 < ne03; i3++) {
+            for (int64_t i2 = 0; i2 < ne02; i2++) {
+                for (int64_t i1 = 0; i1 < ne01; i1++) {
+                    const float * x = (const float *)((const uint8_t *)src0->data + i1*nb01 + i2*nb02 + i3*nb03);
+                    float * y = (float *)((uint8_t *)dst->data + i1*nb1 + i2*nb2 + i3*nb3);
+                    rmsnorm_f32_scalar(ne00, y, x, eps);
+                }
+            }
         }
     }
 

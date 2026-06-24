@@ -7406,7 +7406,7 @@ void ggmlhexagon_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, con
     }
 
     // Get src0 type (e.g., "f32")
-    const char * src0_type_name = ggml_get_type_traits((enum ggml_type)src0->type)->type_name;
+    const char * src0_type_name = (src0->type == GGML_TYPE_Q4_0x4x2) ? "q4_0x4x2" : ggml_get_type_traits((enum ggml_type)src0->type)->type_name;
     len = strlen(buf);
     if (len < buf_size) {
         strncat(buf, src0_type_name, buf_size - len - 1);

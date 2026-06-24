@@ -447,6 +447,7 @@ enum ggml_type {
     GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
     GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
     GGML_TYPE_Q1_0    = 41,
+    GGML_TYPE_Q4_0x4x2 = 200, // Q4_0 repacked to x4x2 format for efficient HVX dequantization
     GGML_TYPE_COUNT   = 42,
 };
 
@@ -2096,7 +2097,11 @@ GGML_API int            ggmlop_is_hmx_available(void);
 GGML_API bool           ggmlop_is_ion_mode(void);
 GGML_API void *         ggmlop_get_work_data(size_t size);
 GGML_API void *         ggmlop_get_vtcm_pool(size_t * size);
+GGML_API void           ggmlop_dsp_cache_flush_range(void * addr, size_t size);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
+
+// FP16 weight cache: allocates from ION shared memory tail region
+GGML_API void *         ggmlop_cache_mempool_alloc(size_t size);  // returns ptr or NULL if full
 
 // vec_dot generic (scalar) implementations
 GGML_API void vec_dot_f32_generic       (int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT x, size_t bx, const void * GGML_RESTRICT y, size_t by, int nrc);

@@ -191,6 +191,32 @@ static void ggml_compute_forward_rope_f32(
     size_t nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
     size_t nb1  = dst->nb[1],   nb2  = dst->nb[2],   nb3  = dst->nb[3];
 
+    // // diagnostic logging (disabled, keep for future debugging)
+    // GGMLHEXAGON_LOG_WARN("ROPE diag: n_dims=%d mode=%d n_ctx_orig=%d freq_base=%.1f freq_scale=%.6f",
+    //                      n_dims, mode, n_ctx_orig, freq_base, freq_scale);
+    // GGMLHEXAGON_LOG_WARN("ROPE diag: src0 type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p",
+    //                      src0->type, (int)src0->ne[0], (int)src0->ne[1], (int)src0->ne[2], (int)src0->ne[3],
+    //                      (int)src0->nb[0], (int)src0->nb[1], (int)src0->nb[2], (int)src0->nb[3], src0->data);
+    // GGMLHEXAGON_LOG_WARN("ROPE diag: src1 type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p data_len=%d",
+    //                      src1->type, (int)src1->ne[0], (int)src1->ne[1], (int)src1->ne[2], (int)src1->ne[3],
+    //                      (int)src1->nb[0], (int)src1->nb[1], (int)src1->nb[2], (int)src1->nb[3], src1->data, src1->data_len);
+    // GGMLHEXAGON_LOG_WARN("ROPE diag: dst type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p",
+    //                      dst->type, (int)dst->ne[0], (int)dst->ne[1], (int)dst->ne[2], (int)dst->ne[3],
+    //                      (int)dst->nb[0], (int)dst->nb[1], (int)dst->nb[2], (int)dst->nb[3], dst->data);
+    // {
+    //     const int32_t * pos = (const int32_t *)src1->data;
+    //     int n_pos = (int)ne2;
+    //     if (n_pos > 8) n_pos = 8;
+    //     GGMLHEXAGON_LOG_WARN("ROPE diag: pos[0..%d] = [%d, %d, %d, %d, %d, %d, %d, %d]",
+    //                          n_pos,
+    //                          n_pos > 0 ? pos[0] : -1, n_pos > 1 ? pos[1] : -1,
+    //                          n_pos > 2 ? pos[2] : -1, n_pos > 3 ? pos[3] : -1,
+    //                          n_pos > 4 ? pos[4] : -1, n_pos > 5 ? pos[5] : -1,
+    //                          n_pos > 6 ? pos[6] : -1, n_pos > 7 ? pos[7] : -1);
+    //     const float * sf = (const float *)src0->data;
+    //     GGMLHEXAGON_LOG_WARN("ROPE diag: src0 f32=[%.4f, %.4f, %.4f, %.4f]", sf[0], sf[1], sf[2], sf[3]);
+    // }
+
     GGML_ASSERT(n_dims <= ne0 && n_dims % 2 == 0);
 
     float theta_scale = powf(freq_base, -2.0f / (float)n_dims);
@@ -214,8 +240,11 @@ static void ggml_compute_forward_rope_f32(
         GGML_ASSERT(n_dims == ne0 / 2);
     }
 
-    // allocate temp cache for cos/sin values
-    float * cache = (float *)malloc(ne0 * sizeof(float));
+    // static cache buffer to avoid malloc/free on DSP (heap alloc can cause
+    // corruption or cache-coherency issues in frequently-called DSP functions)
+    #define ROPE_CACHE_MAX_NE0 4096
+    static float s_rope_cache[ROPE_CACHE_MAX_NE0];
+    float * cache = (ne0 <= ROPE_CACHE_MAX_NE0) ? s_rope_cache : (float *)malloc(ne0 * sizeof(float));
     if (!cache) {
         GGMLHEXAGON_LOG_ERROR("ROPE: failed to alloc cache (%lld bytes)", (long long)(ne0 * sizeof(float)));
         return;
@@ -310,7 +339,19 @@ static void ggml_compute_forward_rope_f32(
         }
     }
 
-    free(cache);
+    // Detailed pair verification: log first 2 rotation pairs with cos/sin
+    // NOTE: disabled - flawed for in-place ops (src0->data == dst->data)
+    // if (mode == 2 && src0->type == GGML_TYPE_F32) {
+    //     const float * sf = (const float *)src0->data;
+    //     const float * df = (const float *)dst->data;
+    //     int hd = n_dims / 2;
+    //     GGMLHEXAGON_LOG_WARN("ROPE pair0: x0=%.6f x1=%.6f cos=%.6f sin=%.6f -> dst0=%.6f dst1=%.6f",
+    //                          sf[0], sf[hd], cache[0], cache[1], df[0], df[hd]);
+    //     GGMLHEXAGON_LOG_WARN("ROPE pair1: x0=%.6f x1=%.6f cos=%.6f sin=%.6f -> dst0=%.6f dst1=%.6f",
+    //                          sf[1], sf[hd+1], cache[2], cache[3], df[1], df[hd+1]);
+    // }
+
+    if (cache != s_rope_cache) free(cache);
 
     int64_t end_time = ggml_time_us();
     GGMLHEXAGON_LOG_INFO("ROPE elapse %lld us (ne0=%lld, ne1=%lld, ne2=%lld, mode=%d, type=%d)",

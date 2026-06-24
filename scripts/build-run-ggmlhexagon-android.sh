@@ -112,12 +112,12 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
 
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
+#GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
-PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
+PROMPT_STRING="You are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 300 words\n"
 
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
 running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
@@ -803,9 +803,9 @@ function check_hexagon_backend
 function check_mulmat_algotype
 {
     printf "mulmat_algotype ${mulmat_algotype} \n"
-    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]]; then
+    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]]; then
         printf "invalid mulmat algotype\n"
-        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 31, 32, 33 \n"
+        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 30, 31, 32, 33 \n"
         exit 1
     fi
 }

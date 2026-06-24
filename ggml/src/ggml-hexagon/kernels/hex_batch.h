@@ -25,7 +25,7 @@ typedef struct hex_tensor_desc {
     int32_t  ne[4];           /* element counts per dimension */
     int32_t  nb[4];           /* strides (bytes) per dimension */
     int32_t  op_params[16];   /* operation-specific parameters */
-    uint32_t flags;           /* 0=readonly, 1=DSP writes result */
+    uint32_t flags;           /* 0=ION tensor, 1=mirrored (heap), 2=weight (skip cache flush) */
     uint32_t data_offset;     /* byte offset of data in ION mempool */
     uint32_t data_len;        /* data length in bytes */
 } hex_tensor_desc;
