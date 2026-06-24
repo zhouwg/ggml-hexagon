@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 #
-# Copyright (c) 2024-2026 Jeff Zhou(https://github.com/zhouwg)
+# this self-contained file is part of JZ's ggml-hexagon:
 #
 # 1. build llama.cpp + jz's ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
 #    this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
 #    this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 2. verify jz's prebuilt ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 2. verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 
-# 3. verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 3. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+#
+# 4. performance comparison of QNN-CPU/QNN-GPU/QNN-NPU/Hexagon-cDSP/ggml with JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 
-# 4. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 5. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 5. performance comparison of QNN-CPU,QNN-GPU,QNN-NPU,Hexagon-cDSP,ggml on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
-#
+# Jeff Zhou - zhouwg2000@gmail.com
+# GitHub:   - https://github.com/zhouwg/ggml-hexagon
 #
 set -e
 
@@ -33,13 +35,16 @@ REMOTE_PATH=/data/local/tmp
 LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
+#path of toolchain, for purpose of share same toolchain in multiple instance of JZ's ggml-hexagon
+TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
 ANDROID_PLATFORM=android-34
 ANDROID_NDK_VERSION=r28
 ANDROID_NDK_NAME=android-ndk-${ANDROID_NDK_VERSION}
 ANDROID_NDK_FULLNAME=${ANDROID_NDK_NAME}-linux.zip
-ANDROID_NDK=${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_NAME}
+ANDROID_NDK=${TOOLCHAIN_PATH}/${ANDROID_NDK_NAME}
 
 # --- Define NDK paths based on the absolute SDK path ---
 NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
@@ -48,7 +53,7 @@ NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/li
 #OpenCL Headers can be found at:
 #https://https://github.com/KhronosGroup/OpenCL-Headers
 OPENCL_SDK_URL=https://github.com/KhronosGroup/OpenCL-Headers
-OPENCL_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+OPENCL_SDK_PATH=${TOOLCHAIN_PATH}/OpenCL_SDK
 OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
 
 #Qualcomm QNN SDK can be found at:
@@ -61,7 +66,7 @@ QNN_SDK_VERSION=2.35.0.250530
 QNN_SDK_VERSION=2.36.0.250627
 QNN_SDK_VERSION=2.46.0.260424
 #fully official QNN SDK, will be downloaded automatically via this script
-QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
+QNN_SDK_PATH=${TOOLCHAIN_PATH}/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
 #fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
 #fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
@@ -76,7 +81,7 @@ QNN_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 #customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
 #this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
 #actually used in this project
-HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
+HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/6.2.0.1
 
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
 
@@ -97,19 +102,14 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
 HTP_ARCH_VERSION=v79
 HTP_ARCH_VERSION_a=V79
 
-#for jz's ggml-hexagon backend
-#available prebuilt libs can be found at prebuilts/ggml-dsp
-GGMLDSP_RELEASE_DATE=20250531
-GGMLDSP_RELEASE_DATE=20250609
-GGMLDSP_RELEASE_DATE=20250625
-GGMLDSP_RELEASE_DATE=20250627
-GGMLDSP_RELEASE_DATE=20250710
-
 ######## part-2: prompt and LLM models ########
 
 #the following LLM models has verified(works fine) with the jz's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
 #1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+
+#610 MB, download manually
+#GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
 
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
@@ -213,17 +213,17 @@ function check_android_phone()
 function check_and_download_hexagon_sdk()
 {
     is_hexagon_llvm_exist=1
-    if [ ! -f ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1/tools/HEXAGON_Tools/8.8.06/NOTICE.txt ]; then
+    if [ ! -f ${TOOLCHAIN_PATH}/Hexagon_SDK/6.2.0.1/tools/HEXAGON_Tools/8.8.06/NOTICE.txt ]; then
         echo -e "${TEXT_RED}minimal-hexagon-sdk not exist...${TEXT_RESET}\n"
         is_hexagon_llvm_exist=0
     fi
 
     if [ ${is_hexagon_llvm_exist} -eq 0 ]; then
-        if [ -f ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz ]; then
+        if [ -f ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz ]; then
             echo -e "minimal-hexagon-sdk-6.2.0.1.xz already exist\n"
         else
             echo -e "begin downloading minimal-hexagon-sdk-6.2.0.1.xz \n"
-            wget --no-config --quiet --show-progress -O ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz https://github.com/zhouwg/toolchain/raw/refs/heads/master/minimal-hexagon-sdk-6.2.0.1.xz
+            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz https://github.com/zhouwg/toolchain/raw/refs/heads/master/minimal-hexagon-sdk-6.2.0.1.xz
             if [ $? -ne 0 ]; then
                 printf "failed to download minimal-hexagon-sdk-6.2.0.1.xz\n"
                 exit 1
@@ -231,7 +231,7 @@ function check_and_download_hexagon_sdk()
         fi
 
         echo -e "begin decompressing minimal-hexagon-sdk-6.2.0.1.xz \n"
-        xzcat ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz | tar -C ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/ -xf -
+        xzcat ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz | tar -C ${TOOLCHAIN_PATH}/Hexagon_SDK/ -xf -
         if [ $? -ne 0 ]; then
             printf "failed to decompress minimal-hexagon-sdk-6.2.0.1.xz\n"
             exit 1
@@ -263,15 +263,15 @@ function check_and_download_qnn_sdk()
     fi
 
     if [ ${is_qnn_sdk_exist} -eq 0 ]; then
-        if [ ! -f ${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/v${QNN_SDK_VERSION}.zip ]; then
+        if [ ! -f ${TOOLCHAIN_PATH}/QNN_SDK/v${QNN_SDK_VERSION}.zip ]; then
             echo -e "QNN SDK not exist, download it from ${QNN_SDK_URL}...\n"
-            wget --no-config --quiet --show-progress -O ${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/v${QNN_SDK_VERSION}.zip https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/${QNN_SDK_VERSION}/v${QNN_SDK_VERSION}.zip
+            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/QNN_SDK/v${QNN_SDK_VERSION}.zip https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/${QNN_SDK_VERSION}/v${QNN_SDK_VERSION}.zip
         fi
         if [ $? -ne 0 ]; then
             printf "failed to download Qualcomm QNN SDK to %s \n" "${QNN_SDK_PATH}"
             exit 1
         fi
-        cd ${PROJECT_ROOT_PATH}/prebuilts/QNN_SDK/
+        cd ${TOOLCHAIN_PATH}/QNN_SDK/
         unzip v${QNN_SDK_VERSION}.zip
         if [ $? -ne 0 ]; then
             printf "failed to decompress Qualcomm QNN SDK to %s \n" "${QNN_SDK_PATH}"
@@ -310,12 +310,12 @@ function check_and_download_opencl_sdk()
                 exit 1
             fi
         fi
-        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-Headers
+        cd ${TOOLCHAIN_PATH}/OpenCL_SDK/OpenCL-Headers
         printf "Copying OpenCL Headers to Android NDK sysroot include: ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}"
         mkdir -p ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
         /bin/cp -r -fv CL ${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
 
-        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+        cd ${TOOLCHAIN_PATH}/OpenCL_SDK
         if [ ! -d OpenCL-ICD-Loader ]; then
             echo "Cloning OpenCL-ICD-Loader..."
             git clone https://github.com/KhronosGroup/OpenCL-ICD-Loader
@@ -324,7 +324,7 @@ function check_and_download_opencl_sdk()
                 exit 1
             fi
         fi
-        cd ${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK/OpenCL-ICD-Loader
+        cd ${TOOLCHAIN_PATH}/OpenCL_SDK/OpenCL-ICD-Loader
         mkdir -p build
         cd build
         cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DANDROID_STL=c++_shared -DOPENCL_ICD_LOADER_HEADERS_DIR=${NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH}
@@ -362,11 +362,11 @@ function check_and_download_ndk()
 
     if [ ${is_android_ndk_exist} -eq 0 ]; then
 
-        if [ ! -f ${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_FULLNAME} ]; then
-            wget --no-config --quiet --show-progress -O ${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_FULLNAME} https://dl.google.com/android/repository/${ANDROID_NDK_FULLNAME}
+        if [ ! -f ${TOOLCHAIN_PATH}/${ANDROID_NDK_FULLNAME} ]; then
+            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/${ANDROID_NDK_FULLNAME} https://dl.google.com/android/repository/${ANDROID_NDK_FULLNAME}
         fi
 
-        cd ${PROJECT_ROOT_PATH}/prebuilts/
+        cd ${TOOLCHAIN_PATH}
         unzip ${ANDROID_NDK_FULLNAME}
 
         if [ $? -ne 0 ]; then
@@ -592,33 +592,6 @@ esac
 }
 
 
-#for jz's prebuilt ggml-hexagon backend in branch self-build-jz
-#incompatible and obsolete since 06/16/2026
-function prepare_ggmldsp_prebuilt()
-{
-    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
-    echo "adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so"
-case "$HTP_ARCH_VERSION" in
-    v69)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v73)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v75)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v79)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    *)
-        show_usage
-        exit 1
-    ;;
-esac
-}
-
-
 function check_and_download_model()
 {
     set +e
@@ -742,11 +715,6 @@ function prepare_run_on_phone()
         #upload ggml runtime libs to Android phone
         update_ggml_libs
     fi
-
-
-    #for verify jz's prebuilt libggmldsp-skel.so, built from the reference/self-develop source codes in this project
-    #incompatible and obsolete since 06/16/2026
-    #prepare_ggmldsp_prebuilt
 
     #for verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
     #this is default behaviour(it will report libggmldsp-skel.so can't found when exec UT after build_qcom), but qualcomm's backend so already updated on device side when running build_qcom

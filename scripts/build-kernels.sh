@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
+
+# build DSP kernel of JZ's ggml-hexagon independently for purpose of simplify work flow
+
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 REMOTE_PATH=/data/local/tmp
 
-HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
+TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/6.2.0.1
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
-HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 TARGET=${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
 DEBUG_FLAG="-DNDEBUG -Wall"
 #DEBUG_FLAG=-g
