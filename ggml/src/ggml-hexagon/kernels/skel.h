@@ -304,7 +304,7 @@ __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_mul)(remote_handle64 _h, const
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_div)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_rmsnorm)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_rope)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_softmax)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
+__QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_softmax)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_silu)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_scale)(remote_handle64 _h, const dsptensor* src0, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_cpy)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;

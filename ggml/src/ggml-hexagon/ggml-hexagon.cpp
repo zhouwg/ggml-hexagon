@@ -293,6 +293,16 @@ struct qcom_socinfo {
     char soc_desc[GGML_MAX_NAME];
 };
 
+// ION pool region tracking for free-space management.
+// Each region records an allocated area within the ION pool.
+// When free_buffer is called, the region is marked as not-in-use.
+// Free regions can be reused by best-fit allocation.
+struct ion_pool_region {
+    size_t offset;      // byte offset from ION pool base
+    size_t size;        // allocation size in bytes
+    bool   in_use;      // true if currently allocated
+};
+
 struct ggml_backend_hexagon_context {
     int device;
     char name[GGML_MAX_NAME];
@@ -322,6 +332,7 @@ struct ggml_backend_hexagon_context {
     void * rpc_mempool;
     int rpc_mempool_handle;
     void * rpc_mempool_dsp_base;   // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
+    std::vector<ion_pool_region> ion_regions;  // region tracking for ION pool free-space management
     remote_handle64 ggmlop_handle;
     int domain_id;
 
@@ -1015,45 +1026,93 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
 }
 
 // ---- ARM64 Cache Maintenance for Non-Coherent ION ----
-#define ION_IOC_SYNC_FLAGS_CACHED   0
-#define ION_IOC_SYNC_FLAGS_READ     2
-#define ION_IOC_SYNC_FLAGS_WRITE    4
+// DMA_BUF_IOCTL_SYNC: bracket CPU access to dma-buf fd so the kernel
+// can flush/invalidate caches.  This goes through the kernel (EL1)
+// so it works even when EL0 DC CVAC/CIVAC is trapped by hypervisor.
+// Correct ioctl number: _IOW('b', 0, struct { __u64 flags; }) = 0x40086200
+#define DMA_BUF_IOCTL_SYNC_IOCTL  0x40086200u
 
 static int ion_sync_for_direction(int fd, int direction) {
 #if defined(__ANDROID__) || defined(__linux__)
     if (fd <= 0) return -1;
-    struct ion_sync_data { int fd; unsigned int flags; unsigned int pad; };
-    { struct ion_sync_data sync = { .fd = fd, .flags = (unsigned int)(ION_IOC_SYNC_FLAGS_CACHED | direction) };
-      int r = ioctl(fd, _IOWR('I', 7, struct ion_sync_data), &sync);
-      if (r == 0) return 0; }
-    { struct dma_buf_sync_t { uint64_t flags; };
-      static const uint64_t DMA_BUF_SYNC_START = (1u << 0), DMA_BUF_SYNC_END = (1u << 1);
-      static const uint64_t DMA_BUF_SYNC_READ = (1u << 2), DMA_BUF_SYNC_WRITE = (1u << 3);
-      uint64_t rw = (direction == ION_IOC_SYNC_FLAGS_WRITE) ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ;
-      struct dma_buf_sync_t s = { .flags = DMA_BUF_SYNC_START | rw };
-      if (ioctl(fd, 0x63406300u, &s) == 0) {
-          s.flags = DMA_BUF_SYNC_END | rw;
-          ioctl(fd, 0x63406300u, &s); return 0;
-      }
+    // Flag definitions from Linux kernel include/uapi/linux/dma-buf.h:
+    //   DMA_BUF_SYNC_READ  = (1 << 0) = 1
+    //   DMA_BUF_SYNC_WRITE = (2 << 0) = 2
+    //   DMA_BUF_SYNC_START = (1 << 2) = 4
+    //   DMA_BUF_SYNC_END   = (2 << 2) = 8
+    {
+        static const uint64_t DMA_BUF_SYNC_READ  = (1u << 0);
+        static const uint64_t DMA_BUF_SYNC_WRITE = (2u << 0);
+        static const uint64_t DMA_BUF_SYNC_START = (1u << 2);
+        static const uint64_t DMA_BUF_SYNC_END   = (2u << 2);
+        uint64_t rw = (direction == 1) ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ;
+        struct { uint64_t flags; } s;
+        s.flags = DMA_BUF_SYNC_START | rw;
+        int r = ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
+        if (r == 0) {
+            s.flags = DMA_BUF_SYNC_END | rw;
+            ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
+            static int logged = 0;
+            if (!logged) { GGMLHEXAGON_LOG_WARN("DMA_BUF_IOCTL_SYNC(%s) OK fd=%d (kernel cache sync)", direction ? "WRITE" : "READ", fd); logged = 1; }
+            return 0;
+        }
+        static int logged_fail = 0;
+        if (!logged_fail) { GGMLHEXAGON_LOG_WARN("DMA_BUF_IOCTL_SYNC(%s) FAILED fd=%d errno=%d (%s)", direction ? "WRITE" : "READ", fd, errno, strerror(errno)); logged_fail = 1; }
     }
+    {
+        struct ion_sync_data { int fd; unsigned int flags; unsigned int pad; };
+        struct ion_sync_data sync = { .fd = fd, .flags = (unsigned int)direction };
+        int r = ioctl(fd, _IOWR('I', 7, struct ion_sync_data), &sync);
+        if (r == 0) {
+            static int logged = 0;
+            if (!logged) { GGMLHEXAGON_LOG_WARN("ION_IOC_SYNC(%s) fallback OK fd=%d", direction ? "WRITE" : "READ", fd); logged = 1; }
+            return 0;
+        }
+        static int logged_fail2 = 0;
+        if (!logged_fail2) { GGMLHEXAGON_LOG_WARN("ION_IOC_SYNC(%s) fallback FAILED fd=%d errno=%d (%s)", direction ? "WRITE" : "READ", fd, errno, strerror(errno)); logged_fail2 = 1; }
+    }
+#else
+    (void)fd; (void)direction;
 #endif
     return -1;
 }
 
-static inline void cpu_dcache_flush_range(const void * p, size_t size) {
-    __builtin___clear_cache((char *)p, (char *)((char *)p + size));
+static inline void cpu_dcache_flush_range(int ion_fd, const void * p, size_t size) {
+    // Flush CPU cache to DRAM so DSP can read via its own bus.
+    // Always do DC CVAC first: DMA_BUF_IOCTL_SYNC may succeed but be a no-op
+    // on platforms the kernel considers coherent (7us for 4GB = no actual flush).
+    if (size == 0) return;
+    {
+        const char * start = (const char *)p;
+        const char * end   = start + size;
+        const size_t line_size = 64;
+        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
+        for (; addr < end; addr += line_size) {
+            __asm__ volatile("dc cvac, %0" : : "r"((const void *)addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+    }
+    // Also try DMA_BUF_IOCTL_SYNC as extra safeguard (kernel EL1 path).
+    // If ioctl is a no-op, DC CVAC above already did the work.
+    if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
 }
 
 static inline void cpu_dcache_inval_range(int ion_fd, const void * p, size_t size) {
-    // Phase 7.5: invalidate CPU cache so AP reads DSP-written data from DRAM.
-    //
-    // On ARM64 Linux there is no cacheflush() syscall (syscall 238 is
-    // rt_sigreturn, not cacheflush). DC IVAC is EL1-only.
-    // __builtin___clear_cache does DC CVAU (clean to PoU) + DSB ISH.
-    // In practice, cache capacity pressure evicts stale lines between
-    // Phase 6.5 and Phase 7.5, maintaining correctness.
+    // Invalidate CPU cache so AP reads DSP-written data from DRAM.
+    // Always do DC CIVAC first: DMA_BUF_IOCTL_SYNC may be a no-op.
     if (size == 0) return;
-    __builtin___clear_cache((char *)p, (char *)((char *)p + size));
+    {
+        const char * start = (const char *)p;
+        const char * end   = start + size;
+        const size_t line_size = 64;
+        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
+        for (; addr < end; addr += line_size) {
+            __asm__ volatile("dc civac, %0" : : "r"((const void *)addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+    if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
 }
 
 static void ggmlhexagon_get_processname(char * p_name) {
@@ -7072,16 +7131,21 @@ struct ggml_backend_hexagon_buffer_context {
     ~ggml_backend_hexagon_buffer_context() {
         if (buffer) {
             if ((g_hexagon_appcfg.hwaccel_approach == HWACCEL_CDSP) && (1 == g_hexagon_appcfg.enable_rpc_ion_mempool)) {
-                // Rewind bump allocator when an ION-pool buffer is freed (LIFO only).
+                // Mark the ION pool region as free so it can be reused.
                 if (backend_ctx && backend_ctx->rpc_mempool) {
                     const char * buf_ptr = (const char *)buffer;
                     const char * pool_base = (const char *)backend_ctx->rpc_mempool;
-                    size_t buf_end = (size_t)(buf_ptr - pool_base) + buffer_size;
-                    if (buf_ptr >= pool_base && buf_end == backend_ctx->rpc_mempool_usage) {
-                        backend_ctx->rpc_mempool_usage = (size_t)(buf_ptr - pool_base);
+                    if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
+                        size_t buf_offset = (size_t)(buf_ptr - pool_base);
+                        for (auto & r : backend_ctx->ion_regions) {
+                            if (r.in_use && r.offset == buf_offset) {
+                                r.in_use = false;
+                                GGMLHEXAGON_LOG_WARN("[FREE] region offset=%zu size=%zu", r.offset, r.size);
+                                break;
+                            }
+                        }
                     }
                 }
-                // do not call rpcmem_free: buffer was bump-allocated from mempool
             } else {
                 ggml_aligned_free(buffer, 0);
             }
@@ -7245,11 +7309,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                ggml_tensor * tensor, const void * data,
                                                size_t offset, size_t size) {
     GGML_UNUSED(buffer);
-
     memcpy((char *)tensor->data + offset, data, size);
-    // Flush to DRAM so DSP can read without per-batch cache flush.
-    // Critical for weights: Phase 6.5 skips weights to avoid flushing GBs per batch.
-    cpu_dcache_flush_range((const char *)tensor->data + offset, size);
 }
 
 static void ggml_backend_hexagon_buffer_memset_tensor(ggml_backend_buffer_t buffer,
@@ -7271,7 +7331,8 @@ static bool ggml_backend_hexagon_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
                                                struct ggml_tensor * dst) {
     GGML_UNUSED(buffer);
     if (ggml_backend_buffer_is_host(src->buffer)) {
-        memcpy(dst->data, src->data, ggml_nbytes(src));
+        size_t nbytes = ggml_nbytes(src);
+        memcpy(dst->data, src->data, nbytes);
         return true;
     }
 
@@ -7348,21 +7409,51 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
                               size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
                               ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
 
-        size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
-        // Data region limit: do not exceed cache_offset (tail is reserved for FP16 weight cache)
         size_t data_limit = ctx->rpc_mempool_cache_offset > 0 ? ctx->rpc_mempool_cache_offset : ctx->rpc_mempool_len;
-        if (aligned_offset + size_aligned <= data_limit) {
-            buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
-            buffer_ctx->buffer_size = size_aligned;
-            ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
-            GGMLHEXAGON_LOG_DEBUG("allocated %ld MiB from ion pool at offset %ld",
-                                 size_aligned / SIZE_IN_MB, aligned_offset);
+
+        // Try to reuse a free region (best fit)
+        size_t best_idx = (size_t)-1;
+        size_t best_waste = (size_t)-1;
+        for (size_t ri = 0; ri < ctx->ion_regions.size(); ri++) {
+            const auto & r = ctx->ion_regions[ri];
+            if (!r.in_use && r.size >= size_aligned) {
+                size_t waste = r.size - size_aligned;
+                if (waste < best_waste) {
+                    best_waste = waste;
+                    best_idx = ri;
+                }
+            }
+        }
+
+        if (best_idx != (size_t)-1) {
+            // Reuse free region
+            auto & r = ctx->ion_regions[best_idx];
+            buffer_ctx->buffer      = (char *)ctx->rpc_mempool + r.offset;
+            buffer_ctx->buffer_size = size_aligned;  // actual requested size, not region size
+            r.in_use = true;
+            GGMLHEXAGON_LOG_WARN("[ALLOC] reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
+                                 r.offset, r.size, size_aligned, r.size - size_aligned);
         } else {
-            GGMLHEXAGON_LOG_WARN("ion pool exhausted: needed %ld MiB, remaining %ld MiB — falling back to system memory",
-                                 size_aligned / SIZE_IN_MB,
-                                 (ctx->rpc_mempool_len - ctx->rpc_mempool_usage) / SIZE_IN_MB);
-            buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
-            buffer_ctx->buffer_size = size_aligned;
+            // Allocate new region from bump allocator tail
+            size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
+            if (aligned_offset + size_aligned <= data_limit) {
+                buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
+                buffer_ctx->buffer_size = size_aligned;
+                ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
+                // Record new region
+                ion_pool_region new_region;
+                new_region.offset = aligned_offset;
+                new_region.size   = size_aligned;
+                new_region.in_use = true;
+                ctx->ion_regions.push_back(new_region);
+                GGMLHEXAGON_LOG_WARN("[ALLOC] new region: offset=%zu size=%zu", aligned_offset, size_aligned);
+            } else {
+                GGMLHEXAGON_LOG_WARN("ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to system memory",
+                                     size_aligned / SIZE_IN_MB,
+                                     (data_limit - ctx->rpc_mempool_usage) / SIZE_IN_MB);
+                buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+                buffer_ctx->buffer_size = size_aligned;
+            }
         }
     } else {
         buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
@@ -7689,6 +7780,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
                 void * ion_buf = (char *)ctx->rpc_mempool + aligned_mirror_offset;
                 ctx->rpc_mempool_usage = aligned_mirror_offset + mirror_size;
 
+                // Record mirror as a temporary ION region
+                ion_pool_region mirror_region;
+                mirror_region.offset = aligned_mirror_offset;
+                mirror_region.size   = mirror_size;
+                mirror_region.in_use = true;
+                ctx->ion_regions.push_back(mirror_region);
+
                 // copy original heap data -> ION buffer (input correctness)
                 memcpy(ion_buf, dt.data, dt.data_len);
 
@@ -7720,8 +7818,18 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         if (total_mirror_size > k_max_safe_mirror) {
             GGMLHEXAGON_LOG_WARN("[MIRROR] skip batch: mirror=%zu bytes > %zu bytes limit, fallback to CPU",
                                  total_mirror_size, k_max_safe_mirror);
-            // Rewind bump allocator before returning
-            ctx->rpc_mempool_usage -= total_mirror_size;
+            // Free mirror ION regions before returning
+            for (const auto & m : mirrors) {
+                const char * ion_buf = (const char *)m.ion_buffer;
+                const char * pool_base = (const char *)ctx->rpc_mempool;
+                size_t buf_offset = (size_t)(ion_buf - pool_base);
+                for (auto & r : ctx->ion_regions) {
+                    if (r.in_use && r.offset == buf_offset) {
+                        r.in_use = false;
+                        break;
+                    }
+                }
+            }
             mirrors.clear();
             return GGML_STATUS_SUCCESS; // skip DSP batch, let scheduler use CPU fallback
         }
@@ -7792,16 +7900,24 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t
         t_perf_restore = ggml_time_us() - _t2;
     }
 
-    // Rewind bump allocator: release mirror space back to pool after restore.
-    // Mirrors were allocated in LIFO order during Phase-1, so safe to rewind.
+    // Free mirror ION regions (no tail compaction).
+    // Mirrors were temporary for this graph_compute call.
     if (!mirrors.empty() && ctx->rpc_mempool) {
-        size_t total_mirror_size = 0;
+        size_t total_freed = 0;
         for (const auto & m : mirrors) {
-            total_mirror_size += m.data_len;
+            const char * ion_buf = (const char *)m.ion_buffer;
+            const char * pool_base = (const char *)ctx->rpc_mempool;
+            size_t buf_offset = (size_t)(ion_buf - pool_base);
+            for (auto & r : ctx->ion_regions) {
+                if (r.in_use && r.offset == buf_offset) {
+                    r.in_use = false;
+                    total_freed += r.size;
+                    break;
+                }
+            }
         }
-        ctx->rpc_mempool_usage -= total_mirror_size;
-        GGMLHEXAGON_LOG_DEBUG("[MIRROR] rewound %zu bytes (%.2f MiB), pool now %zu/%zu",
-                              total_mirror_size, (double)total_mirror_size / (1024.0 * 1024.0),
+        GGMLHEXAGON_LOG_DEBUG("[MIRROR] freed %zu bytes (%.2f MiB), pool_used=%zu/%zu",
+                              total_freed, (double)total_freed / (1024.0 * 1024.0),
                               ctx->rpc_mempool_usage, ctx->rpc_mempool_len);
     }
 
@@ -7876,9 +7992,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     const char * ion_base = (const char *)ctx->rpc_mempool;
     const size_t ion_size = ctx->rpc_mempool_len;
 
-    // Save bump allocator position: we'll restore it after batch execution
-    // so that mirror regions and batch descriptors are freed after each call.
-    const size_t saved_usage = ctx->rpc_mempool_usage;
+    // Track temporary ION regions (mirrors, batch descriptors, repacked weights)
+    // for cleanup after Phase 8. Mark them as free (no tail compaction).
+    std::vector<size_t> temp_region_indices;
+
+    // Reset DSP-side FP16 weight cache. ION regions may be reused across
+    // graph_compute calls, making cached FP16 tiles stale.
+    if (ctx->rpc_mempool_cache_offset > 0) {
+        ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0xFFFE);
+    }
 
     // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
     // Each tensor object gets its own descriptor with correct ne/nb,
@@ -8015,6 +8137,14 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         void * ion_buf = (char *)ctx->rpc_mempool + moff;
         ctx->rpc_mempool_usage = aligned_offset + mirror_size;
 
+        // Record mirror as a temporary ION region
+        ion_pool_region mirror_region;
+        mirror_region.offset = aligned_offset;
+        mirror_region.size   = mirror_size;
+        mirror_region.in_use = true;
+        ctx->ion_regions.push_back(mirror_region);
+        temp_region_indices.push_back(ctx->ion_regions.size() - 1);
+
         memcpy(ion_buf, data_ptr, mirror_size);
 
         info.mirror_offset = moff;
@@ -8054,6 +8184,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     static std::unordered_map<const void *, uint32_t> g_x4x2_ion_offsets;
     if (g_hexagon_appcfg.mulmat_algotype == 30) {
         static std::unordered_set<const void *> g_x4x2_repacked;
+        // Clear stale entries from previous graph_compute call.
+        // ION regions may have been freed and reused by alloc_buffer,
+        // making old repack offsets invalid.
+        g_x4x2_repacked.clear();
+        g_x4x2_ion_offsets.clear();
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
@@ -8078,6 +8213,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
                 uint32_t rp_off = (uint32_t)aligned_offset;
                 void * rp_buf = (char *)ctx->rpc_mempool + rp_off;
                 ctx->rpc_mempool_usage = aligned_offset + repack_size;
+                // Record repack as a temporary ION region
+                ion_pool_region repack_region;
+                repack_region.offset = aligned_offset;
+                repack_region.size   = repack_size;
+                repack_region.in_use = true;
+                ctx->ion_regions.push_back(repack_region);
+                temp_region_indices.push_back(ctx->ion_regions.size() - 1);
                 GGMLHEXAGON_LOG_WARN("x4x2 repack: ION tensor[%d] K=%d M=%d -> ION offset=0x%x", i, K, (int)t->ne[1], rp_off);
                 repack_q4_0_q4x4x2(t, t->data, repack_size, rp_buf);
                 g_x4x2_repacked.insert(t->data);
@@ -8107,13 +8249,22 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     if (batch_offset_aligned + total_desc_size > data_limit) {
         GGMLHEXAGON_LOG_ERROR("ion-batch: mempool full for batch desc (%zu bytes at offset %zu)",
                               total_desc_size, batch_offset_aligned);
-        // rewind mirrors
-        if (!mirrors.empty()) ctx->rpc_mempool_usage -= /* recalculate */ 0;  // simplified
+        // Free temporary mirror regions before returning
+        for (size_t ri : temp_region_indices) {
+            ctx->ion_regions[ri].in_use = false;
+        }
         return result;
     }
 
     uint32_t batch_offset = (uint32_t)batch_offset_aligned;
     ctx->rpc_mempool_usage = batch_offset_aligned + total_desc_size;
+    // Record batch descriptor as a temporary ION region
+    ion_pool_region batch_region;
+    batch_region.offset = batch_offset_aligned;
+    batch_region.size   = total_desc_size;
+    batch_region.in_use = true;
+    ctx->ion_regions.push_back(batch_region);
+    temp_region_indices.push_back(ctx->ion_regions.size() - 1);
 
     // ---- Phase 6: build descriptors in local buffer, then memcpy to ION ----
     t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
@@ -8231,22 +8382,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
 
     // ---- Phase 6.5: AP -> DSP cache coherency ----
     t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    // Flush ONLY src tensor data that AP wrote in THIS invocation.
-    // Do NOT include dst areas or wide ranges that may contain stale data
-    // from previous invocations (DC CVAC would flush stale data TO DRAM,
-    // potentially overwriting DSP results). FastRPC invoke return handles
-    // cache invalidation for the mapped region.
+    // Flush CPU cache to DRAM so DSP can read AP-written data.
+    // Always do DC CVAC first: DMA_BUF_IOCTL_SYNC may succeed but be a no-op
+    // on platforms the kernel considers coherent (7us for 4GB = no actual flush).
     {
+        // DC CVAC on ALL ION ranges that DSP will read (src + mirrors + repacked + descriptor)
         uint32_t clean_min = ~0u, clean_max = 0;
-        // Only flush source input tensors (AP-written data that DSP needs to read)
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
-            if (weight_indices.count(i)) continue;  // skip weights: read-only, already in DRAM
-            // Only flush tensors that are genuine inputs (src0/src1),
-            // not output tensors that DSP will write to.
-            // Safe approach: flush all ION-backed tensors since DSP
-            // reads src0+src1 before writing dst.
+            if (weight_indices.count(i)) continue;
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 uint32_t off = (uint32_t)(dp - ion_base);
@@ -8255,29 +8400,28 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
                 if (off + len > clean_max) clean_max = off + len;
             }
         }
-        // Also flush mirror regions (heap->ION copies that DSP reads)
         for (const auto & m : mirrors) {
             if (m.mirror_offset < clean_min) clean_min = m.mirror_offset;
             uint32_t end = m.mirror_offset + m.data_len;
             if (end > clean_max) clean_max = end;
         }
-        // Also flush repacked ION weight regions (x4x2 repack modifies ION data
-        // that DSP reads; without flush, CPU cache has repacked data but DRAM is stale)
         for (const auto & rw : repacked_ion_weights) {
             if (rw.first < clean_min) clean_min = rw.first;
             uint32_t end = rw.first + rw.second;
             if (end > clean_max) clean_max = end;
         }
-        // Flush batch descriptor (DSP reads op descriptors from ION)
         if (batch_offset < clean_min) clean_min = batch_offset;
         uint32_t desc_end = batch_offset + total_desc_size;
         if (desc_end > clean_max) clean_max = desc_end;
 
         if (clean_max > clean_min) {
-            cpu_dcache_flush_range((char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
-            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase6.5 DC CVAC [0x%x, 0x%x] (%u bytes, src-only)",
+            cpu_dcache_flush_range(0, (char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
+            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase6.5 DC CVAC [0x%x, 0x%x] (%u bytes)",
                                   clean_min, clean_max, clean_max - clean_min);
         }
+        // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
+        int ion_fd = ctx->rpc_mempool_handle;
+        if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
     }
 
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
@@ -8321,11 +8465,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
     t_p7 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     // DSP writes results to DRAM via ION buffer, but CPU cache may still hold
-    // stale data from Phase 6.5 (DC CVAC) or Phase 4 (memcpy to ION mirror).
-    // Without invalidation, AP reads stale data from cache instead of DRAM.
-    // Use cacheflush() syscall (DC IVAC) which runs in kernel (EL1).
+    // stale data.  Always do DC CIVAC first: DMA_BUF_IOCTL_SYNC may be a no-op.
     if (hexagon_error == AEE_SUCCESS) {
-        // Collect ION offset ranges for dst tensors (where DSP wrote results)
         uint32_t inval_min = ~0u, inval_max = 0;
         for (uint32_t oi = 0; oi < n_ops; oi++) {
             const hex_op_desc & cur_op = hex_ops[oi];
@@ -8334,13 +8475,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             ggml_tensor * dst_t = tensor_src[dst_idx];
             if (!dst_t || !dst_t->data) continue;
 
-            // Find ION offset for this dst tensor
             uint32_t dst_off = 0xFFFFFFFFu;
             const char * dp = (const char *)dst_t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 dst_off = (uint32_t)(dp - ion_base);
             } else {
-                // Heap tensor: find mirror offset
                 for (const auto & m : mirrors) {
                     if ((uint32_t)m.tensor_idx == dst_idx) { dst_off = m.mirror_offset; break; }
                 }
@@ -8353,17 +8492,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             if (dst_off == 0xFFFFFFFFu) continue;
 
             uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
-            // Align down to cache line (128 bytes)
             uint32_t start = dst_off & ~127u;
             uint32_t end   = (dst_off + dst_len + 127u) & ~127u;
             if (start < inval_min) inval_min = start;
             if (end > inval_max) inval_max = end;
         }
         if (inval_max > inval_min) {
-            cpu_dcache_inval_range(ctx->rpc_mempool_handle, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
-            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC IVAC [0x%x, 0x%x] (%u bytes)",
+            cpu_dcache_inval_range(0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
+            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
                                   inval_min, inval_max, inval_max - inval_min);
         }
+        // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
+        int ion_fd = ctx->rpc_mempool_handle;
+        if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
     }
 
     // ---- Phase 8: copy-back mirrored results to heap ----
@@ -8414,13 +8555,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         }
     }
 
-    // NOTE: Do NOT rewind bump allocator (monotonic allocation).
-    // Reusing ION offsets across tests causes CPU cache pollution:
-    //   test N writes dst@X -> CPU caches result -> test N+1 reuses offset X
-    //   -> DSP writes new result to DRAM@X -> CPU cache still has old data
-    //   -> no user-space cache inval works on this device -> read returns stale data
-    // With 4GB pool, monotonic allocation supports thousands of test ops.
-    // ctx->rpc_mempool_usage = saved_usage; // DISABLED: no rewind
+    // Free temporary ION regions (mirrors, batch descriptors, repacked weights).
+    // These are only needed during this graph_compute call and can be reused
+    // in the next call. Mark them as free (no tail compaction).
+    for (size_t ri : temp_region_indices) {
+        ctx->ion_regions[ri].in_use = false;
+    }
     t_p8 = ggml_time_us() - t_prev;
     int64_t end_time = ggml_time_us();
     int64_t graph_dur = end_time - begin_time;

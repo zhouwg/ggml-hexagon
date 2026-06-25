@@ -95,6 +95,11 @@ static fp16_weight_cache_entry_t * fp16_weight_cache_lookup(void * src0_data) {
     return NULL;
 }
 
+// Called from entry.c when batch_size == 0xFFFE (cache reset)
+void ggmlop_dsp_fp16_cache_reset(void) {
+    g_fp16_weight_cache_count = 0;
+}
+
 static fp16_weight_cache_entry_t * fp16_weight_cache_insert(void * src0_data, uint32_t fp16_size, int32_t M, int32_t K, int type) {
     if (g_fp16_weight_cache_count >= FP16_WEIGHT_CACHE_MAX_ENTRIES) {
         GGMLHEXAGON_LOG_INFO("FP16 weight cache: table full (%d entries), cannot cache",

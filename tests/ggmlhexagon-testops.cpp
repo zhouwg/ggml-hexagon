@@ -5273,7 +5273,7 @@ int main(int argc, char ** argv) {
     const char * params_filter = nullptr;
 
 #ifdef GGML_USE_HEXAGON
-    int mulmat_algotype = 0;
+    int mulmat_algotype = -1;  // -1 = not specified, use config file value
     int backend_index   = 3;
     for (int i = 1; i < argc; i++) {
         if (0 == strcmp(argv[i], "-a")) {
@@ -5291,7 +5291,9 @@ int main(int argc, char ** argv) {
     if (backend_index < HEXAGON_BACKEND_CDSP) {
         ggml_backend_hexagon_set_cfg(backend_index, HWACCEL_QNN);
     }
-    ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
+    if (mulmat_algotype >= 0) {
+        ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
+    }
 #endif
 
     for (int i = 1; i < argc; i++) {

@@ -7488,7 +7488,6 @@ static inline int32_t hvx_vec_get_i32(HVX_Vector v) {
     return x;
 }
 
-
 // create a vector of floats from a float
 static __attribute__((always_inline)) HVX_Vector create_sfv_from_sf(float value) {
     union ui32f cvt;
@@ -7507,6 +7506,22 @@ static __attribute__((always_inline)) HVX_Vector create_qf32v_from_sf(float valu
 static __attribute__((always_inline)) HVX_Vector convert_qf32v_to_fltv(HVX_Vector vect) {
     HVX_Vector tmp = Q6_Vsf_equals_Vqf32(vect);
     return tmp;
+}
+
+/*
+ * Flush/invalidate DSP cache for a range of non-coherent ION memory.
+ * Must be called after DSP writes (so AP can read) and before DSP reads
+ * (so AP writes are visible). Uses Q6_dccleaninva_A per cache line.
+ */
+void ggmlop_dsp_cache_flush_range(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    /* Align start down to cache line boundary */
+    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        Q6_dccleaninva_A(p);
+    }
 }
 
 static inline HVX_Vector hvx_vec_reduce_max_f32(HVX_Vector in) {
@@ -9906,5 +9921,3 @@ void quantize_row_q8_K_hvx(const float * GGML_RESTRICT x, block_q8_K * GGML_REST
     }
 }
 //end migrate from mulmat.c }
-
-

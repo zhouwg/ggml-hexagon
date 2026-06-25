@@ -4,7 +4,8 @@
 
 // ============================================================
 // SOFT_MAX - Softmax (F32 scalar implementation)
-// Supports: scale, mask (src1, F16 or F32), ALiBi (max_bias)
+// Supports: scale, mask (src1, F16 or F32), ALiBi (max_bias),
+//           sinks (src2, F32, one value per head)
 // op_params[0] = scale (float), op_params[1] = max_bias (float)
 // ============================================================
 
@@ -12,7 +13,8 @@ static void soft_max_row_f32_masked(
         int64_t ne00,
         float * dp, const float * sp,
         const void * mp, int mp_type,
-        float scale, float slope) {
+        float scale, float slope,
+        float sink) {
     // step 1: apply scale and mask, find max
     float max_val = -INFINITY;
     if (mp) {
@@ -39,12 +41,22 @@ static void soft_max_row_f32_masked(
         }
     }
 
+    // sinks: adjust max to include sink value
+    if (!isnan(sink)) {
+        if (sink > max_val) max_val = sink;
+    }
+
     // step 2: exp(x - max) and sum
     float sum = 0.0f;
     for (int64_t i = 0; i < ne00; ++i) {
         float val = expf(dp[i] - max_val);
         dp[i] = val;
         sum += val;
+    }
+
+    // sinks: add exp(sink - max) to sum
+    if (!isnan(sink)) {
+        sum += expf(sink - max_val);
     }
 
     // step 3: normalize
@@ -57,6 +69,7 @@ static void soft_max_row_f32_masked(
 typedef struct {
     const ggml_tensor * src0;
     const ggml_tensor * src1;
+    const ggml_tensor * src2;
     ggml_tensor * dst;
     int64_t start_idx;
     int64_t end_idx;
@@ -69,6 +82,7 @@ static void softmax_thread_func(void * data) {
     softmax_thread_data_t * tdata = (softmax_thread_data_t *) data;
     const ggml_tensor * src0 = tdata->src0;
     const ggml_tensor * src1 = tdata->src1;
+    const ggml_tensor * src2 = tdata->src2;
     ggml_tensor * dst = tdata->dst;
     int64_t start_idx = tdata->start_idx;
     int64_t end_idx = tdata->end_idx;
@@ -91,6 +105,9 @@ static void softmax_thread_func(void * data) {
     size_t nb11 = src1 ? src1->nb[1] : 0;
     size_t nb12 = src1 ? src1->nb[2] : 0;
     size_t nb13 = src1 ? src1->nb[3] : 0;
+
+    // sinks: one F32 value per head (ne02 dimension)
+    const float * sk = src2 ? (const float *)src2->data : NULL;
 
     // ALiBi slope
     uint32_t n_head = ne02;
@@ -121,7 +138,8 @@ static void softmax_thread_func(void * data) {
             slope = (h < n_head_log2) ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1);
         }
 
-        soft_max_row_f32_masked(ne00, dp, sp, mp, src1 ? src1->type : GGML_TYPE_F32, scale, slope);
+        float sink = sk ? sk[i02] : NAN;
+        soft_max_row_f32_masked(ne00, dp, sp, mp, src1 ? src1->type : GGML_TYPE_F32, scale, slope, sink);
     }
 
     if (tdata->synctoken != NULL) {
@@ -132,6 +150,7 @@ static void softmax_thread_func(void * data) {
 static void ggml_compute_forward_soft_max_f32(
         const ggml_tensor * src0,
         const ggml_tensor * src1,
+        const ggml_tensor * src2,
         ggml_tensor * dst) {
 
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
@@ -144,6 +163,9 @@ static void ggml_compute_forward_soft_max_f32(
 
     int64_t ne00 = src0->ne[0];
     int64_t nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
+
+    // sinks: one F32 value per head (ne02 dimension)
+    const float * sk = src2 ? (const float *)src2->data : NULL;
 
     if (ggmlop_get_thread_counts() > 1 && nrows >= ggmlop_get_thread_counts() * 2) {
         int num_threads = ggmlop_get_thread_counts();
@@ -162,6 +184,7 @@ static void ggml_compute_forward_soft_max_f32(
 
             tdata[i].src0 = src0;
             tdata[i].src1 = src1;
+            tdata[i].src2 = src2;
             tdata[i].dst = dst;
             tdata[i].start_idx = idx;
             tdata[i].end_idx = end_idx;
@@ -179,6 +202,7 @@ static void ggml_compute_forward_soft_max_f32(
 
         tdata[num_threads - 1].src0 = src0;
         tdata[num_threads - 1].src1 = src1;
+        tdata[num_threads - 1].src2 = src2;
         tdata[num_threads - 1].dst = dst;
         tdata[num_threads - 1].start_idx = idx;
         tdata[num_threads - 1].end_idx = nrows;
@@ -232,20 +256,21 @@ static void ggml_compute_forward_soft_max_f32(
                         slope = (h < n_head_log2) ? powf(m0, h + 1) : powf(m1, 2*(h - n_head_log2) + 1);
                     }
 
-                    soft_max_row_f32_masked(ne00, dp, sp, mp, src1 ? src1->type : GGML_TYPE_F32, scale, slope);
+                    float sink = sk ? sk[i02] : NAN;
+                    soft_max_row_f32_masked(ne00, dp, sp, mp, src1 ? src1->type : GGML_TYPE_F32, scale, slope, sink);
                 }
             }
         }
     }
 
     int64_t end_time = ggml_time_us();
-    GGMLHEXAGON_LOG_INFO("SOFT_MAX elapse %lld us (ne00=%lld, nrows=%lld, scale=%f, mask=%d)",
+    GGMLHEXAGON_LOG_DEBUG("SOFT_MAX elapse %lld us (ne00=%lld, nrows=%lld, scale=%f, mask=%d, sinks=%d)",
                          (long long)(end_time - start_time),
-                         (long long)ne00, (long long)nrows, scale, src1 ? 1 : 0);
+                         (long long)ne00, (long long)nrows, scale, src1 ? 1 : 0, src2 ? 1 : 0);
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
 }
 
-int ggmlop_dsp_softmax(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+int ggmlop_dsp_softmax(remote_handle64 h, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, ggml_tensor * dst) {
     GGML_UNUSED(h);
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
@@ -256,7 +281,12 @@ int ggmlop_dsp_softmax(remote_handle64 h, const ggml_tensor * src0, const ggml_t
         return AEE_EUNSUPPORTED;
     }
 
-    ggml_compute_forward_soft_max_f32(src0, src1, dst);
+    if (src2 && src2->type != GGML_TYPE_F32) {
+        GGMLHEXAGON_LOG_ERROR("SOFT_MAX: unsupported sinks type src2=%d", src2->type);
+        return AEE_EUNSUPPORTED;
+    }
+
+    ggml_compute_forward_soft_max_f32(src0, src1, src2, dst);
 
     int64_t end_time = ggml_time_us();
     GGMLHEXAGON_LOG_INFO("elapse time of SOFT_MAX is %lld us", (long long)(end_time - begin_time));

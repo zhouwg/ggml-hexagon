@@ -34,25 +34,6 @@ static void * g_ion_cache_base          = NULL;  // DSP VA of cache region start
 static size_t g_ion_cache_size          = 0;     // cache region size in bytes
 static size_t g_ion_cache_offset        = 0;     // monotonic allocation offset within cache
 
-/* Cache line size for Hexagon DSP L2 cache */
-#define DSP_CACHE_LINE_SIZE  128
-
-/*
- * Flush/invalidate DSP cache for a range of non-coherent ION memory.
- * Must be called after DSP writes (so AP can read) and before DSP reads
- * (so AP writes are visible). Uses Q6_dccleaninva_A per cache line.
- */
-void ggmlop_dsp_cache_flush_range(void * addr, size_t size) {
-    if (!addr || size == 0) return;
-    char * p = (char *)addr;
-    char * end = p + size;
-    /* Align start down to cache line boundary */
-    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
-    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
-        Q6_dccleaninva_A(p);
-    }
-}
-
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
@@ -689,7 +670,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             break;
         case GGML_OP_SOFT_MAX:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SOFT_MAX task");
-            ggmlop_dsp_softmax(h, src0, src1, dst);
+            ggmlop_dsp_softmax(h, src0, src1, NULL, dst);
             break;
         case GGML_OP_UNARY:
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_UNARY (SILU) task");
@@ -813,7 +794,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 op_ret = ggmlop_dsp_rope(h, src0_dt, src1_dt, src2_dt, dst_dt);
                 break;
             case GGML_OP_SOFT_MAX:
-                op_ret = ggmlop_dsp_softmax(h, src0_dt, src1_dt, dst_dt);
+                op_ret = ggmlop_dsp_softmax(h, src0_dt, src1_dt, src2_dt, dst_dt);
                 break;
             case GGML_OP_UNARY:
                 op_ret = ggmlop_dsp_silu(h, src0_dt, src1_dt, dst_dt);
@@ -912,6 +893,14 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         return AEE_SUCCESS;
     }
 
+    /* Cache reset mode: batch_size == 0xFFFE, clear FP16 weight cache */
+    if (batch_size == 0xFFFE) {
+        ggmlop_dsp_fp16_cache_reset();
+        g_ion_cache_offset = 0;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE] FP16 weight cache reset");
+        return AEE_SUCCESS;
+    }
+
     /* Normal batch execution */
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
@@ -999,10 +988,9 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Skip for weights (flags==2): read-only, DSP cache retains data */
-        if (src0_dt.flags != 2) {
-            ggmlop_dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
-        }
+         * - Always invalidate, even for weights: ION region reuse means the
+         *   same address may hold different data from a previous allocation */
+        ggmlop_dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
         if (src1_dt_ptr) ggmlop_dsp_cache_flush_range(src1_dt_buf.data, src1_dt_buf.data_len);
         if (src2_dt_ptr) ggmlop_dsp_cache_flush_range(src2_dt_buf.data, src2_dt_buf.data_len);
 
@@ -1023,7 +1011,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             case GGML_OP_ROPE:
                 op_ret = ggmlop_dsp_rope(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
             case GGML_OP_SOFT_MAX:
-                op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+                op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
             case GGML_OP_UNARY:
                 op_ret = ggmlop_dsp_silu(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
             case GGML_OP_SCALE:

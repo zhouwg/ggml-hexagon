@@ -12,101 +12,148 @@ int ggmlop_dsp_cpy(remote_handle64 h, const ggml_tensor * src0, const ggml_tenso
         return 0;
     }
 
-    const int64_t ne0 = dst->ne[0], ne1 = dst->ne[1];
-    const int64_t ne2 = dst->ne[2], ne3 = dst->ne[3];
+    // Element sizes
+    const size_t src_es = (src0->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(uint16_t);
+    const size_t dst_es = (dst->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(uint16_t);
 
-    // Determine element sizes
-    size_t src_elem_size = (src0->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(uint16_t);
-    size_t dst_elem_size = (dst->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(uint16_t);
+    // src0 dimensions and strides (ne00-ne03, nb00-nb03)
+    // dst  dimensions and strides (ne0-ne3,   nb0-nb3)
+    const int64_t ne00 = src0->ne[0], ne01 = src0->ne[1], ne02 = src0->ne[2], ne03 = src0->ne[3];
+    const int64_t ne0  = dst->ne[0],  ne1  = dst->ne[1],  ne2  = dst->ne[2],  ne3  = dst->ne[3];
+    const size_t  nb00 = src0->nb[0], nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
+    const size_t  nb0  = dst->nb[0],  nb1  = dst->nb[1],  nb2  = dst->nb[2],  nb3  = dst->nb[3];
 
-    // Check if both src and dst are row-major contiguous
-    bool src_contig = (src0->nb[0] == src_elem_size &&
-                       src0->nb[1] == src0->ne[0] * src_elem_size &&
-                       src0->nb[2] >= src0->ne[1] * src0->nb[1] &&
-                       src0->nb[3] >= src0->ne[2] * src0->nb[2]);
-    bool dst_contig = (dst->nb[0] == dst_elem_size &&
-                       dst->nb[1] == dst->ne[0] * dst_elem_size &&
-                       dst->nb[2] >= dst->ne[1] * dst->nb[1] &&
-                       dst->nb[3] >= dst->ne[2] * dst->nb[2]);
-
-    if (src0->type == dst->type && src_contig && dst_contig) {
-        // Fast path: both contiguous, same type -> raw byte memcpy
-        memcpy(dst->data, src0->data, n * src_elem_size);
-    } else if (!src_contig || !dst_contig) {
-        // Slow path: one or both are non-contiguous; use stride-based element copy
-        if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
-            uint16_t * raw_dst = (uint16_t *)dst->data;
-            uint16_t * raw_src = (uint16_t *)src0->data;
-            for (int64_t i = 0; i < n; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
-
-                int64_t soff = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
-                int64_t doff = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
-                raw_dst[doff >> 1] = raw_src[soff >> 1];
-            }
-        } else if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
-            float * raw_dst = (float *)dst->data;
-            float * raw_src = (float *)src0->data;
-            for (int64_t i = 0; i < n; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
-
-                int64_t soff = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
-                int64_t doff = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
-                raw_dst[doff >> 2] = raw_src[soff >> 2];
-            }
-        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-            float * raw_dst = (float *)dst->data;
-            uint16_t * raw_src = (uint16_t *)src0->data;
-            for (int64_t i = 0; i < n; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
-
-                int64_t soff = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
-                int64_t doff = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
-                raw_dst[doff >> 2] = ggml_compute_fp16_to_fp32(raw_src[soff >> 1]);
-            }
-        } else if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-            uint16_t * raw_dst = (uint16_t *)dst->data;
-            float * raw_src = (float *)src0->data;
-            for (int64_t i = 0; i < n; ++i) {
-                int64_t i0 = i % ne0;
-                int64_t r  = i / ne0;
-                int64_t i1 = r % ne1;
-                int64_t r2 = r / ne1;
-                int64_t i2 = r2 % ne2;
-                int64_t i3 = r2 / ne2;
-
-                int64_t soff = i0*src0->nb[0] + i1*src0->nb[1] + i2*src0->nb[2] + i3*src0->nb[3];
-                int64_t doff = i0*dst->nb[0]   + i1*dst->nb[1]   + i2*dst->nb[2]   + i3*dst->nb[3];
-                raw_dst[doff >> 1] = ggml_compute_fp32_to_fp16(raw_src[soff >> 2]);
+    // Fast path: same type, same row count, contiguous inner dim
+    if (src0->type == dst->type &&
+        ne00 == ne0 &&
+        nb00 == src_es && nb0 == dst_es) {
+        const size_t rs = ne00 * nb00;  // row size in bytes
+        for (int64_t i03 = 0; i03 < ne03; i03++) {
+            for (int64_t i02 = 0; i02 < ne02; i02++) {
+                for (int64_t i01 = 0; i01 < ne01; i01++) {
+                    memcpy(
+                        (char *)dst->data + i01*nb1 + i02*nb2 + i03*nb3,
+                        (char *)src0->data + i01*nb01 + i02*nb02 + i03*nb03,
+                        rs);
+                }
             }
         }
-    } else {
-        // Contiguous but different types: convert via element loop
-        if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
-            uint16_t * raw_src = (uint16_t *)src0->data;
-            float * raw_dst = (float *)dst->data;
-            for (int64_t i = 0; i < n; ++i)
-                raw_dst[i] = ggml_compute_fp16_to_fp32(raw_src[i]);
+    }
+    // dst contiguous: iterate src0 dimensions, linear write to dst
+    else if (dst_es == (size_t)nb0 && ne1*ne0 == (int64_t)(nb1/dst_es) &&
+             ne2*ne1*ne0 == (int64_t)(nb2/dst_es)) {
+        // dst is fully contiguous (f32 or f16)
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            float * dst_ptr = (float *)dst->data;
+            size_t id = 0;
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const float * s = (const float *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            dst_ptr[id++] = *s;
+                        }
+                    }
+                }
+            }
+        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
+            uint16_t * dst_ptr = (uint16_t *)dst->data;
+            size_t id = 0;
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const uint16_t * s = (const uint16_t *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            dst_ptr[id++] = *s;
+                        }
+                    }
+                }
+            }
+        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
+            float * dst_ptr = (float *)dst->data;
+            size_t id = 0;
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const uint16_t * s = (const uint16_t *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            dst_ptr[id++] = ggml_compute_fp16_to_fp32(*s);
+                        }
+                    }
+                }
+            }
         } else if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
-            float * raw_src = (float *)src0->data;
-            uint16_t * raw_dst = (uint16_t *)dst->data;
-            for (int64_t i = 0; i < n; ++i)
-                raw_dst[i] = ggml_compute_fp32_to_fp16(raw_src[i]);
+            uint16_t * dst_ptr = (uint16_t *)dst->data;
+            size_t id = 0;
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const float * s = (const float *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            dst_ptr[id++] = ggml_compute_fp32_to_fp16(*s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // General path: both non-contiguous, iterate src0 dims, compute dst offset via carry
+    else {
+        // dst counters (track position in dst dimensions)
+        int64_t i10 = 0, i11 = 0, i12 = 0, i13 = 0;
+
+        if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const float * s = (const float *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            float * d = (float *)((char *)dst->data + i10*nb0 + i11*nb1 + i12*nb2 + i13*nb3);
+                            *d = *s;
+                            if (++i10 == ne0) { i10 = 0; if (++i11 == ne1) { i11 = 0; if (++i12 == ne2) { i12 = 0; ++i13; } } }
+                        }
+                    }
+                }
+            }
+        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F16) {
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const uint16_t * s = (const uint16_t *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            uint16_t * d = (uint16_t *)((char *)dst->data + i10*nb0 + i11*nb1 + i12*nb2 + i13*nb3);
+                            *d = *s;
+                            if (++i10 == ne0) { i10 = 0; if (++i11 == ne1) { i11 = 0; if (++i12 == ne2) { i12 = 0; ++i13; } } }
+                        }
+                    }
+                }
+            }
+        } else if (src0->type == GGML_TYPE_F16 && dst->type == GGML_TYPE_F32) {
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const uint16_t * s = (const uint16_t *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            float * d = (float *)((char *)dst->data + i10*nb0 + i11*nb1 + i12*nb2 + i13*nb3);
+                            *d = ggml_compute_fp16_to_fp32(*s);
+                            if (++i10 == ne0) { i10 = 0; if (++i11 == ne1) { i11 = 0; if (++i12 == ne2) { i12 = 0; ++i13; } } }
+                        }
+                    }
+                }
+            }
+        } else if (src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F16) {
+            for (int64_t i03 = 0; i03 < ne03; i03++) {
+                for (int64_t i02 = 0; i02 < ne02; i02++) {
+                    for (int64_t i01 = 0; i01 < ne01; i01++) {
+                        for (int64_t i00 = 0; i00 < ne00; i00++) {
+                            const float * s = (const float *)((const char *)src0->data + i00*nb00 + i01*nb01 + i02*nb02 + i03*nb03);
+                            uint16_t * d = (uint16_t *)((char *)dst->data + i10*nb0 + i11*nb1 + i12*nb2 + i13*nb3);
+                            *d = ggml_compute_fp32_to_fp16(*s);
+                            if (++i10 == ne0) { i10 = 0; if (++i11 == ne1) { i11 = 0; if (++i12 == ne2) { i12 = 0; ++i13; } } }
+                        }
+                    }
+                }
+            }
         }
     }
 

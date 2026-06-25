@@ -29,12 +29,15 @@ int ggmlop_dsp_diag_mask_inf(remote_handle64 h, const dsptensor* src0, const dsp
         memcpy(pd, ps, (size_t)(ne0 * ne1 * ne2 * ne3) * sizeof(float));
     }
 
-    // Mask upper triangular (above diagonal offset by n_past)
-    const int64_t n0 = ne0 >= ne1 ? ne1 : ne0;
-    for (int64_t i2 = 0; i2 < ne2 * ne3; ++i2) {
-        for (int64_t i1 = n_past; i1 < n0; ++i1) {
-            for (int64_t i0 = i1 + 1; i0 < ne0; ++i0) {
-                pd[i2 * ne0 * ne1 + i1 * ne0 + i0] = -INFINITY;
+    // Mask upper triangular: for row j, mask column i if i > n_past + j
+    // This matches the reference implementation in ggml-cpu/ops.cpp
+    const int64_t nz = ne2 * ne3;
+    for (int64_t k = 0; k < nz; ++k) {
+        for (int64_t j = 0; j < ne1; ++j) {
+            for (int64_t i = n_past; i < ne0; ++i) {
+                if (i > n_past + j) {
+                    pd[k * ne0 * ne1 + j * ne0 + i] = -INFINITY;
+                }
             }
         }
     }

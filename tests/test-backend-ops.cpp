@@ -9278,6 +9278,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32,12288, 128, 1536, {1, 1}, {1, 1})); // FFN gate
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 1536, 128,12288, {1, 1}, {1, 1})); // FFN down
 
+    //ref:Qualcomm's case, https://github.com/ggml-org/llama.cpp/pull/24954/changes#diff-2749fdb8974ec96afa18444a9d546409318b0a862709139b677eee468c479578
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_MXFP4, GGML_TYPE_F32, 2880, 32, 2880, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_MXFP4, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q4_0, GGML_TYPE_F32, 32, 2, false, 2880, 32, 2880));
+
     //end jz'case
     return test_cases;
 }
@@ -9956,7 +9963,7 @@ int main(int argc, char ** argv) {
     int parallel_workers = 1;
 
 #ifdef GGML_USE_HEXAGON
-    int mulmat_algotype = 0;
+    int mulmat_algotype = -1;  // -1 = not specified, use config file value
     int backend_index   = 3;
     for (int i = 1; i < argc; i++) {
         if (0 == strcmp(argv[i], "-a")) {
@@ -9974,7 +9981,9 @@ int main(int argc, char ** argv) {
     if (backend_index < HEXAGON_BACKEND_CDSP) {
         ggml_backend_hexagon_set_cfg(backend_index, HWACCEL_QNN);
     }
-    ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
+    if (mulmat_algotype >= 0) {
+        ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
+    }
 #endif
 
     for (int i = 1; i < argc; i++) {
