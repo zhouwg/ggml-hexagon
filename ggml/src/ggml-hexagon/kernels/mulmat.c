@@ -2258,6 +2258,120 @@ static void parallel_output_writeback(float *dst, const __fp16 *src,
     worker_pool_synctoken_wait(&synctoken);
 }
 
+// HMX weight dequantization: common params for all src0 types
+struct hmx_weight_dequant_params {
+    __fp16     *vtcm_weight;       // destination: FP16 tiles in VTCM
+    const void *weight_chunk;     // source: weight data in DDR
+    float      *vtcm_fp32_buf;    // VTCM FP32 buffer (F32 weight DMA target)
+    dma_queue  *dma;              // DMA queue (F32 weight async transfer)
+    int         M_cols;           // number of weight columns in this chunk
+    int         K;                // inner dimension
+    size_t      row_stride;       // src0 row stride in bytes
+};
+
+typedef void (*hmx_weight_dequant_fn)(const struct hmx_weight_dequant_params *p);
+
+struct hmx_weight_traits {
+    enum ggml_type type;
+    hmx_weight_dequant_fn dequant;       // generic implementation
+    hmx_weight_dequant_fn dequant_hvx;   // HVX implementation (NULL if only HVX)
+};
+
+static void wrap_dequant_f16(const struct hmx_weight_dequant_params *p) {
+    transfer_weight_chunk_f16_to_f16_tiles(p->vtcm_weight, (const __fp16 *)p->weight_chunk,
+                                           p->M_cols, p->K, p->row_stride / sizeof(__fp16));
+}
+static void wrap_dequant_f16_hvx(const struct hmx_weight_dequant_params *p) {
+    transfer_weight_chunk_f16_to_f16_tiles_hvx(p->vtcm_weight, (const __fp16 *)p->weight_chunk,
+                                                p->M_cols, p->K, p->row_stride / sizeof(__fp16));
+}
+
+static void wrap_dequant_f32(const struct hmx_weight_dequant_params *p) {
+    dma_queue_push_ddr_to_vtcm(p->dma,
+        dma_make_ptr(p->vtcm_fp32_buf, (const float *)p->weight_chunk),
+        p->K * sizeof(float), p->row_stride, p->M_cols);
+    dma_queue_pop(p->dma);
+    convert_weight_f32_to_fp16_tiles(p->vtcm_weight, p->vtcm_fp32_buf, p->M_cols, p->K, p->K);
+}
+static void wrap_dequant_f32_hvx(const struct hmx_weight_dequant_params *p) {
+    dma_queue_push_ddr_to_vtcm(p->dma,
+        dma_make_ptr(p->vtcm_fp32_buf, (const float *)p->weight_chunk),
+        p->K * sizeof(float), p->row_stride, p->M_cols);
+    dma_queue_pop(p->dma);
+    convert_weight_f32_to_fp16_tiles_hvx(p->vtcm_weight, p->vtcm_fp32_buf, p->M_cols, p->K, p->K);
+}
+
+static void wrap_dequant_bf16(const struct hmx_weight_dequant_params *p) {
+    convert_weight_bf16_to_fp16_tiles(p->vtcm_weight, (const ggml_bf16_t *)p->weight_chunk,
+                                      p->M_cols, p->K, p->row_stride / sizeof(ggml_bf16_t));
+}
+static void wrap_dequant_bf16_hvx(const struct hmx_weight_dequant_params *p) {
+    convert_weight_bf16_to_fp16_tiles_hvx(p->vtcm_weight, (const ggml_bf16_t *)p->weight_chunk,
+                                           p->M_cols, p->K, p->row_stride / sizeof(ggml_bf16_t));
+}
+
+static void wrap_dequant_q4_0(const struct hmx_weight_dequant_params *p) {
+    dequantize_q4_0_to_f16_tiles(p->vtcm_weight, (const block_q4_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_q4_0_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_q4_0_to_f16_tiles_hvx(p->vtcm_weight, (const block_q4_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+
+static void wrap_dequant_q4_1(const struct hmx_weight_dequant_params *p) {
+    dequantize_q4_1_to_f16_tiles(p->vtcm_weight, (const block_q4_1 *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_q4_1_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_q4_1_to_f16_tiles_hvx(p->vtcm_weight, (const block_q4_1 *)p->weight_chunk, p->M_cols, p->K);
+}
+
+static void wrap_dequant_q5_0(const struct hmx_weight_dequant_params *p) {
+    dequantize_q5_0_to_f16_tiles(p->vtcm_weight, (const block_q5_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_q5_0_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_q5_0_to_f16_tiles_hvx(p->vtcm_weight, (const block_q5_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+
+static void wrap_dequant_q8_0(const struct hmx_weight_dequant_params *p) {
+    dequantize_q8_0_to_f16_tiles(p->vtcm_weight, (const block_q8_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_q8_0_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_q8_0_to_f16_tiles_hvx(p->vtcm_weight, (const block_q8_0 *)p->weight_chunk, p->M_cols, p->K);
+}
+
+static void wrap_dequant_iq4_nl(const struct hmx_weight_dequant_params *p) {
+    dequantize_iq4_nl_to_f16_tiles(p->vtcm_weight, (const block_iq4_nl *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_iq4_nl_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_iq4_nl_to_f16_tiles_hvx(p->vtcm_weight, (const block_iq4_nl *)p->weight_chunk, p->M_cols, p->K);
+}
+
+static void wrap_dequant_x4x2_q4_0_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_x4x2_q4_0_to_f16_tiles_hvx(p->vtcm_weight, (const uint8_t *)p->weight_chunk,
+                                            p->M_cols, p->K, p->row_stride);
+}
+
+static const struct hmx_weight_traits hmx_weight_traits_table[] = {
+    { GGML_TYPE_F16,      wrap_dequant_f16,          wrap_dequant_f16_hvx },
+    { GGML_TYPE_F32,      wrap_dequant_f32,          wrap_dequant_f32_hvx },
+    { GGML_TYPE_BF16,     wrap_dequant_bf16,         wrap_dequant_bf16_hvx },
+    { GGML_TYPE_Q4_0,     wrap_dequant_q4_0,         wrap_dequant_q4_0_hvx },
+    { GGML_TYPE_Q4_1,     wrap_dequant_q4_1,         wrap_dequant_q4_1_hvx },
+    { GGML_TYPE_Q5_0,     wrap_dequant_q5_0,         wrap_dequant_q5_0_hvx },
+    { GGML_TYPE_Q8_0,     wrap_dequant_q8_0,         wrap_dequant_q8_0_hvx },
+    { GGML_TYPE_IQ4_NL,   wrap_dequant_iq4_nl,       wrap_dequant_iq4_nl_hvx },
+    { GGML_TYPE_Q4_0x4x2, NULL,                      wrap_dequant_x4x2_q4_0_hvx },
+};
+#define HMX_WEIGHT_TRAITS_TABLE_SIZE (sizeof(hmx_weight_traits_table) / sizeof(hmx_weight_traits_table[0]))
+
+static const struct hmx_weight_traits * hmx_weight_traits_lookup(enum ggml_type type) {
+    for (int i = 0; i < (int)HMX_WEIGHT_TRAITS_TABLE_SIZE; i++) {
+        if (hmx_weight_traits_table[i].type == type) {
+            return &hmx_weight_traits_table[i];
+        }
+    }
+    return NULL;
+}
+
 int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
     int hmx_locked = 0;
@@ -2285,11 +2399,8 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
     // src0 (weight) types supported by HMX path
     // F16 weight temporarily disabled in HMX path for debugging
-    // Type 200 = Q4_0x4x2 (AP-side repacked format for efficient HVX dequantization)
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_BF16 &&
-        src0->type != GGML_TYPE_Q4_0 && src0->type != GGML_TYPE_Q4_1 && src0->type != GGML_TYPE_Q5_0 &&
-        src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_IQ4_NL &&
-        src0->type != GGML_TYPE_Q4_0x4x2) {
+    const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
+    if (wt == NULL || src0->type == GGML_TYPE_F16) {
         if (hmx_locked) {
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
@@ -2465,11 +2576,16 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
     const size_t n_dot_tiles = K / HMX_FP16_TILE_N_COLS;
 
-    const bool src0_is_f16 = (src0->type == GGML_TYPE_F16);  // weight type
     const bool src1_is_f16 = (src1->type == GGML_TYPE_F16);  // activation type
 
     const size_t src0_row_stride = src0->nb[1];  // weight stride
     const size_t src1_row_stride = src1->nb[1];  // activation stride
+
+    // Resolve weight dequantization function from lookup table
+    const int use_hvx = ggml_get_dsp_use_hvx();
+    const hmx_weight_dequant_fn weight_dequant_fn =
+        (use_hvx && wt->dequant_hvx) ? wt->dequant_hvx :
+        (wt->dequant ? wt->dequant : wt->dequant_hvx);
 
     // Create DMA queue for async data transfers
     dma_queue *dma = dma_queue_create(16);
@@ -2480,7 +2596,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
     // FP16 weight cache: lookup by src0->data pointer (stable ION address)
     const int cache_enabled = src0->op_params[0];
-    const int use_hvx = ggml_get_dsp_use_hvx();
     fp16_weight_cache_entry_t * cache_entry = NULL;
     int cache_is_hit = 0;
 
@@ -2510,76 +2625,17 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             // ION cache is in DSP L2 cache from previous write, no invalidate needed
             memcpy(vtcm_weight, (uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, chunk_cache_size);
         } else {
-            // Cache miss: convert weight chunk (src0) to fp16 tiles using interleaved format
-            if (src0_is_f16) {
-                const __fp16 *weight_chunk = (const __fp16 *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    transfer_weight_chunk_f16_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
-                } else {
-                    transfer_weight_chunk_f16_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(__fp16));
-                }
-            } else if (src0->type == GGML_TYPE_F32) {
-                const float *weight_chunk = (const float *)((const char *)src0->data + mc * src0_row_stride);
-
-                // DMA async: push weight fp32 rows from DDR to VTCM
-                dma_queue_push_ddr_to_vtcm(dma,
-                    dma_make_ptr(vtcm_weight_fp32_buf, weight_chunk),
-                    K * sizeof(float), src0_row_stride, M_cols);
-                dma_queue_pop(dma);  // wait for DMA completion
-
-                // Convert from VTCM fp32 buffer to fp16 tiles (interleaved format)
-                if (use_hvx) {
-                    convert_weight_f32_to_fp16_tiles_hvx(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
-                } else {
-                    convert_weight_f32_to_fp16_tiles(vtcm_weight, vtcm_weight_fp32_buf, M_cols, K, K);
-                }
-            } else if (src0->type == GGML_TYPE_BF16) {
-                const ggml_bf16_t *weight_chunk = (const ggml_bf16_t *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    convert_weight_bf16_to_fp16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
-                } else {
-                    convert_weight_bf16_to_fp16_tiles(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride / sizeof(ggml_bf16_t));
-                }
-            } else if (src0->type == GGML_TYPE_Q4_0) {
-                const block_q4_0 *weight_chunk = (const block_q4_0 *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    dequantize_q4_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-                } else {
-                    dequantize_q4_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-                }
-            } else if (src0->type == GGML_TYPE_Q4_1) {
-                const block_q4_1 *weight_chunk = (const block_q4_1 *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    dequantize_q4_1_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-                } else {
-                    dequantize_q4_1_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-                }
-            } else if (src0->type == GGML_TYPE_Q5_0) {
-                const block_q5_0 *weight_chunk = (const block_q5_0 *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    dequantize_q5_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-                } else {
-                    dequantize_q5_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-                }
-            } else if (src0->type == GGML_TYPE_Q8_0) {
-                const block_q8_0 *weight_chunk = (const block_q8_0 *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    dequantize_q8_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-                } else {
-                    dequantize_q8_0_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-                }
-            } else if (src0->type == GGML_TYPE_IQ4_NL) {
-                const block_iq4_nl *weight_chunk = (const block_iq4_nl *)((const char *)src0->data + mc * src0_row_stride);
-                if (use_hvx) {
-                    dequantize_iq4_nl_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K);
-                } else {
-                    dequantize_iq4_nl_to_f16_tiles(vtcm_weight, weight_chunk, M_cols, K);
-                }
-            } else if (src0->type == GGML_TYPE_Q4_0x4x2) {
-                // Q4_0x4x2: AP-side repacked format for efficient HVX dequantization
-                const uint8_t *weight_chunk = (const uint8_t *)((const char *)src0->data + mc * src0_row_stride);
-                dequantize_x4x2_q4_0_to_f16_tiles_hvx(vtcm_weight, weight_chunk, M_cols, K, src0_row_stride);
-            }
+            // Cache miss: convert weight chunk (src0) to fp16 tiles via lookup table dispatch
+            struct hmx_weight_dequant_params wparams = {
+                .vtcm_weight   = vtcm_weight,
+                .weight_chunk  = (const char *)src0->data + mc * src0_row_stride,
+                .vtcm_fp32_buf = vtcm_weight_fp32_buf,
+                .dma           = dma,
+                .M_cols        = (int)M_cols,
+                .K             = K,
+                .row_stride    = src0_row_stride,
+            };
+            weight_dequant_fn(&wparams);
 
             // Write converted FP16 tiles to ION cache region
             if (cache_enabled && !cache_is_hit && !cache_entry) {
@@ -2979,32 +3035,62 @@ fallback:
     }
 }
 
+// mulmat dispatch table: maps algotype to implementation function + description
+typedef int (*mulmat_fn_t)(remote_handle64, const struct dsptensor *, const struct dsptensor *, dsptensor *);
+
+struct mulmat_dispatch_entry {
+    int          algotype;
+    mulmat_fn_t  fn;
+    const char * desc;
+    int          log_use_hvx;
+};
+
+static const struct mulmat_dispatch_entry mulmat_dispatch_table[] = {
+    { 30, ggmlop_dsp_mulmat_hmx,              "HMX x4x2 mode", 1 },
+    { 32, ggmlop_dsp_mulmat_hmx,              "HMX mode",      1 },
+    { 31, ggmlop_dsp_mulmat_sgemm,            "sgemm mode",    0 },
+    { 33, ggmlop_dsp_mulmat_multithread_vtcm, "MT_VTCM mode",  0 },
+};
+#define MULMAT_DISPATCH_TABLE_SIZE (sizeof(mulmat_dispatch_table) / sizeof(mulmat_dispatch_table[0]))
+
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
-    int  ret = 0;
     char tempbuf[256];
     int  mulmat_algo = ggmlop_get_mulmat_algotype();
     ggml_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
     int64_t begin_time = ggml_time_us();
-    if (mulmat_algo == 30) {
-        GGMLHEXAGON_LOG_INFO("mulmat using HMX x4x2 mode(ggml_dsp_use_hvx=%d)", ggml_get_dsp_use_hvx());
-        // algotype=30: AP side repacks Q4_0 -> x4x2 (type=200), DSP uses same HMX path
-        ret = ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
-    } else if (mulmat_algo == 32) {
-        GGMLHEXAGON_LOG_INFO("mulmat using HMX mode(ggml_dsp_use_hvx=%d)", ggml_get_dsp_use_hvx());
-        ret = ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
-    } else if (mulmat_algo == 31) {
-        GGMLHEXAGON_LOG_INFO("mulmat using sgemm mode");
-        ret = ggmlop_dsp_mulmat_sgemm(h, src0, src1, dst);
-    } else if (mulmat_algo == 33) {
-        GGMLHEXAGON_LOG_INFO("mulmat using MT_VTCM mode");
-        ret= ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
-    } else if (ggmlop_get_thread_counts() > 1) {
-        GGMLHEXAGON_LOG_INFO("mulmat using MT_HVX mode");
-        ret= ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
-    } else {
-        GGMLHEXAGON_LOG_INFO("mulmat using singlethread mode");
-        ret = ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
+
+    mulmat_fn_t fn = NULL;
+    const char * desc = NULL;
+    int log_use_hvx = 0;
+
+    for (int i = 0; i < (int)MULMAT_DISPATCH_TABLE_SIZE; i++) {
+        if (mulmat_dispatch_table[i].algotype == mulmat_algo) {
+            fn = mulmat_dispatch_table[i].fn;
+            desc = mulmat_dispatch_table[i].desc;
+            log_use_hvx = mulmat_dispatch_table[i].log_use_hvx;
+            break;
+        }
     }
+
+    // algotype=0 (default): dispatch based on thread count
+    if (fn == NULL) {
+        if (ggmlop_get_thread_counts() > 1) {
+            fn = ggmlop_dsp_mulmat_multithread;
+            desc = "MT_HVX mode";
+        } else {
+            fn = ggmlop_dsp_mulmat_singlethread;
+            desc = "singlethread mode";
+        }
+    }
+
+    if (log_use_hvx) {
+        GGMLHEXAGON_LOG_INFO("mulmat using %s(ggml_dsp_use_hvx=%d)", desc, ggml_get_dsp_use_hvx());
+    } else {
+        GGMLHEXAGON_LOG_INFO("mulmat using %s", desc);
+    }
+
+    int ret = fn(h, src0, src1, dst);
+
     int64_t end_time = ggml_time_us();
     GGMLHEXAGON_LOG_INFO("elapse time of %s is %lld us", tempbuf, (long long)(end_time - begin_time));
     GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
