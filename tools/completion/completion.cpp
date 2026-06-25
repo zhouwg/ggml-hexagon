@@ -16,10 +16,6 @@
 #include <string>
 #include <vector>
 
-#ifdef GGML_USE_HEXAGON
-#include "ggml-hexagon.h"
-#endif
-
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <signal.h>
 #include <unistd.h>
@@ -98,18 +94,6 @@ int llama_completion(int argc, char ** argv) {
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMPLETION, print_usage)) {
         return 1;
     }
-
-#ifdef GGML_USE_HEXAGON
-    {
-        int backend = params.main_gpu;
-        if (backend >= HEXAGON_BACKEND_CDSP) {
-            ggml_backend_hexagon_set_cfg(backend, HWACCEL_CDSP);
-        }
-        if (backend < HEXAGON_BACKEND_CDSP) {
-            ggml_backend_hexagon_set_cfg(backend, HWACCEL_QNN);
-        }
-    }
-#endif
 
     auto & sparams = params.sampling;
 
