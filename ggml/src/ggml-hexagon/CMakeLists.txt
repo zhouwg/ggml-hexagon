@@ -1,134 +1,115 @@
-project(ggml-hexagon)
-message(STATUS "Using HEXAGON backend")
-message("CMAKE_SYSTEM_NAME : ${CMAKE_SYSTEM_NAME}")
+file(TO_CMAKE_PATH "${HEXAGON_SDK_ROOT}"   HEXAGON_SDK_ROOT)
+file(TO_CMAKE_PATH "${HEXAGON_TOOLS_ROOT}" HEXAGON_TOOLS_ROOT)
 
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-if(NOT DEFINED QNN_SDK_PATH)
-    message(FATAL_ERROR "QNN_SDK_PATH not defined")
+if (NOT IS_DIRECTORY "${HEXAGON_SDK_ROOT}")
+    message(FATAL_ERROR "Make sure HEXAGON_SDK_ROOT point to the correct Hexagon SDK installation.")
 endif()
 
-if(NOT DEFINED HEXAGON_SDK_PATH)
-    message(FATAL_ERROR "HEXAGON_SDK_PATH not defined")
-endif()
-
-message("QNN_SDK_PATH    : ${QNN_SDK_PATH}")
-message("HEXAGON_SDK_PATH: ${HEXAGON_SDK_PATH}")
-message("HTP_ARCH_VERSION: ${HTP_ARCH_VERSION}")
-
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(DEBUG_FLAG "-DDEBUG -Wall")
-    message("Debug mode:${DEBUG_FLAG}")
-else()
-    set(DEBUG_FLAG "-DNDEBUG -Wall")
-#manually disable all verbose logs in ggml-hexagon/CMakeLists.txt to
-#make compare NPU performance through llama-bench more clear
-#set(DEBUG_FLAG "-DNDEBUG -Wall -DDISABLE_ALL_LOG")
-    message("Release mode:${DEBUG_FLAG}")
-endif()
-
-#v68 --- Snapdragon 888
-#v69 --- Snapdragon 8 Gen1
-#v73 --- Snapdragon 8 Gen2
-#v75 --- Snapdragon 8 Gen3
-#v79 --- Snapdragon 8 Elite
-if(NOT DEFINED HTP_ARCH_VERSION)
-    message(FATAL_ERROR "HTP_ARCH_VERSION not defined, valid htp arch: v68,v69,v73,v75,v79")
-endif()
-
-#check whether user's specified htp arch is valid
-set(CHECK_HTP_ARCH "WRONG")
-foreach (feat v68 v69 v73 v75 v79)
-    if (${feat} STREQUAL ${HTP_ARCH_VERSION})
-        set(CHECK_HTP_ARCH "GOOD")
+if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
+    message("Try to read HEXAGON_TOOLS_ROOT from hexagon_sdk.json")
+    file(READ "${HEXAGON_SDK_ROOT}/hexagon_sdk.json" HEXAGON_SDK_CONFIG_PATH)
+    string(JSON HEXAGON_TOOLS_PATH GET ${HEXAGON_SDK_CONFIG_PATH} "root" "tools" "info" 0 "path")
+    message("Found HEXAGON_TOOLS_PATH: ${HEXAGON_TOOLS_PATH}")
+    set(HEXAGON_TOOLS_ROOT "${HEXAGON_SDK_ROOT}/${HEXAGON_TOOLS_PATH}")
+    file(TO_CMAKE_PATH "${HEXAGON_TOOLS_ROOT}" HEXAGON_TOOLS_ROOT)
+    if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
+        message(FATAL_ERROR "Make sure HEXAGON_TOOLS_ROOT point to the correct Hexagon SDK installation.")
     endif()
-endforeach()
-if (${CHECK_HTP_ARCH} STREQUAL "WRONG")
-    message(FATAL_ERROR "ggml-hexagon backend only support htp arch v68,v69,v73,v75,v79")
 endif()
 
-#check optimization flags
-set(OPT_FLAG " ")
-if (${HTP_ARCH_VERSION} STREQUAL "v75" OR ${HTP_ARCH_VERSION} STREQUAL "v79")
-    #works fine on Snapdragon 8Gen3&8Elite with 1.5x - 3x performance gains with the default ggml backend
-    set(OPT_FLAG " -O3 -march=armv8.7-a+dotprod+fp16+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -ffp-model=fast -fno-finite-math-only")
-endif()
-message("OPT_FLAG:${OPT_FLAG}")
+message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Android")
-    find_library(LOG_LIB log)
+include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
+include(ExternalProject)
 
-    add_library(cdsprpc
-        SHARED
-        IMPORTED)
-    set_target_properties(cdsprpc
-        PROPERTIES
-        IMPORTED_LOCATION
-        ${HEXAGON_SDK_PATH}/ipc/fastrpc/remote/ship/android_aarch64/libcdsprpc.so)
+option(GGML_HEXAGON_HTP_DEBUG  "ggml-hexagon: enable HTP debug output" OFF)
+option(GGML_HEXAGON_FA_EXP2_HF "ggml-hexagon: use FP16 exp2 polynomial in FA softmax instead of F32 exp round-trip" OFF)
+set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
 
-    set(QNN_LINK_LIBRARIES ${LOG_LIB} cdsprpc)
-    set(QNN_DEFAULT_LIB_SEARCH_PATH "/data/local/tmp/" CACHE STRING "customized library search path for QNN backend")
+add_library(htp_iface OBJECT
+    ${CMAKE_CURRENT_BINARY_DIR}/htp_iface_stub.c)
 
-    include_directories(${HEXAGON_SDK_PATH}/incs)
-    include_directories(${HEXAGON_SDK_PATH}/incs/stddef)
-    include_directories(${HEXAGON_SDK_PATH}/ipc/fastrpc/incs)
-    include_directories(${HEXAGON_SDK_PATH}/ipc/fastrpc/rpcmem/inc)
-    include_directories(${HEXAGON_SDK_PATH}/ipc/fastrpc/remote/ship/android_Debug_aarch64)
-    include_directories(${HEXAGON_SDK_PATH}/utils/examples)
-    include_directories(${HEXAGON_SDK_PATH}/ipc/fastrpc/rtld/ship/android_aarch64)
-    include_directories(${HEXAGON_SDK_PATH}/libs/atomic/inc)
-    include_directories(${HEXAGON_SDK_PATH}/libs/atomic/android_Debug_aarch64/ship)
-    include_directories(${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/)
-    include_directories(${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/kernels/)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(QNN_DEFAULT_LIB_SEARCH_PATH "C:\\" CACHE STRING "customized library search path for QNN backend")
+set_target_properties(htp_iface PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(htp_iface PUBLIC
+    ${HEXAGON_SDK_ROOT}/incs
+    ${HEXAGON_SDK_ROOT}/incs/stddef
+    ${HEXAGON_SDK_ROOT}/utils/examples
+    ${CMAKE_CURRENT_SOURCE_DIR}/htp
+    ${CMAKE_CURRENT_BINARY_DIR})
+
+build_idl(htp/htp_iface.idl htp_iface)
+
+if (CMAKE_SYSTEM_NAME MATCHES Android)
+    target_link_options(htp_iface PUBLIC -llog -ldl)
+elseif (CMAKE_SYSTEM_NAME MATCHES Windows)
+    target_precompile_headers(htp_iface PUBLIC <sal.h>)
 else()
-    message(FATAL_ERROR "ggml-hexagon now only available on Android and Windows(Windows on ARM)")
+    target_link_options(htp_iface PUBLIC -ldl)
 endif()
 
-set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
+set(TARGET_NAME ggml-hexagon)
+ggml_add_backend_library(${TARGET_NAME}
+    ggml-hexagon.cpp
+    htp-drv.cpp
+    htp-drv.h
+    libdl.h
+    ../../include/ggml-hexagon.h)
 
-#file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/*.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/stub.c")
-file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/ggml-hexagon.cpp" "${CMAKE_CURRENT_LIST_DIR}/htp-drv.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/stub.c")
-ggml_add_backend_library(ggml-hexagon ${HEXAGON_SOURCES})
+target_link_libraries(${TARGET_NAME} PRIVATE htp_iface)
+target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/htp ${CMAKE_CURRENT_BINARY_DIR})
 
-target_include_directories(ggml-hexagon PRIVATE ${QNN_SDK_PATH}/include/QNN ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR})
-target_link_libraries(ggml-hexagon PRIVATE ${QNN_LINK_LIBRARIES})
-
-string(REGEX REPLACE "/$" "" QNN_DEFAULT_LIB_SEARCH_PATH "${QNN_DEFAULT_LIB_SEARCH_PATH}")
-target_compile_definitions(ggml-hexagon PRIVATE QNN_DEFAULT_LIB_SEARCH_PATH="${QNN_DEFAULT_LIB_SEARCH_PATH}/")
-
-#cross compiling source codes of hexagon kernels which running on cDSP side
-function(ggml_hexagon_build_kernel KNAME)
-    message(STATUS "ggml_hexagon: build hexagon-kernel ${KNAME}")
-
-    add_custom_command(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
-        COMMAND echo "current working path:`pwd`\n"
-        COMMAND echo "${CMAKE_CURRENT_LIST_DIR}/kernels"
-        COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ clean
-        COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HTP_ARCH_VERSION=${HTP_ARCH_VERSION} DEBUG_FLAG=${DEBUG_FLAG} BIN_DIR=${CMAKE_BINARY_DIR}/bin
-        COMMAND echo "current working path:`pwd`\n"
-        COMMAND ls -l  ../../../bin/libggmldsp-skel.so
-        COMMENT "build hexagon-kernel"
-    )
+# Build HTP skels
+set(HTP_SKELS)
+function(build_htp_skel V)
+    ExternalProject_Add(htp-${V}
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/htp BUILD_ALWAYS ON
+        BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp-${V}.so
+        CMAKE_ARGS
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/htp/cmake-toolchain.cmake
+            -DCMAKE_INSTALL_LIBDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_ROOT}
+            -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_ROOT}
+            -DHEXAGON_HTP_DEBUG=${GGML_HEXAGON_HTP_DEBUG}
+            -DDSP_VERSION=${V}
+            -DPREBUILT_LIB_DIR="toolv19_${V}")
+    list(APPEND HTP_SKELS ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp-${V}.so)
+    set(HTP_SKELS ${HTP_SKELS} PARENT_SCOPE)
 endfunction()
 
-function(ggml_hexagon_setup_cfg KNAME)
-    message(STATUS "ggml_hexagon: setup runtime configuration file ${KNAME}")
-    add_custom_command(
-        TARGET ${PROJECT_NAME}
-        POST_BUILD
-        COMMAND echo "current working path:`pwd`\n"
-        COMMAND /bin/cp -fv ${CMAKE_SOURCE_DIR}/scripts/${KNAME}  ${CMAKE_BINARY_DIR}/bin/
-        COMMENT "setup runtime configuration file"
-    )
-endfunction()
+#build_htp_skel(v73)
+build_htp_skel(v75)
+build_htp_skel(v79)
+#HEXAGON SDK 6.3.0.0 is required for v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
+#build_htp_skel(v81)
 
-ggml_hexagon_build_kernel("cdsp")
-ggml_hexagon_setup_cfg("ggml-hexagon.cfg")
+# Install Hexagon skels required at runtime
+install(FILES ${HTP_SKELS} TYPE LIB)
+
+if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
+    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)
+    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/x86"        WINSDK_BIN0_X86)
+    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/arm64" WINSDK_BIN1_ARM64)
+    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/x86"   WINSDK_BIN1_X86)
+
+    set(WINSDK_PATHS ${WINSDK_BIN0_ARM64} ${WINSDK_BIN0_X86} ${WINSDK_BIN1_ARM64} ${WINSDK_BIN1_X86})
+
+    find_program(INF2CAT  NAMES inf2cat.exe  PATHS ${WINSDK_PATHS} REQUIRED)
+    find_program(SIGNTOOL NAMES signtool.exe PATHS ${WINSDK_PATHS} REQUIRED)
+
+    message(STATUS "hexagon: using ${GGML_HEXAGON_HTP_CERT} to sign libggml-htp skels")
+
+    set(LIBGGML_HTP_CAT ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp.cat)
+    add_custom_target(libggml-htp-cat
+        BYPRODUCTS ${LIBGGML_HTP_CAT}
+        DEPENDS libggml-htp.inf ${HTP_SKELS}
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/libggml-htp.inf ${CMAKE_CURRENT_BINARY_DIR}
+        COMMAND ${INF2CAT} /driver:${CMAKE_CURRENT_BINARY_DIR} /os:10_25H2_ARM64
+        COMMAND ${SIGNTOOL} sign /fd sha256 /f ${GGML_HEXAGON_HTP_CERT} ${LIBGGML_HTP_CAT}
+        COMMENT "generating and signing libggml-htp.cat file"
+        VERBATIM
+    )
+
+    add_dependencies(${TARGET_NAME} libggml-htp-cat)
+    install(FILES ${LIBGGML_HTP_CAT} TYPE LIB)
+endif()

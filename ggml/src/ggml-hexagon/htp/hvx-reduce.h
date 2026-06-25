@@ -176,20 +176,6 @@ static inline HVX_Vector hvx_vec_reduce_max_f32(HVX_Vector in) {
     return _max;
 }
 
-static inline HVX_Vector hvx_vec_reduce_min_f32(HVX_Vector in) {
-    unsigned total = 128;  // total vec nbytes
-    unsigned width = 4;    // fp32 nbytes
-
-    HVX_Vector _min = in, _min_t;
-    while (width < total) {
-        _min_t = Q6_V_vror_VR(_min, width);         // rotate right
-        _min   = Q6_Vsf_vmin_VsfVsf(_min_t, _min);  // elementwise min
-        width  = width << 1;
-    }
-
-    return _min;
-}
-
 static inline HVX_Vector hvx_vec_reduce_max2_f32(HVX_Vector in, HVX_Vector _max) {
     unsigned total = 128;  // total vec nbytes
     unsigned width = 4;    // fp32 nbytes
