@@ -7115,7 +7115,7 @@ static inline size_t hex_round_up(size_t n, size_t m) {
     return (n + m - 1) & ~(m - 1);
 }
 
-static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) {
+static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size, void * dst_buf = nullptr) {
     const int QK4_0 = 32;
     const int QK_Q4_0x4x2 = 256;
 
@@ -7131,6 +7131,8 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) 
     const int64_t n_full_rows = n_bytes_to_copy / row_size;
     const size_t  n_rem_bytes = n_bytes_to_copy % row_size;
 
+    uint8_t * out_base = dst_buf ? (uint8_t *)dst_buf : (uint8_t *)t->data;
+
     void * buf_pd = ggml_aligned_malloc(row_size_pd);
     GGML_ASSERT(buf_pd != NULL);
 
@@ -7139,7 +7141,7 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) 
 
     for (int64_t i = 0; i < n_full_rows; i++) {
         const uint8_t * src = (const uint8_t *) data + (i * row_size);
-        uint8_t *       dst = (uint8_t *) t->data + (i * row_size);
+        uint8_t *       dst = out_base + (i * row_size);
 
         memcpy(buf_pd, src, row_size);
 
@@ -7185,7 +7187,7 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size) 
 
     if (n_rem_bytes > 0) {
         const uint8_t * src = (const uint8_t *) data + (n_full_rows * row_size);
-        uint8_t *       dst = (uint8_t *) t->data + (n_full_rows * row_size);
+        uint8_t *       dst = out_base + (n_full_rows * row_size);
 
         memset(buf_pd, 0, row_size_pd);
         memcpy(buf_pd, src, n_rem_bytes);
@@ -8043,6 +8045,60 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         mirrors.push_back(m);
     }
 
+    // ---- Phase 4.5: x4x2 repack into ION (NOT t->data, to preserve Q4_0 for CPU GEMV) ----
+    // For mulmat_algotype=30, repack Q4_0 weights to x4x2 format.
+    // Must NOT repack t->data in-place because CPU-side GEMV (N<=mulmat_min_n)
+    // still reads t->data as Q4_0. Instead, repack into the ION mirror (heap weights)
+    // or a separate ION region (ION weights), and point the DSP descriptor there.
+    std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
+    static std::unordered_map<const void *, uint32_t> g_x4x2_ion_offsets;
+    if (g_hexagon_appcfg.mulmat_algotype == 30) {
+        static std::unordered_set<const void *> g_x4x2_repacked;
+        for (uint32_t i = 0; i < n_tensors; i++) {
+            ggml_tensor * t = tensor_src[i];
+            if (!t || !t->data) continue;
+            bool is_quant_weight = weight_indices.count(i) && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+            if (!is_quant_weight || t->type != GGML_TYPE_Q4_0) continue;
+            const int32_t K = t->ne[0];
+            if (K % 256 != 0 || K <= 0) continue;
+            if (g_x4x2_repacked.find(t->data) != g_x4x2_repacked.end()) {
+                continue;  // already repacked, g_x4x2_ion_offsets has the offset
+            }
+
+            const char * dp = (const char *)t->data;
+            size_t repack_size = ggml_nbytes(t);
+
+            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                // ION weight: allocate separate ION region for repacked data
+                size_t aligned_offset = (ctx->rpc_mempool_usage + 127u) & ~127u;
+                if (aligned_offset + repack_size > data_limit) {
+                    GGMLHEXAGON_LOG_WARN("x4x2 repack: ION mempool full, skipping tensor[%d]", i);
+                    continue;
+                }
+                uint32_t rp_off = (uint32_t)aligned_offset;
+                void * rp_buf = (char *)ctx->rpc_mempool + rp_off;
+                ctx->rpc_mempool_usage = aligned_offset + repack_size;
+                GGMLHEXAGON_LOG_WARN("x4x2 repack: ION tensor[%d] K=%d M=%d -> ION offset=0x%x", i, K, (int)t->ne[1], rp_off);
+                repack_q4_0_q4x4x2(t, t->data, repack_size, rp_buf);
+                g_x4x2_repacked.insert(t->data);
+                g_x4x2_ion_offsets[t->data] = rp_off;
+                repacked_ion_weights.push_back({rp_off, (uint32_t)repack_size});
+            } else {
+                // Heap weight: repack into the ION mirror (overwriting the Q4_0 copy)
+                auto bmi = buffer_mirrors_map.find(t->data);
+                if (bmi != buffer_mirrors_map.end() && bmi->second.allocated) {
+                    void * ion_mirror = (char *)ctx->rpc_mempool + bmi->second.mirror_offset;
+                    GGMLHEXAGON_LOG_WARN("x4x2 repack: heap tensor[%d] K=%d M=%d -> mirror offset=0x%x", i, K, (int)t->ne[1], bmi->second.mirror_offset);
+                    repack_q4_0_q4x4x2(t, t->data, repack_size, ion_mirror);
+                    g_x4x2_repacked.insert(t->data);
+                    g_x4x2_ion_offsets[t->data] = bmi->second.mirror_offset;
+                } else {
+                    GGMLHEXAGON_LOG_WARN("x4x2 repack: heap tensor[%d] has no ION mirror, skipping", i);
+                }
+            }
+        }
+    }
+
     // ---- Phase 5: allocate batch descriptor region in ION mempool ----
     size_t batch_align = HEX_BATCH_ALIGN;
     size_t batch_offset_raw = ctx->rpc_mempool_usage;
@@ -8119,21 +8175,17 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             }
         }
 
-        // x4x2 repack: for mulmat_algotype=30, repack Q4_0 weights to x4x2 format
-        // x4x2 format separates quants and scales for efficient HVX dequantization
-        // Same size as Q4_0, so we repack in-place in ION
+        // x4x2: mark tensor descriptor as x4x2 format and use repacked ION offset
+        // (repack done in Phase 4.5, data is in ION mirror or separate ION region)
         if (is_quant_weight && g_hexagon_appcfg.mulmat_algotype == 30 && t->type == GGML_TYPE_Q4_0) {
             const int32_t K = t->ne[0];
             if (K % 256 == 0 && K > 0) {
-                // Check if already repacked (data in ION persists across batches)
-                static std::unordered_set<const void *> g_x4x2_repacked;
-                if (g_x4x2_repacked.find(t->data) == g_x4x2_repacked.end()) {
-                    GGMLHEXAGON_LOG_WARN("x4x2 repack: tensor[%d] K=%d M=%d, repacking in-place", i, K, (int)t->ne[1]);
-                    repack_q4_0_q4x4x2(t, t->data, ggml_nbytes(t));
-                    g_x4x2_repacked.insert(t->data);
+                td->type = 200;  // GGML_TYPE_Q4_0x4x2
+                auto it = g_x4x2_ion_offsets.find(t->data);
+                if (it != g_x4x2_ion_offsets.end()) {
+                    td->data_offset = it->second;
+                    td->flags = 1;  // mirrored (needs cache flush)
                 }
-                // Mark tensor descriptor as x4x2 format
-                td->type = 200;  // GGML_TYPE_Q4_0x4x2 (defined in kernels/ggml-dsp.h)
             }
         }
     }
@@ -8207,6 +8259,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         for (const auto & m : mirrors) {
             if (m.mirror_offset < clean_min) clean_min = m.mirror_offset;
             uint32_t end = m.mirror_offset + m.data_len;
+            if (end > clean_max) clean_max = end;
+        }
+        // Also flush repacked ION weight regions (x4x2 repack modifies ION data
+        // that DSP reads; without flush, CPU cache has repacked data but DRAM is stale)
+        for (const auto & rw : repacked_ion_weights) {
+            if (rw.first < clean_min) clean_min = rw.first;
+            uint32_t end = rw.first + rw.second;
             if (end > clean_max) clean_max = end;
         }
         // Flush batch descriptor (DSP reads op descriptors from ION)
