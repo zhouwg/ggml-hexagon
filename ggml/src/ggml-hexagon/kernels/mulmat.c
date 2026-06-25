@@ -49,17 +49,7 @@ static inline HVX_Vector hvx_vec_repl_f16(HVX_Vector v) {
     return hvx_vec_repl(v, repl);
 }
 
-static inline size_t hmx_ceil_div(size_t num, size_t den) {
-    return (num + den - 1) / den;
-}
-
-static inline size_t hex_align_up(size_t v, size_t align) {
-    return hmx_ceil_div(v, align) * align;
-}
-
-static inline size_t hex_align_down(size_t v, size_t align) {
-    return (v / align) * align;
-}
+// hmx_ceil_div, hex_align_up, hex_align_down are provided by hex-common.h (via hex-dma.h)
 
 static inline HVX_Vector hvx_vec_f32_to_f16_shuff(HVX_Vector v0, HVX_Vector v1) {
 #if __HVX_ARCH__ >= 81
