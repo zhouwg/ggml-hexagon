@@ -89,6 +89,18 @@ int llama_server(int argc, char ** argv) {
     llama_backend_init();
     llama_numa_init(params.numa);
 
+    common_models_handler models_handler;
+    try {
+        models_handler = common_models_handler_init(params, LLAMA_EXAMPLE_SERVER);
+        if (common_models_handler_is_preset_repo(models_handler)) {
+            // apply the preset and start the server in router mode
+            common_models_handler_apply(models_handler, params);
+        }
+    } catch (const std::exception & e) {
+        SRV_ERR("failed to fetch model metadata: %s\n", e.what());
+        return 1;
+    }
+
     // router server never loads a model and must not touch the GPU
     const bool is_router_server = params.model.path.empty()
                                && params.model.hf_repo.empty();
@@ -134,6 +146,7 @@ int llama_server(int argc, char ** argv) {
     //
 
     // register API routes
+    server_child child; // only used in non-router mode
     server_routes routes(params, ctx_server);
     server_tools tools;
 
@@ -255,10 +268,25 @@ int llama_server(int argc, char ** argv) {
     }
 
     //
+    // Handle downloading model
+    //
+
+    if (child.is_child() && child.get_mode() == SERVER_CHILD_MODE_DOWNLOAD) {
+        return child.run_download(params);
+    } else if (!is_router_server) {
+        // single-model mode (NOT spawned by router)
+        try {
+            common_models_handler_apply(models_handler, params);
+        } catch (const std::exception & e) {
+            SRV_ERR("failed to download model: %s\n", e.what());
+            return 1;
+        }
+    }
+
+    //
     // Start the server
     //
 
-    server_child child; // only used in non-router mode
     std::function<void()> clean_up;
 
     if (is_router_server) {
