@@ -1610,8 +1610,6 @@ void ggml_fp16_to_fp32_row_hvx(const ggml_fp16_t * x, float * y, int64_t n) {
 
 #if __HVX_ARCH__ >= 79
         HVX_VectorPair p = Q6_Wsf_vmpy_VhfVhf(v_shuf, one_f16);
-        // vmpy puts even-position results (original fp16[0..31]) in V_lo,
-        // odd-position results (original fp16[32..63]) in V_hi
         vy[2*i]     = Q6_V_lo_W(p);
         vy[2*i + 1] = Q6_V_hi_W(p);
 #else
@@ -2387,10 +2385,10 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
 //
 // ===================== Helper functions
 //
-//FIXME
-#if 0
+//function 1 is better because it use "magic number" and "fast rounding" trick and no branch
+#if 1
 static inline int nearest_int(float fval) {
-    assert(fabsf(fval) <= 4194303.f);
+    assert(fabsf(fval) <= 4194303.f); //magic number is valid for specified range
     float val = fval + 12582912.f;
     int i; memcpy(&i, &val, sizeof(int));
     return (i & 0x007fffff) - 0x00400000;
@@ -7637,6 +7635,7 @@ static inline HVX_Vector hvx_vec_reduce_max_f16(HVX_Vector in) {
     return _max;
 }
 
+// FP16*FP16 -> FP32 accumulate using HVX widening multiply
 #if __HVX_ARCH__ < 79
 static inline HVX_VectorPair hvx_vec_mpyacc_f32_f16(HVX_VectorPair acc, HVX_Vector x, HVX_Vector y)
 {
@@ -7944,10 +7943,6 @@ void vec_dot_f16_f16_generic(int n, float *GGML_RESTRICT s, size_t bs, const voi
 
 void vec_dot_f16_f16_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void *GGML_RESTRICT vx, size_t bx,
                     const void *GGML_RESTRICT vy, size_t by, int nrc) {
-//FIXME
-//hexagon-clang: error: clang frontend command failed with exit code 134
-//'Hexagon generate widening vector float instructions' on function '@vec_dot_f16_f16_hvx'
-#if 0
     const uint16_t *GGML_RESTRICT x = (const uint16_t *)vx;
     const uint16_t *GGML_RESTRICT y = (const uint16_t *)vy;
     UNUSED(bs);
@@ -8008,7 +8003,6 @@ void vec_dot_f16_f16_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void *G
     }
 
     *s = sumf;
-#endif
 }
 
 static void vec_dot_q4_0_f32_generic(int n, float *GGML_RESTRICT s, size_t bs, const block_q4_0 *GGML_RESTRICT x,

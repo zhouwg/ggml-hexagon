@@ -6500,6 +6500,9 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
             if (ggml_nrows(src1) > 1024) {
                 //return false;  // no huge batches (for now)
             }
+            if (n <= g_hexagon_appcfg.mulmat_min_n) {
+                return false;
+            }
             break;
 
         case GGML_TYPE_F32:
@@ -6517,6 +6520,9 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
             if (ggml_nrows(src1) > 1024) {
                 //GGMLHEXAGON_LOG_WARN("no huge batches");
                 return false;  // no huge batches (for now)
+            }
+            if (n <= g_hexagon_appcfg.mulmat_min_n) {
+                return false;
             }
             break;
 
