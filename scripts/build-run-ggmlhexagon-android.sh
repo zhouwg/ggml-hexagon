@@ -404,8 +404,8 @@ function build_arm64_qcom
     echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
     echo "./scripts/build-run-android.sh run_testop MUL_MAT"
     echo "./scripts/build-run-android.sh run_testops"
-    echo "./scripts/build-run-android.sh run_llamacli 3"
-    echo "./scripts/build-run-android.sh run_llamabench 3"
+    echo "./scripts/build-run-android.sh run_llamacli 0"
+    echo "./scripts/build-run-android.sh run_llamabench 0"
 }
 
 
