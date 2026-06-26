@@ -9335,6 +9335,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 6144, 128, 2048, {1, 1}, {1, 1})); // FFN up
     test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_0, GGML_TYPE_F32, 2048, 128, 6144, {1, 1}, {1, 1})); // FFN down
 
+    // F16 HMX crash repro: N not multiple of 32
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 256, 40, 64, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 256, 39, 256, {1, 1}, {1, 1}));
+
     //end jz'case
     return test_cases;
 }

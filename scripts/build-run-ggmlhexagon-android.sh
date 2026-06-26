@@ -109,7 +109,7 @@ PROMPT_STRING="You are a powerful domain expert and know many things, now pls he
 
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
+running_params=" -ngl 99 -t 6 -n 256 --no-mmap --poll 1000"
 
 ######## part-3: utilities and functions ########
 

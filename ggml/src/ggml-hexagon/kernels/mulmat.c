@@ -829,35 +829,43 @@ static void transfer_activation_chunk_f16_to_f16_tiles(__fp16 *restrict vtcm_dst
     __asm__ __volatile__("" ::: "memory");
 }
 
-// HVX-accelerated F16 activation transfer using vscatter for row-pair interleaved tile format
+// HVX F16 activation -> tiles, output layout matches transfer_activation_chunk_fp32_to_fp16.
+// Each hvx_vmemu loads 128 bytes = 64 fp16 = 2 K-tiles, so we process K-tile pairs
+// to avoid reading past the end of a row (each K-tile is only 64 bytes).
 static void transfer_activation_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const __fp16 *restrict src,
                                                             int n_rows, int k, int row_stride) {
-    const int n_row_tiles = (n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
-    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_rows_padded = ((n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+    const int n_tiles_per_row = k / HMX_FP16_TILE_N_COLS;
+    const int k_pairs = k / (2 * HMX_FP16_TILE_N_COLS);
+    const bool has_tail = (n_tiles_per_row & 1) != 0;
 
-    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
-    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
-    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
-    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+    for (int r = 0; r < n_rows_padded; r += 2) {
+        int r0 = r / HMX_FP16_TILE_N_ROWS;
+        int r1_half = (r % HMX_FP16_TILE_N_ROWS) / 2;
 
-    for (int t = 0; t < n_row_tiles * k_tiles; ++t) {
-        int rt = t / k_tiles;
-        int kt = t % k_tiles;
-        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+        const __fp16 *src_row0 = (r < n_rows) ? src + r * row_stride : NULL;
+        const __fp16 *src_row1 = (r + 1 < n_rows) ? src + (r + 1) * row_stride : NULL;
 
-        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
-            int row0 = rt * HMX_FP16_TILE_N_ROWS + i;
-            int row1 = row0 + 1;
-            const __fp16 *r0 = (row0 < n_rows) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
-            const __fp16 *r1 = (row1 < n_rows) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+        __fp16 *tile_base = vtcm_dst + r0 * n_tiles_per_row * HMX_FP16_TILE_N_ELMS;
 
-            HVX_Vector v0 = r0 ? hvx_vmemu(r0) : Q6_V_vzero();
-            HVX_Vector v1 = r1 ? hvx_vmemu(r1) : Q6_V_vzero();
+        for (int p = 0; p < k_pairs; ++p) {
+            HVX_Vector v0 = src_row0 ? hvx_vmemu(src_row0) : Q6_V_vzero();
+            HVX_Vector v1 = src_row1 ? hvx_vmemu(src_row1) : Q6_V_vzero();
+            src_row0 = src_row0 ? src_row0 + 2 * HMX_FP16_TILE_N_COLS : NULL;
+            src_row1 = src_row1 ? src_row1 + 2 * HMX_FP16_TILE_N_COLS : NULL;
 
-            const HVX_Vector v_off0 = Q6_Vw_vadd_VwVw(v_scat_base, Q6_V_vsplat_R(i * 4));
-            const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
-            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
-            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+            HVX_VectorPair vp = Q6_W_vshuff_VVR(v1, v0, -2);
+            ((HVX_Vector *)tile_base)[r1_half] = Q6_V_lo_W(vp);
+            tile_base += HMX_FP16_TILE_N_ELMS;
+            ((HVX_Vector *)tile_base)[r1_half] = Q6_V_hi_W(vp);
+            tile_base += HMX_FP16_TILE_N_ELMS;
+        }
+
+        if (has_tail) {
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                tile_base[r1_half * 64 + j * 2]     = src_row0 ? src_row0[j] : (__fp16)0;
+                tile_base[r1_half * 64 + j * 2 + 1] = src_row1 ? src_row1[j] : (__fp16)0;
+            }
         }
     }
 }
@@ -996,7 +1004,9 @@ static void transfer_weight_chunk_f16_to_f16_tiles(__fp16 *restrict vtcm_dst, co
     __asm__ __volatile__("" ::: "memory");
 }
 
-// HVX-accelerated F16 weight transfer using vscatter for column-pair interleaved tile format
+// HVX-accelerated F16 weight transfer using vscatter for column-pair interleaved tile format.
+// Each hvx_vmemu loads 128 bytes = 64 fp16 = 2 K-tiles, so we process K-tile pairs
+// to avoid reading past the end of a row (each K-tile is only 64 bytes).
 static void transfer_weight_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const __fp16 *restrict src,
                                                         int n_cols, int k, int row_stride) {
     const int k_tiles = k / HMX_FP16_TILE_N_COLS;
@@ -1004,35 +1014,43 @@ static void transfer_weight_chunk_f16_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst
 
     const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
     const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
-    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
-    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+    const size_t pair_region = (size_t)(2 * HMX_FP16_TILE_SIZE - 1);
 
-    for (int t = 0; t < n_col_tiles * k_tiles; ++t) {
-        int ct = t / k_tiles;
-        int kt = t % k_tiles;
-        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+    for (int ct = 0; ct < n_col_tiles; ++ct) {
+        for (int kt = 0; kt < k_tiles; kt += 2) {
+            __fp16 *tile_base = vtcm_dst + (ct * k_tiles + kt) * HMX_FP16_TILE_N_ELMS;
+            const bool is_pair = (kt + 1 < k_tiles);
 
-        HVX_Vector v_off = v_scat_base;
-        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
-            int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
-            int row1 = row0 + 1;
-            const __fp16 *r0 = (row0 < n_cols) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
-            const __fp16 *r1 = (row1 < n_cols) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+            if (is_pair) {
+                HVX_Vector v_off = v_scat_base;
+                for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+                    int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+                    int row1 = row0 + 1;
+                    const __fp16 *r0 = (row0 < n_cols) ? src + row0 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
+                    const __fp16 *r1 = (row1 < n_cols) ? src + row1 * row_stride + kt * HMX_FP16_TILE_N_COLS : NULL;
 
-            HVX_Vector v0 = r0 ? hvx_vmemu(r0) : Q6_V_vzero();
-            HVX_Vector v1 = r1 ? hvx_vmemu(r1) : Q6_V_vzero();
+                    HVX_Vector v0 = r0 ? hvx_vmemu(r0) : Q6_V_vzero();
+                    HVX_Vector v1 = r1 ? hvx_vmemu(r1) : Q6_V_vzero();
 
-            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off, v0);
-            v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
-            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off, v1);
-            v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
+                    Q6_vscatter_RMVwV((size_t)tile_base, pair_region, v_off, v0);
+                    v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
+                    Q6_vscatter_RMVwV((size_t)tile_base, pair_region, v_off, v1);
+                    v_off = Q6_Vw_vadd_VwVw(v_off, v_scat_step);
+                }
+                (void) *(volatile HVX_Vector *)(tile_base);
+                (void) *(volatile HVX_Vector *)(tile_base + HMX_FP16_TILE_N_ELMS);
+            } else {
+                // Trailing single K-tile: scalar loads to avoid OOB read
+                for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {
+                    int row_idx = ct * HMX_FP16_TILE_N_ROWS + i;
+                    for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                        int col_idx = kt * HMX_FP16_TILE_N_COLS + j;
+                        __fp16 val = (row_idx < n_cols) ? src[row_idx * row_stride + col_idx] : (__fp16)0;
+                        tile_base[(j / 2) * 64 + i * 2 + (j % 2)] = val;
+                    }
+                }
+            }
         }
-        // Ensure vscatter completion for this tile (like Qualcomm reference code)
-        (void) *(volatile HVX_Vector *)(tile_base);
-    }
-    // Final fence: read from last tile
-    if (n_col_tiles * k_tiles > 0) {
-        (void) *(volatile HVX_Vector *)(vtcm_dst + (n_col_tiles * k_tiles - 1) * HMX_FP16_TILE_N_ELMS);
     }
 }
 
@@ -2417,16 +2435,16 @@ static void wrap_dequant_f16_hvx(const struct hmx_weight_dequant_params *p) {
 }
 
 static void wrap_dequant_f32(const struct hmx_weight_dequant_params *p) {
-    dma_queue_push_ddr_to_vtcm(p->dma,
+    dma_queue_push(p->dma,
         dma_make_ptr(p->vtcm_fp32_buf, (const float *)p->weight_chunk),
-        p->K * sizeof(float), p->row_stride, p->M_cols);
+        p->K * sizeof(float), p->row_stride, p->K * sizeof(float), p->M_cols);
     dma_queue_pop(p->dma);
     convert_weight_f32_to_fp16_tiles(p->vtcm_weight, p->vtcm_fp32_buf, p->M_cols, p->K, p->K);
 }
 static void wrap_dequant_f32_hvx(const struct hmx_weight_dequant_params *p) {
-    dma_queue_push_ddr_to_vtcm(p->dma,
+    dma_queue_push(p->dma,
         dma_make_ptr(p->vtcm_fp32_buf, (const float *)p->weight_chunk),
-        p->K * sizeof(float), p->row_stride, p->M_cols);
+        p->K * sizeof(float), p->row_stride, p->K * sizeof(float), p->M_cols);
     dma_queue_pop(p->dma);
     convert_weight_f32_to_fp16_tiles_hvx(p->vtcm_weight, p->vtcm_fp32_buf, p->M_cols, p->K, p->K);
 }
@@ -2514,7 +2532,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     // Early type checks before acquiring any resources
     // src0 (weight) types supported by HMX path
     const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
-    if (wt == NULL || src0->type == GGML_TYPE_F16) {
+    if (wt == NULL) {
         GGMLHEXAGON_LOG_INFO("src0 type %d not supported by HMX, falling back to VTCM multithread mode\n", src0->type);
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
@@ -2566,9 +2584,11 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     const int32_t M = src0->ne[1];  // weight columns (output dimension)
     const int32_t K = src0->ne[0];  // inner dimension
     const int32_t N = src1->ne[1];  // activation columns (batch size)
+    const int32_t ne12 = src1->ne[2];
+    const int32_t ne13 = src1->ne[3];
 
-    GGMLHEXAGON_LOG_INFO("HMX matmul: src0(weight)[K=%d, M=%d], src1(activation)[K=%d, N=%d], dst[M=%d, N=%d]",
-                         K, M, K, N, M, N);
+    GGMLHEXAGON_LOG_INFO("HMX matmul: src0(weight)[K=%d, M=%d], src1(activation)[K=%d, N=%d, B=%d], dst[M=%d, N=%d, B=%d]",
+                         K, M, K, N, ne12*ne13, M, N, ne12*ne13);
     //GGMLHEXAGON_LOG_DEBUG("src0 type=%d, src1 type=%d", src0->type, src1->type);
 
     if (K % HMX_FP16_TILE_N_COLS != 0) {
@@ -2576,6 +2596,16 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
         GGMLHEXAGON_LOG_INFO("K=%d not 32-aligned, falling back to VTCM multithread mode\n", K);
+        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
+    }
+
+    // Fallback for batched weights (ne02 > 1 or ne03 > 1) - uncommon, not worth the cache complexity
+    if (src0->ne[2] > 1 || src0->ne[3] > 1) {
+        if (hmx_locked) {
+            HAP_compute_res_hmx_unlock(compute_res_ctx_id);
+        }
+        GGMLHEXAGON_LOG_INFO("batched weights (ne02=%d, ne03=%d), falling back to VTCM multithread mode\n",
+                             src0->ne[2], src0->ne[3]);
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
@@ -2789,24 +2819,30 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             }
         }
 
-        // Pipeline: use DMA to prefetch next activation while HMX computes current
-        // For the first N-chunk, we must prepare activation synchronously
-        bool act_dma_pending = false;
+        // Loop over batch dimensions (ne12, ne13) - weight is shared (ne02=1 checked above)
+        for (int32_t i13 = 0; i13 < ne13; ++i13) {
+            for (int32_t i12 = 0; i12 < ne12; ++i12) {
+                const char *src1_batch = (const char *)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2];
+                char *dst_batch = (char *)dst->data + i13 * dst->nb[3] + i12 * dst->nb[2];
 
-        for (size_t nr = 0; nr < N; nr += N_chunk_n_rows) {
-            const size_t N_rows = (N - nr) > N_chunk_n_rows ? N_chunk_n_rows : (N - nr);
-            const size_t N_row_tiles = ((N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS);
+                // Pipeline: use DMA to prefetch next activation while HMX computes current
+                // For the first N-chunk, we must prepare activation synchronously
+                bool act_dma_pending = false;
+
+                for (size_t nr = 0; nr < N; nr += N_chunk_n_rows) {
+                    const size_t N_rows = (N - nr) > N_chunk_n_rows ? N_chunk_n_rows : (N - nr);
+                    const size_t N_row_tiles = ((N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS);
 
             // Convert activation chunk (src1) to fp16 tiles
             if (src1_is_f16) {
-                const __fp16 *act_chunk = (const __fp16 *)((const char *)src1->data + nr * src1_row_stride);
+                const __fp16 *act_chunk = (const __fp16 *)(src1_batch + nr * src1_row_stride);
                 if (use_hvx) {
                     transfer_activation_chunk_f16_to_f16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
                 } else {
                     transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
                 }
             } else if (src1->type == GGML_TYPE_BF16) {
-                const ggml_bf16_t *act_chunk = (const ggml_bf16_t *)((const char *)src1->data + nr * src1_row_stride);
+                const ggml_bf16_t *act_chunk = (const ggml_bf16_t *)(src1_batch + nr * src1_row_stride);
                 if (use_hvx) {
                     convert_activation_bf16_to_fp16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(ggml_bf16_t));
                 } else {
@@ -2840,10 +2876,16 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     act_dma_pending = false;
                 } else {
                     // First chunk: DMA push and wait immediately
-                    const float *act_chunk = (const float *)((const char *)src1->data + nr * src1_row_stride);
-                    dma_queue_push_ddr_to_vtcm(dma,
+                    // Use dma_queue_push directly: row_size must be K*sizeof(float) (actual data per row),
+                    // NOT src1_row_stride which may include padding when src1 is a non-contiguous view.
+                    // dma_queue_push_ddr_to_vtcm wrongly uses src_row_size as both src_stride and row_size.
+                    const float *act_chunk = (const float *)(src1_batch + nr * src1_row_stride);
+                    dma_queue_push(dma,
                         dma_make_ptr(reusable_buf.fp32, act_chunk),
-                        K * sizeof(float), src1_row_stride, N_rows);
+                        K * sizeof(float),   // dst_stride (compact in VTCM)
+                        src1_row_stride,      // src_stride (may include padding)
+                        K * sizeof(float),    // row_size (actual data per row)
+                        N_rows);
                     dma_queue_pop(dma);
                 }
 
@@ -2868,22 +2910,28 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             core_dot_chunk_fp16(reusable_buf.fp16, vtcm_activation, vtcm_weight, vtcm_scales, N_row_tiles, M_col_tiles, n_dot_tiles);
 
             // Copy output to dst (must complete before DMA prefetch overwrites reusable_buf)
-            float *output_chunk = (float *)((char *)dst->data + mc * dst->nb[0] + nr * dst->nb[1]);
-            transfer_output_chunk_fp16_to_fp32(output_chunk, reusable_buf.fp16, N_rows, M_cols, M);
+            // Use dst->nb[1] as row stride since dst may be a non-contiguous view (e.g. kv cache)
+            float *output_chunk = (float *)(dst_batch + mc * dst->nb[0] + nr * dst->nb[1]);
+            int dst_row_stride = (int)(dst->nb[1] / sizeof(float));
+            transfer_output_chunk_fp16_to_fp32(output_chunk, reusable_buf.fp16, N_rows, M_cols, dst_row_stride);
 
             // Prefetch next activation chunk via DMA (overlaps with next iteration's compute)
             // NOTE: this must be after output writeback since reusable_buf is shared
             // Only F32 activation uses DMA prefetch (BF16/F16 don't need fp32 buffer)
             size_t nr_next = nr + N_chunk_n_rows;
             if (nr_next < N && src1_needs_fp32_buf) {
-                const float *act_chunk_next = (const float *)((const char *)src1->data + nr_next * src1_row_stride);
-                dma_queue_push_ddr_to_vtcm(dma,
+                const float *act_chunk_next = (const float *)(src1_batch + nr_next * src1_row_stride);
+                dma_queue_push(dma,
                     dma_make_ptr(reusable_buf.fp32, act_chunk_next),
-                    K * sizeof(float), src1_row_stride,
+                    K * sizeof(float),   // dst_stride
+                    src1_row_stride,      // src_stride
+                    K * sizeof(float),    // row_size
                     (N - nr_next) > N_chunk_n_rows ? N_chunk_n_rows : (N - nr_next));
                 act_dma_pending = true;
             }
         }
+                }
+            }
     }
 
     dma_queue_flush(dma);
