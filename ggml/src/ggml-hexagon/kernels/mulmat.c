@@ -1788,6 +1788,141 @@ static void dequantize_iq4_nl_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const 
     }
 }
 
+// MXFP4 dequantization LUT: maps 4-bit index to fp16 kvalue
+// kvalues_mxfp4 = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12}
+static const __fp16 mxfp4_to_fp16_lut[64] __attribute__((aligned(VLEN))) = {
+     0, 0,  1, 0,  2, 0,  3, 0,  4, 0,  6, 0,  8, 0, 12, 0,
+     0, 0, -1, 0, -2, 0, -3, 0, -4, 0, -6, 0, -8, 0,-12, 0,
+};
+
+static inline float mxfp4_e8m0_to_fp32_half(uint8_t x) {
+    uint32_t bits;
+    if (x < 2) {
+        bits = 0x00200000 << x;
+    } else {
+        bits = (uint32_t)(x - 1) << 23;
+    }
+    float result;
+    memcpy(&result, &bits, sizeof(float));
+    return result;
+}
+
+static void dequantize_mxfp4_to_f16_tiles(__fp16 *restrict vtcm_dst, const block_mxfp4 *restrict src,
+                                           int n_cols, int k) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+    const int n_tot_tiles = n_col_tiles * k_tiles;
+    const int nb_per_col = k / QK_MXFP4;
+
+    for (int t = 0; t < n_tot_tiles; ++t) {
+        int ct = t / k_tiles;
+        int kt = t % k_tiles;
+
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; ++i) {
+            int row_global = ct * HMX_FP16_TILE_N_ROWS + i;
+            const block_mxfp4 *row_blocks = (row_global < n_cols) ?
+                                             src + row_global * nb_per_col : NULL;
+
+            for (int j = 0; j < HMX_FP16_TILE_N_COLS; ++j) {
+                int col_global = kt * HMX_FP16_TILE_N_COLS + j;
+                int block_idx = col_global / QK_MXFP4;
+                int elem_idx = col_global % QK_MXFP4;
+
+                float val = 0.0f;
+                if (row_blocks && col_global < k) {
+                    float d = mxfp4_e8m0_to_fp32_half(row_blocks[block_idx].e);
+                    int8_t q;
+                    if (elem_idx < 16) {
+                        q = (row_blocks[block_idx].qs[elem_idx] & 0x0F);
+                    } else {
+                        q = (row_blocks[block_idx].qs[elem_idx - 16] >> 4);
+                    }
+                    val = kvalues_mxfp4[q] * d;
+                }
+
+                fp32_to_fp16_store(&tile_base[(j / 2) * 64 + i * 2 + (j % 2)], val);
+            }
+        }
+    }
+}
+
+// MXFP4: dequantize one block using vlut16 LUT
+static inline HVX_Vector dequantize_mxfp4_block_to_fp16_hvx(const block_mxfp4 *b, const HVX_Vector vlut) {
+    HVX_Vector vq = Q6_V_vand_QV(Q6_Q_vsetq_R(16), hvx_vmemu(b->qs));
+
+    // Build FP16 scale from e8m0: 0.5 * 2^(e-127) = 2^(e-128)
+    // FP16 exponent = e - 128 + 15 = e - 113
+    uint16_t fp16_exp = (uint16_t)b->e;
+    int16_t fp16_biased = (int16_t)fp16_exp - 113;
+    if (fp16_biased < 0) fp16_biased = 0;
+    if (fp16_biased > 30) fp16_biased = 30;
+    uint16_t fp16_bits = (uint16_t)fp16_biased << 10;
+    __fp16 fp16_scale;
+    memcpy(&fp16_scale, &fp16_bits, sizeof(__fp16));
+    HVX_Vector v_scales = hvx_vec_repl_f16(hvx_vmemu(&fp16_scale));
+
+    // Extract lower and upper nibbles
+    const HVX_Vector mask_h4 = Q6_Vb_vsplat_R(0x0F);
+    HVX_Vector v_lo = Q6_V_vand_VV(vq, mask_h4);
+    HVX_Vector v_hi = Q6_Vub_vlsr_VubR(vq, 4);
+
+    // vlut16 byte lookup: each nibble index -> fp16 value (2 bytes)
+    v_lo = Q6_Vb_vshuff_Vb(v_lo);
+    v_hi = Q6_Vb_vshuff_Vb(v_hi);
+
+    HVX_VectorPair vp_lo = Q6_Wh_vlut16_VbVhR(v_lo, vlut, 0);
+    HVX_VectorPair vp_hi = Q6_Wh_vlut16_VbVhR(v_hi, vlut, 0);
+    HVX_Vector v_lo16 = Q6_V_lo_W(vp_lo);
+    HVX_Vector v_hi16 = Q6_V_lo_W(vp_hi);
+
+    // Multiply by scale
+    v_lo16 = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(v_lo16, v_scales));
+    v_hi16 = Q6_Vhf_equals_Vqf16(Q6_Vqf16_vmpy_VhfVhf(v_hi16, v_scales));
+
+    // Combine lo and hi
+    const HVX_VectorPred p32 = Q6_Q_vsetq_R(32);
+    HVX_Vector v_lo_masked = Q6_V_vand_QV(p32, v_lo16);
+    HVX_Vector v_hi_rotated = Q6_V_vror_VR(Q6_V_vand_QV(p32, v_hi16), 96);
+    HVX_Vector result = Q6_V_vor_VV(v_lo_masked, v_hi_rotated);
+    return result;
+}
+
+static void dequantize_mxfp4_to_f16_tiles_hvx(__fp16 *restrict vtcm_dst, const block_mxfp4 *restrict src,
+                                               int n_cols, int k) {
+    const int k_tiles = k / HMX_FP16_TILE_N_COLS;
+    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+    const int nb_per_col = k / QK_MXFP4;
+
+    const HVX_Vector v_scat_base = hvx_vmem(hmx_transpose_scatter_offsets);
+    const HVX_Vector v_scat_step = Q6_V_vsplat_R(4);
+    const HVX_VectorPred q_mask64 = Q6_Q_vsetq_R(64);
+    const size_t single_region = (size_t)(HMX_FP16_TILE_SIZE - 1);
+    const HVX_Vector vlut = hvx_vmem(mxfp4_to_fp16_lut);
+
+    for (int t = 0; t < n_col_tiles * k_tiles; ++t) {
+        int ct = t / k_tiles;
+        int kt = t % k_tiles;
+        __fp16 *tile_base = vtcm_dst + t * HMX_FP16_TILE_N_ELMS;
+
+        for (int i = 0; i < HMX_FP16_TILE_N_ROWS; i += 2) {
+            int row0 = ct * HMX_FP16_TILE_N_ROWS + i;
+            int row1 = row0 + 1;
+            const block_mxfp4 *row0_blocks = (row0 < n_cols) ? src + row0 * nb_per_col + kt : NULL;
+            const block_mxfp4 *row1_blocks = (row1 < n_cols) ? src + row1 * nb_per_col + kt : NULL;
+
+            HVX_Vector v0 = row0_blocks ? dequantize_mxfp4_block_to_fp16_hvx(row0_blocks, vlut) : Q6_V_vzero();
+            HVX_Vector v1 = row1_blocks ? dequantize_mxfp4_block_to_fp16_hvx(row1_blocks, vlut) : Q6_V_vzero();
+
+            const HVX_Vector v_off0 = Q6_Vw_vadd_VwVw(v_scat_base, Q6_V_vsplat_R(i * 4));
+            const HVX_Vector v_off1 = Q6_Vw_vadd_VwVw(v_off0, v_scat_step);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off0, v0);
+            Q6_vscatter_QRMVwV(q_mask64, (size_t)tile_base, single_region, v_off1, v1);
+        }
+    }
+}
+
 // BF16: convert each element BF16 -> FP32 -> FP16, store in column-pair interleaved tile format
 static void convert_weight_bf16_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst, const ggml_bf16_t *restrict src,
                                                    int n_cols, int k, int row_stride) {
@@ -2345,6 +2480,13 @@ static void wrap_dequant_x4x2_q4_0_hvx(const struct hmx_weight_dequant_params *p
                                             p->M_cols, p->K, p->row_stride);
 }
 
+static void wrap_dequant_mxfp4(const struct hmx_weight_dequant_params *p) {
+    dequantize_mxfp4_to_f16_tiles(p->vtcm_weight, (const block_mxfp4 *)p->weight_chunk, p->M_cols, p->K);
+}
+static void wrap_dequant_mxfp4_hvx(const struct hmx_weight_dequant_params *p) {
+    dequantize_mxfp4_to_f16_tiles_hvx(p->vtcm_weight, (const block_mxfp4 *)p->weight_chunk, p->M_cols, p->K);
+}
+
 static const struct hmx_weight_traits hmx_weight_traits_table[] = {
     { GGML_TYPE_F16,      wrap_dequant_f16,          wrap_dequant_f16_hvx },
     { GGML_TYPE_F32,      wrap_dequant_f32,          wrap_dequant_f32_hvx },
@@ -2354,6 +2496,7 @@ static const struct hmx_weight_traits hmx_weight_traits_table[] = {
     { GGML_TYPE_Q5_0,     wrap_dequant_q5_0,         wrap_dequant_q5_0_hvx },
     { GGML_TYPE_Q8_0,     wrap_dequant_q8_0,         wrap_dequant_q8_0_hvx },
     { GGML_TYPE_IQ4_NL,   wrap_dequant_iq4_nl,       wrap_dequant_iq4_nl_hvx },
+    { GGML_TYPE_MXFP4,    wrap_dequant_mxfp4,        wrap_dequant_mxfp4_hvx },
     { GGML_TYPE_Q4_0x4x2, NULL,                      wrap_dequant_x4x2_q4_0_hvx },
 };
 #define HMX_WEIGHT_TRAITS_TABLE_SIZE (sizeof(hmx_weight_traits_table) / sizeof(hmx_weight_traits_table[0]))
@@ -2368,6 +2511,20 @@ static const struct hmx_weight_traits * hmx_weight_traits_lookup(enum ggml_type 
 }
 
 int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+    // Early type checks before acquiring any resources
+    // src0 (weight) types supported by HMX path
+    const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
+    if (wt == NULL || src0->type == GGML_TYPE_F16) {
+        GGMLHEXAGON_LOG_INFO("src0 type %d not supported by HMX, falling back to VTCM multithread mode\n", src0->type);
+        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
+    }
+
+    // src1 (activation) types supported by HMX path
+    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_BF16) {
+        GGMLHEXAGON_LOG_INFO("src1 type %d not supported by HMX, falling back to VTCM multithread mode\n", src1->type);
+        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
+    }
+
     unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
     int hmx_locked = 0;
     if (compute_res_ctx_id != 0) {
@@ -2389,26 +2546,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
             HAP_compute_res_hmx_unlock(compute_res_ctx_id);
         }
         GGMLHEXAGON_LOG_INFO("VTCM ensure failed (%d), falling back to VTCM multithread mode\n", vtcm_err);
-        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
-    }
-
-    // src0 (weight) types supported by HMX path
-    // F16 weight temporarily disabled in HMX path for debugging
-    const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
-    if (wt == NULL || src0->type == GGML_TYPE_F16) {
-        if (hmx_locked) {
-            HAP_compute_res_hmx_unlock(compute_res_ctx_id);
-        }
-        GGMLHEXAGON_LOG_INFO("src0 type %d not supported by HMX, falling back to VTCM multithread mode\n", src0->type);
-        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
-    }
-
-    // src1 (activation) types supported by HMX path
-    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_BF16) {
-        if (hmx_locked) {
-            HAP_compute_res_hmx_unlock(compute_res_ctx_id);
-        }
-        GGMLHEXAGON_LOG_INFO("src1 type %d not supported by HMX, falling back to VTCM multithread mode\n", src1->type);
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 

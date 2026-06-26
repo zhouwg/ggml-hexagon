@@ -918,13 +918,13 @@ elif [ $# == 2 ]; then
 
     if [ "$1" == "run_testop" ]; then
         opname=$2
-        mulmat_algotype=32
+        mulmat_algotype=30
         hexagon_backend=0
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
         opname=$2
-        mulmat_algotype=32
+        mulmat_algotype=30
         hexagon_backend=0
         check_hexagon_backend
         run_perf-op
@@ -935,11 +935,13 @@ elif [ $# == 2 ]; then
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
+        mulmat_algotype=30
         hexagon_backend=$2
         check_hexagon_backend
         run_llamabench
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
+        mulmat_algotype=30
         hexagon_backend=$2
         check_hexagon_backend
         run_threadsafety

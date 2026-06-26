@@ -736,7 +736,7 @@ static const struct ggml_type_traits_dsp type_traits_dsp[GGML_TYPE_COUNT] = {
     [GGML_TYPE_MXFP4] = {
         .from_float       = (ggml_from_float_t) quantize_row_q8_0_hvx,
         .to_float         = NULL,
-        .vec_dot          = vec_dot_mxfp4_q8_0_generic,
+        .vec_dot          = vec_dot_mxfp4_q8_0_hvx,
         .vec_dot_type     = GGML_TYPE_Q8_0,
         .nrows            = 1,
     },
@@ -8620,6 +8620,19 @@ static const uint8_t __attribute__((aligned(VLEN))) iq4nl_lut[] = {
     0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
 };
 
+// LUT for MXFP4 vlut32: nibble -> int8 kvalue
+// kvalues_mxfp4 = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12}
+static const uint8_t __attribute__((aligned(VLEN))) mxfp4_kvalues_lut[] = {
+    0x00, 0, 0x01, 0, 0x02, 0, 0x03, 0, 0x04, 0, 0x06, 0, 0x08, 0, 0x0C, 0,
+    0x00, 0, 0xFF, 0, 0xFE, 0, 0xFD, 0, 0xFC, 0, 0xFA, 0, 0xF8, 0, 0xF4, 0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+    0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0, 0,    0,
+};
+
 void vec_dot_iq4_nl_q8_0_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void *GGML_RESTRICT vx, size_t bx,
                     const void *GGML_RESTRICT vy, size_t by, int nrc) {
     const block_iq4_nl *GGML_RESTRICT x = (const block_iq4_nl *)vx;
@@ -8665,6 +8678,52 @@ void vec_dot_iq4_nl_q8_0_hvx(int n, float *GGML_RESTRICT s, size_t bs, const voi
         }
 
         const float d = ggml_compute_fp16_to_fp32(x[ib].d) * ggml_compute_fp16_to_fp32(y[ib].d);
+        sumf += (float)sumi * d;
+    }
+
+    *s = sumf;
+}
+
+void vec_dot_mxfp4_q8_0_hvx(int n, float *GGML_RESTRICT s, size_t bs, const void *GGML_RESTRICT vx, size_t bx,
+                    const void *GGML_RESTRICT vy, size_t by, int nrc) {
+    const block_mxfp4 *GGML_RESTRICT x = (const block_mxfp4 *)vx;
+    const block_q8_0 *GGML_RESTRICT y = (const block_q8_0 *)vy;
+    UNUSED(bs); UNUSED(bx); UNUSED(by); UNUSED(nrc);
+    assert(n % QK_MXFP4 == 0);
+
+    const int nb = n / QK_MXFP4;
+    float sumf = 0;
+
+    const HVX_Vector vmask = Q6_Vb_vsplat_R(0x0F);
+    const HVX_VectorPred p16 = Q6_Q_vsetq_R(16);
+    const HVX_Vector lut = *(const HVX_Vector *)mxfp4_kvalues_lut;
+
+    for (int ib = 0; ib < nb; ++ib) {
+        HVX_Vector qs_raw = Q6_V_vand_QV(p16, *(const HVX_UVector *)x[ib].qs);
+
+        HVX_Vector lo_nib = Q6_V_vand_VV(qs_raw, vmask);
+        HVX_Vector lo_val = Q6_Vb_vlut32_VbVbI(lo_nib, lut, 0);
+
+        HVX_Vector hi_nib = Q6_Vub_vlsr_VubR(qs_raw, 4);
+        HVX_Vector hi_val = Q6_Vb_vlut32_VbVbI(hi_nib, lut, 0);
+
+        HVX_Vector q8_lo = Q6_V_vand_QV(p16, *(const HVX_UVector *)y[ib].qs);
+        HVX_Vector q8_hi = Q6_V_vand_QV(p16, *(const HVX_UVector *)(y[ib].qs + 16));
+
+        HVX_Vector rsum_lo = Q6_Vw_vrmpy_VbVb(lo_val, q8_lo);
+        HVX_Vector rsum_hi = Q6_Vw_vrmpy_VbVb(hi_val, q8_hi);
+
+        int32_t __attribute__((aligned(128))) tmp_lo[32];
+        int32_t __attribute__((aligned(128))) tmp_hi[32];
+        *(HVX_Vector *)tmp_lo = rsum_lo;
+        *(HVX_Vector *)tmp_hi = rsum_hi;
+
+        int32_t sumi = 0;
+        for (int j = 0; j < 4; ++j) {
+            sumi += tmp_lo[j] + tmp_hi[j];
+        }
+
+        const float d = ggml_compute_fp16_to_fp32(y[ib].d) * ggml_e8m0_to_fp32_half(x[ib].e);
         sumf += (float)sumi * d;
     }
 
