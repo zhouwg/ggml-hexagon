@@ -13,8 +13,29 @@
 #include "log.h"
 #include "sampling.h"
 
+#ifdef GGML_USE_HEXAGON
+#include "ggml-hexagon.h"
+#endif
+
 int main(int argc, char ** argv) {
     common_params params;
+
+#ifdef GGML_USE_HEXAGON
+    // must set hexagon backend before common_init() which calls ggml_backend_load_all()
+    {
+        int backend_index = HEXAGON_BACKEND_CDSP;
+        for (int i = 1; i < argc - 1; i++) {
+            if (0 == strcmp(argv[i], "-mg") || 0 == strcmp(argv[i], "--main-gpu")) {
+                backend_index = atoi(argv[i + 1]);
+                break;
+            }
+        }
+        if (backend_index > HEXAGON_BACKEND_GGML) {
+            backend_index = HEXAGON_BACKEND_CDSP;
+        }
+        ggml_backend_hexagon_set_cfg(backend_index);
+    }
+#endif
 
     common_init();
 

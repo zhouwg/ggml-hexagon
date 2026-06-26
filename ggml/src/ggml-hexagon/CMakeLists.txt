@@ -5,15 +5,10 @@ message("CMAKE_SYSTEM_NAME : ${CMAKE_SYSTEM_NAME}")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT DEFINED QNN_SDK_PATH)
-    message(FATAL_ERROR "QNN_SDK_PATH not defined")
-endif()
-
 if(NOT DEFINED HEXAGON_SDK_PATH)
     message(FATAL_ERROR "HEXAGON_SDK_PATH not defined")
 endif()
 
-message("QNN_SDK_PATH    : ${QNN_SDK_PATH}")
 message("HEXAGON_SDK_PATH: ${HEXAGON_SDK_PATH}")
 message("HTP_ARCH_VERSION: ${HTP_ARCH_VERSION}")
 
@@ -67,8 +62,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
         IMPORTED_LOCATION
         ${HEXAGON_SDK_PATH}/ipc/fastrpc/remote/ship/android_aarch64/libcdsprpc.so)
 
-    set(QNN_LINK_LIBRARIES ${LOG_LIB} cdsprpc)
-    set(QNN_DEFAULT_LIB_SEARCH_PATH "/data/local/tmp/" CACHE STRING "customized library search path for QNN backend")
+    set(HEXAGON_LINK_LIBRARIES ${LOG_LIB} cdsprpc)
+    set(HEXAGON_DEFAULT_LIB_SEARCH_PATH "/data/local/tmp/" CACHE STRING "customized library search path for hexagon backend")
 
     include_directories(${HEXAGON_SDK_PATH}/incs)
     include_directories(${HEXAGON_SDK_PATH}/incs/stddef)
@@ -82,7 +77,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
     include_directories(${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/)
     include_directories(${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/kernels/)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    set(QNN_DEFAULT_LIB_SEARCH_PATH "C:\\" CACHE STRING "customized library search path for QNN backend")
+    set(HEXAGON_DEFAULT_LIB_SEARCH_PATH "C:\\" CACHE STRING "customized library search path for hexagon backend")
 else()
     message(FATAL_ERROR "ggml-hexagon now only available on Android and Windows(Windows on ARM)")
 endif()
@@ -96,11 +91,11 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DGGML_USE_HEXAGON ${DEB
 file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/ggml-hexagon.cpp" "${CMAKE_CURRENT_LIST_DIR}/htp-drv.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/stub.c")
 ggml_add_backend_library(ggml-hexagon ${HEXAGON_SOURCES})
 
-target_include_directories(ggml-hexagon PRIVATE ${QNN_SDK_PATH}/include/QNN ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR})
-target_link_libraries(ggml-hexagon PRIVATE ${QNN_LINK_LIBRARIES})
+target_include_directories(ggml-hexagon PRIVATE ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(ggml-hexagon PRIVATE ${HEXAGON_LINK_LIBRARIES})
 
-string(REGEX REPLACE "/$" "" QNN_DEFAULT_LIB_SEARCH_PATH "${QNN_DEFAULT_LIB_SEARCH_PATH}")
-target_compile_definitions(ggml-hexagon PRIVATE QNN_DEFAULT_LIB_SEARCH_PATH="${QNN_DEFAULT_LIB_SEARCH_PATH}/")
+string(REGEX REPLACE "/$" "" HEXAGON_DEFAULT_LIB_SEARCH_PATH "${HEXAGON_DEFAULT_LIB_SEARCH_PATH}")
+target_compile_definitions(ggml-hexagon PRIVATE HEXAGON_DEFAULT_LIB_SEARCH_PATH="${HEXAGON_DEFAULT_LIB_SEARCH_PATH}/")
 
 #cross compiling source codes of hexagon kernels which running on cDSP side
 function(ggml_hexagon_build_kernel KNAME)

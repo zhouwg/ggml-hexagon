@@ -10,7 +10,7 @@
 
 # 3. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 4. performance comparison of QNN-CPU/QNN-GPU/QNN-NPU/Hexagon-cDSP/ggml with JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 4. performance comparison of Hexagon-cDSP/ggml with JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 
 # 5. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
@@ -55,18 +55,6 @@ NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/li
 OPENCL_SDK_URL=https://github.com/KhronosGroup/OpenCL-Headers
 OPENCL_SDK_PATH=${TOOLCHAIN_PATH}/OpenCL_SDK
 OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
-
-#Qualcomm QNN SDK can be found at:
-#https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
-QNN_SDK_URL=https://www.qualcomm.com/developer/software/qualcomm-ai-engine-direct-sdk
-QNN_SDK_VERSION=2.32.0.250228
-QNN_SDK_VERSION=2.33.0.250327
-QNN_SDK_VERSION=2.34.0.250424
-QNN_SDK_VERSION=2.35.0.250530
-QNN_SDK_VERSION=2.36.0.250627
-QNN_SDK_VERSION=2.46.0.260424
-#fully official QNN SDK, will be downloaded automatically via this script
-QNN_SDK_PATH=${TOOLCHAIN_PATH}/QNN_SDK/qairt/${QNN_SDK_VERSION}/
 
 #fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
 #fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
@@ -128,7 +116,6 @@ running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
 function dump_vars()
 {
     echo -e "ANDROID_NDK:          ${ANDROID_NDK}"
-    echo -e "QNN_SDK_PATH:         ${QNN_SDK_PATH}"
     echo -e "HEXAGON_SDK_PATH:     ${HEXAGON_SDK_PATH}"
 }
 
@@ -249,43 +236,6 @@ function check_and_download_hexagon_sdk()
 }
 
 
-function check_and_download_qnn_sdk()
-{
-    is_qnn_sdk_exist=1
-
-    if [ ! -d ${QNN_SDK_PATH} ]; then
-        echo -e "QNN_SDK_PATH ${QNN_SDK_PATH} not exist\n"
-        is_qnn_sdk_exist=0
-    fi
-
-    if [ ! -f ${QNN_SDK_PATH}/NOTICE.txt ]; then
-        echo -e "${TEXT_RED}${QNN_SDK_PATH}/NOTICE.txt not exist${TEXT_RESET}\n"
-        is_qnn_sdk_exist=0
-    fi
-
-    if [ ${is_qnn_sdk_exist} -eq 0 ]; then
-        if [ ! -f ${TOOLCHAIN_PATH}/QNN_SDK/v${QNN_SDK_VERSION}.zip ]; then
-            echo -e "QNN SDK not exist, download it from ${QNN_SDK_URL}...\n"
-            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/QNN_SDK/v${QNN_SDK_VERSION}.zip https://softwarecenter.qualcomm.com/api/download/software/sdks/Qualcomm_AI_Runtime_Community/All/${QNN_SDK_VERSION}/v${QNN_SDK_VERSION}.zip
-        fi
-        if [ $? -ne 0 ]; then
-            printf "failed to download Qualcomm QNN SDK to %s \n" "${QNN_SDK_PATH}"
-            exit 1
-        fi
-        cd ${TOOLCHAIN_PATH}/QNN_SDK/
-        unzip v${QNN_SDK_VERSION}.zip
-        if [ $? -ne 0 ]; then
-            printf "failed to decompress Qualcomm QNN SDK to %s \n" "${QNN_SDK_PATH}"
-            exit 1
-        fi
-        printf "Qualcomm QNN SDK saved to ${QNN_SDK_PATH} \n\n"
-        cd ${PROJECT_ROOT_PATH}
-    else
-        printf "Qualcomm QNN SDK already exist:    ${QNN_SDK_PATH} \n\n"
-    fi
-}
-
-
 function check_and_download_opencl_sdk()
 {
     is_opencl_sdk_exist=1
@@ -399,7 +349,7 @@ function build_arm64
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #upload the new libggmldsp-skel.so on device side
@@ -416,7 +366,7 @@ function build_arm64_debug
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #upload the new libggmldsp-skel.so on device side
@@ -440,7 +390,7 @@ function build_arm64_qcom
     /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/ggml-hexagon.cpp
     /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists-qcom.txt   ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/CMakeLists.txt
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DQNN_SDK_PATH=${QNN_SDK_PATH} -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cmake --build ${LOCAL_BUILD_DIR}
     #upload the new libggml-htps.so on device side
     prepare_ggmlhtp
@@ -468,41 +418,7 @@ function remove_temp_dir()
 }
 
 
-function check_qnn_libs()
-{
-    set +e
-
-    #reuse the cached qnn libs on Android phone
-    adb shell ls ${REMOTE_PATH}/libQnnCpu.so
-    adb shell ls ${REMOTE_PATH}/libQnnGpu.so
-    adb shell ls ${REMOTE_PATH}/libQnnHtp.so
-    if [ $? -eq 0 ]; then
-        printf "QNN runtime libs already exist on Android phone\n"
-    else
-        printf "QNN runtime libs not exist on Android phone\n"
-        update_qnn_libs
-    fi
-    update_qnn_cfg
-
-    set -e
-}
-
-
-function update_qnn_libs()
-{
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnSystem.so              ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnCpu.so                 ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnGpu.so                 ${REMOTE_PATH}/
-
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtp.so                 ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtpNetRunExtensions.so ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtpPrepare.so          ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/aarch64-android/libQnnHtp${HTP_ARCH_VERSION_a}Stub.so          ${REMOTE_PATH}/
-    adb push ${QNN_SDK_PATH}/lib/hexagon-${HTP_ARCH_VERSION}/unsigned/libQnnHtp${HTP_ARCH_VERSION_a}Skel.so     ${REMOTE_PATH}/
-}
-
-
-function update_qnn_cfg()
+function update_cfg()
 {
     adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
 }
@@ -513,7 +429,6 @@ function build_ggml_hexagon()
     show_pwd
     check_and_download_ndk
     check_and_download_opencl_sdk
-    check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
     remove_temp_dir
@@ -526,7 +441,6 @@ function build_ggml_hexagon_debug()
     show_pwd
     check_and_download_ndk
     check_and_download_opencl_sdk
-    check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
     remove_temp_dir
@@ -539,7 +453,6 @@ function build_ggml_hexagon_qcom()
     show_pwd
     check_and_download_ndk
     check_and_download_opencl_sdk
-    check_and_download_qnn_sdk
     check_and_download_hexagon_sdk
     dump_vars
     remove_temp_dir
@@ -703,7 +616,7 @@ function prepare_run_on_phone()
     fi
     program=$1
 
-    check_qnn_libs
+    update_cfg
 
     check_prebuilt_models
 
@@ -792,9 +705,9 @@ function run_test-ops()
 
 function check_hexagon_backend
 {
-    if [[ ${hexagon_backend} != 0 ]] && [[ ${hexagon_backend} != 1 ]] && [[ ${hexagon_backend} != 2 ]] && [[ ${hexagon_backend} != 3 ]] && [[ ${hexagon_backend} != 4 ]] ; then
+    if [[ ${hexagon_backend} != 0 ]] && [[ ${hexagon_backend} != 1 ]]; then
         printf "invalid hexagon backend\n"
-        printf "valid hexagon backend: 0(QNN_CPU), 1(QNN_GPU), 2(QNN_NPU), 3(cDSP), 4(ggml)\n"
+        printf "valid hexagon backend: 0(cDSP), 1(ggml)\n"
         exit 1
     fi
 }
@@ -941,17 +854,16 @@ function show_usage()
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
     echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
     echo "  $0 clean"
-    echo "  $0 updateqnnlib"
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT                                                    (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT                                                    (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli                 0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_llamabench               0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_threadsafety             0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml)"
-    echo "  $0 run_perfop     MUL_MAT       0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify performance of MUL_MAT)"
-    echo "  $0 run_testop     MUL_MAT       0(QNN_CPU)/1(QNN_GPU)/2(QNN_NPU)/3(cdsp)/4(ggml) (verify accuracy    of MUL_MAT)"
-    echo "  $0 run_perfop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     MUL_MAT       3(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
+    echo "  $0 run_llamacli                 0(cdsp)/1(ggml)"
+    echo "  $0 run_llamabench               0(cdsp)/1(ggml)"
+    echo "  $0 run_threadsafety             0(cdsp)/1(ggml)"
+    echo "  $0 run_perfop     MUL_MAT       0(cdsp)/1(ggml) (verify performance of MUL_MAT)"
+    echo "  $0 run_testop     MUL_MAT       0(cdsp)/1(ggml) (verify accuracy    of MUL_MAT)"
+    echo "  $0 run_perfop     MUL_MAT       0(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
+    echo "  $0 run_testop     MUL_MAT       0(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
 
     echo -e "\n\n\n"
 }
@@ -965,7 +877,6 @@ check_commands_in_host
 check_android_phone
 check_and_download_ndk
 check_and_download_opencl_sdk
-check_and_download_qnn_sdk
 check_and_download_hexagon_sdk
 check_prebuilt_models
 
@@ -997,9 +908,6 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_testops" ]; then
         run_test-ops
         exit 0
-    elif [ "$1" == "updateqnnlib" ]; then
-        update_qnn_libs
-        exit 0
     else
         show_usage
         exit 1
@@ -1011,13 +919,13 @@ elif [ $# == 2 ]; then
     if [ "$1" == "run_testop" ]; then
         opname=$2
         mulmat_algotype=32
-        hexagon_backend=3
+        hexagon_backend=0
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
         opname=$2
         mulmat_algotype=32
-        hexagon_backend=3
+        hexagon_backend=0
         check_hexagon_backend
         run_perf-op
         exit 0
@@ -1061,14 +969,14 @@ elif [ $# == 3 ]; then
 elif [ $# == 4 ]; then
     if [ "$1" == "run_perfop" ]; then
         opname=MUL_MAT
-        hexagon_backend=3
+        hexagon_backend=0
         mulmat_algotype=$4
         check_mulmat_algotype
         run_perf-op
         exit 0
     elif [ "$1" == "run_testop" ]; then
         opname=MUL_MAT
-        hexagon_backend=3
+        hexagon_backend=0
         mulmat_algotype=$4
         check_mulmat_algotype
         run_test-op
