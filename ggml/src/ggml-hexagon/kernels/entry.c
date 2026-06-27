@@ -464,7 +464,6 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
     //g_dump_diag_info      = diag_info;
-    //g_dump_diag_info      = diag_info;
     GGMLHEXAGON_LOG_INFO("diag_info %d", g_dump_diag_info);
 
     //ggml_type_traits_dsp_init(1);
@@ -902,6 +901,10 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     }
 
     /* Normal batch execution */
+    /* Invalidate DSP cache for the batch descriptor before reading.
+     * ION is non-coherent: AP reuses the mempool and writes a new batch
+     * at the same offset, so DSP must invalidate to fetch fresh data. */
+    ggmlop_dsp_cache_flush_range((void *)(base + batch_offset), batch_size);
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
     if (hdr->n_ops == 0 || hdr->n_tensors == 0) {

@@ -8208,6 +8208,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         add_test_bin_bcast(type, {64, 262144, 1, 1}, {1, 1, 1, 1});
         //add_test_bin_bcast(type, {3, 3, 2560, 1280}, {1, 1, 1, 1});
         //add_test_bin_bcast(type, {3, 3, 2560, 1280}, {2, 1, 1, 1});
+#if 1 //JZ
+        // LLM inference pattern: broadcast on dim1 (e.g., SILU gate * up projection)
+        add_test_bin_bcast(type, {1536, 13, 1, 1}, {1, 1, 1, 1});   // matches inference MUL shape
+        add_test_bin_bcast(type, {1280, 1, 1, 1}, {1, 256, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 1280, 1}, {16, 16, 1, 1});
+        add_test_bin_bcast(type, {16, 16, 1280, 1}, {1, 1, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 1920, 1}, {16, 16, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 2560, 1}, {16, 16, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 1280, 1}, {32, 32, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 1920, 1}, {32, 32, 1, 1});
+        add_test_bin_bcast(type, {1, 1, 640, 1}, {32, 32, 1, 1});
+        add_test_bin_bcast(type, {5120, 1, 1, 1}, {1, 256, 1, 1});
+        add_test_bin_bcast(type, {640, 1, 1, 1}, {1, 1, 1, 1});
+        add_test_bin_bcast(type, {3, 3, 2560, 1280}, {1, 1, 1, 1});
+        add_test_bin_bcast(type, {3, 3, 2560, 1280}, {2, 1, 1, 1});
+        add_test_bin_bcast(type, {4096, 4096, 1, 1}, {1, 1, 1, 1});
+#endif
     }
 
     // single inplace tests, especially important for WebGPU backend since kernels for inplace vs. not are different

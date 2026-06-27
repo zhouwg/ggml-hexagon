@@ -7524,6 +7524,30 @@ void ggmlop_dsp_cache_flush_range(void * addr, size_t size) {
     for (; p < end; p += DSP_CACHE_LINE_SIZE) {
         Q6_dccleaninva_A(p);
     }
+    /* Q6_dccleaninva_A is an async ST-slot instruction; without a sync,
+     * subsequent DSP loads may hit stale lines (ION is non-coherent).
+     * Mirrors Qualcomm's qurt_mem_cache_clean() which performs syncht
+     * on V60+. See hexagon_protos.h and SDK utils/test_main.c. */
+    __asm__ __volatile__("syncht\n");
+}
+
+/*
+ * Invalidate DSP cache for a range of non-coherent ION memory before DSP reads.
+ * Uses Q6_dcinva_A (invalidate only, NO clean). This is critical because ION
+ * regions are reused across graph_compute calls: if DSP cache holds dirty
+ * lines from a previous op's dst at the same address, Q6_dccleaninva_A would
+ * write that stale dirty data back to DRAM, corrupting the fresh data AP
+ * just flushed. Q6_dcinva_A simply discards the stale cache line instead.
+ */
+void ggmlop_dsp_cache_inval_range(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        Q6_dcinva_A(p);
+    }
+    __asm__ __volatile__("syncht\n");
 }
 
 static inline HVX_Vector hvx_vec_reduce_max_f32(HVX_Vector in) {

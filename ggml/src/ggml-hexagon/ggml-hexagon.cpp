@@ -788,10 +788,9 @@ static int ion_sync_for_direction(int fd, int direction) {
     return -1;
 }
 
-static inline void cpu_dcache_flush_range(int ion_fd, const void * p, size_t size) {
-    // Flush CPU cache to DRAM so DSP can read via its own bus.
-    // Always do DC CVAC first: DMA_BUF_IOCTL_SYNC may succeed but be a no-op
-    // on platforms the kernel considers coherent (7us for 4GB = no actual flush).
+static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
+#if 1
+    // range-based DC CVAC
     if (size == 0) return;
     {
         const char * start = (const char *)p;
@@ -803,14 +802,25 @@ static inline void cpu_dcache_flush_range(int ion_fd, const void * p, size_t siz
         }
         __asm__ volatile("dsb ish" ::: "memory");
     }
-    // Also try DMA_BUF_IOCTL_SYNC as extra safeguard (kernel EL1 path).
-    // If ioctl is a no-op, DC CVAC above already did the work.
+#else
+    // whole-pool DC CVAC
+    if (backend_ctx && backend_ctx->rpc_mempool && backend_ctx->rpc_mempool_len > 0) {
+        const char * start = (const char *)backend_ctx->rpc_mempool;
+        const char * end   = start + backend_ctx->rpc_mempool_len;
+        const size_t line_size = 64;
+        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
+        for (; addr < end; addr += line_size) {
+            __asm__ volatile("dc cvac, %0" : : "r"((const void *)addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+    }
+#endif
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
 }
 
-static inline void cpu_dcache_inval_range(int ion_fd, const void * p, size_t size) {
-    // Invalidate CPU cache so AP reads DSP-written data from DRAM.
-    // Always do DC CIVAC first: DMA_BUF_IOCTL_SYNC may be a no-op.
+static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
+#if 1
+    // range-based DC CIVAC
     if (size == 0) return;
     {
         const char * start = (const char *)p;
@@ -823,6 +833,20 @@ static inline void cpu_dcache_inval_range(int ion_fd, const void * p, size_t siz
         __asm__ volatile("dsb ish" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
     }
+#else
+    // whole-pool DC CIVAC
+    if (backend_ctx && backend_ctx->rpc_mempool && backend_ctx->rpc_mempool_len > 0) {
+        const char * start = (const char *)backend_ctx->rpc_mempool;
+        const char * end   = start + backend_ctx->rpc_mempool_len;
+        const size_t line_size = 64;
+        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
+        for (; addr < end; addr += line_size) {
+            __asm__ volatile("dc civac, %0" : : "r"((const void *)addr) : "memory");
+        }
+        __asm__ volatile("dsb ish" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+#endif
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
 }
 
@@ -4174,6 +4198,9 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
             buffer_ctx->buffer      = (char *)ctx->rpc_mempool + r.offset;
             buffer_ctx->buffer_size = size_aligned;  // actual requested size, not region size
             r.in_use = true;
+            if (r.offset + size_aligned > ctx->rpc_mempool_usage) {
+                ctx->rpc_mempool_usage = r.offset + size_aligned;
+            }
             GGMLHEXAGON_LOG_WARN("[ALLOC] reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
                                  r.offset, r.size, size_aligned, r.size - size_aligned);
         } else {
@@ -4705,6 +4732,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
     // This avoids FastRPC's scatter-gather limits on large batches.
     // ====================================================================
 
+    size_t saved_mempool_usage = ctx->rpc_mempool_usage;
     if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
         GGMLHEXAGON_LOG_WARN("special: no ION mempool, falling back to per-op");
         return result;  // let scheduler use per-op path
@@ -5136,7 +5164,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         if (desc_end > clean_max) clean_max = desc_end;
 
         if (clean_max > clean_min) {
-            cpu_dcache_flush_range(0, (char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
+            cpu_dcache_flush_range(ctx, 0, (char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
             GGMLHEXAGON_LOG_DEBUG("ion-batch: phase6.5 DC CVAC [0x%x, 0x%x] (%u bytes)",
                                   clean_min, clean_max, clean_max - clean_min);
         }
@@ -5219,7 +5247,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
             if (end > inval_max) inval_max = end;
         }
         if (inval_max > inval_min) {
-            cpu_dcache_inval_range(0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
+            cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
             GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
                                   inval_min, inval_max, inval_max - inval_min);
         }
@@ -5227,6 +5255,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         int ion_fd = ctx->rpc_mempool_handle;
         if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
     }
+
+    // Reset bump pointer so next graph_compute reuses the same ION pool region.
+    // Without this, rpc_mempool_usage only grows and eventually exhausts the pool,
+    // causing mirror alloc failure (data_offset=0 -> DSP corrupts model weights).
+    ctx->rpc_mempool_usage = saved_mempool_usage;
 
     // ---- Phase 8: copy-back mirrored results to heap ----
     t_p75 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
