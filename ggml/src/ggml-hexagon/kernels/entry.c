@@ -903,8 +903,11 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     /* Normal batch execution */
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
-     * at the same offset, so DSP must invalidate to fetch fresh data. */
-    ggmlop_dsp_cache_flush_range((void *)(base + batch_offset), batch_size);
+     * at the same offset, so DSP must invalidate to fetch fresh data.
+     * Use dcinva (invalidate-only) instead of dccleaninva: the descriptor
+     * region may have been a previous op's dst, and clean+invalidate would
+     * write stale dirty data back to DRAM, corrupting the fresh descriptor. */
+    ggmlop_dsp_cache_inval_range((void *)(base + batch_offset), batch_size);
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
     if (hdr->n_ops == 0 || hdr->n_tensors == 0) {
@@ -991,11 +994,15 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Always invalidate, even for weights: ION region reuse means the
-         *   same address may hold different data from a previous allocation */
-        ggmlop_dsp_cache_flush_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) ggmlop_dsp_cache_flush_range(src1_dt_buf.data, src1_dt_buf.data_len);
-        if (src2_dt_ptr) ggmlop_dsp_cache_flush_range(src2_dt_buf.data, src2_dt_buf.data_len);
+         * - Use dcinva (invalidate-only): ION region reuse means the same
+         *   address may hold dirty lines from a previous op's dst; clean+inval
+         *   would write that stale data back to DRAM, corrupting fresh src.
+         * - Weights are read-only but still need inval after AP repack/flush
+         * - Batch all src inval into one syncht to reduce pipeline stalls */
+        ggmlop_dsp_cache_inval_range_nosync(src0_dt.data, src0_dt.data_len);
+        if (src1_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src1_dt_buf.data, src1_dt_buf.data_len);
+        if (src2_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src2_dt_buf.data, src2_dt_buf.data_len);
+        __asm__ __volatile__("syncht\n");
 
         int op_ret = 0;
         switch (op->opcode) {

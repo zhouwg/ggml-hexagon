@@ -2105,6 +2105,7 @@ GGML_API void *         ggmlop_get_work_data(size_t size);
 GGML_API void *         ggmlop_get_vtcm_pool(size_t * size);
 GGML_API void           ggmlop_dsp_cache_flush_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_inval_range(void * addr, size_t size);
+GGML_API void           ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
 
 // DSP op functions (called from entry.c batch execution)

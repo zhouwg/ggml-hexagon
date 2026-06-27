@@ -7550,6 +7550,19 @@ void ggmlop_dsp_cache_inval_range(void * addr, size_t size) {
     __asm__ __volatile__("syncht\n");
 }
 
+/* Nosync variants: issue dcinva/dccleaninva without syncht barrier.
+ * Caller must issue syncht before reading the invalidated range.
+ * Used to batch multiple cache ops into a single syncht. */
+void ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        Q6_dcinva_A(p);
+    }
+}
+
 static inline HVX_Vector hvx_vec_reduce_max_f32(HVX_Vector in) {
     unsigned total = 128;  // total vec nbytes
     unsigned width = 4;    // fp32 nbytes
