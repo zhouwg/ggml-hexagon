@@ -4,15 +4,15 @@
  * Qualcomm Hexagon SDK and reference tech guides could be found at:
  * https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
  *
- * this single-source-file or self-contained implementation of ggml-hexagon backend has 5 sections:
+ * this single-source-file or self-contained implementation of ggml-hexagon backend has 4 sections:
  * section-1  forward/prototype declaration, global vars, macros, data structures
  * section-2  internal troubleshooting function/class
- * section-3  helper function for WoA(Windows on ARM)
- * section-4  general helper function
- * section-5  cDSP helper function
- * section-6  implementation of ggml-hexagon backend according to specification in ggml backend subsystem
+ * section-3  general helper function
+ * section-4  cDSP helper function
+ * section-5  implementation of ggml-hexagon backend according to specification in ggml backend subsystem
  *
- * this is a practical implementation(although mulmat's performance is slower than Qualcomm's official ggml-hexagon backend at the moment), can expand other ggml ops easily & accordingly.
+ * this is a practical implementation(although mulmat's performance is slower than Qualcomm's official
+ * ggml-hexagon backend at the moment), can expand other ggml ops easily & accordingly.
  *
  */
 #include <stdio.h>
@@ -154,6 +154,7 @@ typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor *
 
 // Forward declaration for test function
 static int  test_hmx_ap(ggml_backend_hexagon_context * ctx);
+static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 
 struct ggmlhexagon_task {
     int32 op_type;
@@ -320,15 +321,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .ggml_dsp_use_hvx       = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
-    #if defined(STANDARD_ANDROID_APP)
-        .runtime_libpath        = "/data/data/com.kantvai.kantvplayer/",
-    #else
         .runtime_libpath        = "/data/local/tmp/",
-    #endif
-#elif defined(__linux__)
-        .runtime_libpath        = "/tmp/",
-#elif defined(_WIN32)
-        .runtime_libpath        = "C:\\",
 #endif
         .version                = {"0.99.2"},
 };
@@ -466,121 +459,10 @@ static domain hexagon_supported_domains[] = {
         {CDSP1_DOMAIN_ID, CDSP1_DOMAIN}
 };
 
-//supported ggml op by HWACCEL_CDSP
+// Supported ggml ops by HWACCEL_CDSP.
+// Used by both per-op mode (offload_cgraph_type=0) and ION-batch mode (offload_cgraph_type=2).
+// Only marks op type as supported - shape/size/type restrictions are enforced in supports_op.
 static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
-        {true,  GGML_OP_NONE, 0, nullptr, nullptr},
-        {false, GGML_OP_DUP, 0, nullptr, nullptr},
-        {true,  GGML_OP_ADD, 2, "ggmlop_dsp_add", ggmlop_dsp_add},
-        {false, GGML_OP_ADD_ID, 0, nullptr, nullptr},
-        {false, GGML_OP_ADD1, 0, nullptr, nullptr},
-        {false, GGML_OP_ACC, 0, nullptr, nullptr},
-        {true,  GGML_OP_SUB, 2, "ggmlop_dsp_sub", nullptr},
-        {false, GGML_OP_MUL, 2, nullptr, nullptr},
-        {false, GGML_OP_DIV, 2, nullptr, nullptr},
-        {false, GGML_OP_SQR, 0, nullptr, nullptr},
-        {false, GGML_OP_SQRT, 0, nullptr, nullptr},
-        {false, GGML_OP_LOG, 0, nullptr, nullptr},
-        {false, GGML_OP_SIN, 0, nullptr, nullptr},
-        {false, GGML_OP_COS, 0, nullptr, nullptr},
-        {false, GGML_OP_SUM, 0, nullptr, nullptr},
-        {false, GGML_OP_SUM_ROWS, 0, nullptr, nullptr},
-        {false, GGML_OP_CUMSUM, 0, nullptr, nullptr},
-        {false, GGML_OP_MEAN, 0, nullptr, nullptr},
-        {false, GGML_OP_ARGMAX, 0, nullptr, nullptr},
-        {false, GGML_OP_COUNT_EQUAL, 0, nullptr, nullptr},
-        {false, GGML_OP_REPEAT, 0, nullptr, nullptr},
-        {false, GGML_OP_REPEAT_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_CONCAT, 0, nullptr, nullptr},
-        {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_NORM, 0, nullptr, nullptr},
-        {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
-        {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
-        {false, GGML_OP_L2_NORM, 0, nullptr, nullptr},
-        {true,  GGML_OP_MUL_MAT, 2, "ggmlop_dsp_mulmat", ggmlop_dsp_mulmat},
-        {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
-        {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
-        {true,  GGML_OP_SCALE, 1, "ggmlop_dsp_scale", nullptr},
-        {false, GGML_OP_SET, 0, nullptr, nullptr},
-        {false, GGML_OP_CPY, 0, nullptr, nullptr},
-        {false, GGML_OP_CONT, 0, nullptr, nullptr},
-        {false, GGML_OP_RESHAPE, 0, nullptr, nullptr},
-        {false, GGML_OP_VIEW, 0, nullptr, nullptr},
-        {false, GGML_OP_PERMUTE, 0, nullptr, nullptr},
-        {false, GGML_OP_TRANSPOSE, 0, nullptr, nullptr},
-        {false, GGML_OP_GET_ROWS, 0, nullptr, nullptr},
-        {false, GGML_OP_GET_ROWS_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_SET_ROWS, 0, nullptr, nullptr},
-        {false, GGML_OP_DIAG, 0, nullptr, nullptr},
-        {false, GGML_OP_DIAG_MASK_INF, 0, nullptr, nullptr},
-        {false, GGML_OP_DIAG_MASK_ZERO, 0, nullptr, nullptr},
-        {true,  GGML_OP_SOFT_MAX, 2, "ggmlop_dsp_softmax", nullptr},
-        {false, GGML_OP_SOFT_MAX_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_ROPE, 0, nullptr, nullptr},
-        {false, GGML_OP_ROPE_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_CLAMP, 0, nullptr, nullptr},
-        {false, GGML_OP_CONV_TRANSPOSE_1D, 0, nullptr, nullptr},
-        {false, GGML_OP_IM2COL, 0, nullptr, nullptr},
-        {false, GGML_OP_IM2COL_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_IM2COL_3D, 0, nullptr, nullptr},
-        {false, GGML_OP_COL2IM_1D, 0, nullptr, nullptr},
-        {false, GGML_OP_CONV_2D, 0, nullptr, nullptr},
-        {false, GGML_OP_CONV_3D, 0, nullptr, nullptr},
-        {false, GGML_OP_CONV_2D_DW, 0, nullptr, nullptr},
-        {false, GGML_OP_CONV_TRANSPOSE_2D, 0, nullptr, nullptr},
-        {false, GGML_OP_POOL_1D, 0, nullptr, nullptr},
-        {false, GGML_OP_POOL_2D, 0, nullptr, nullptr},
-        {false, GGML_OP_POOL_2D_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_UPSCALE, 0, nullptr, nullptr},
-        {false, GGML_OP_PAD, 0, nullptr, nullptr},
-        {false, GGML_OP_PAD_REFLECT_1D, 0, nullptr, nullptr},
-        {false, GGML_OP_ROLL, 0, nullptr, nullptr},
-        {false, GGML_OP_ARANGE, 0, nullptr, nullptr},
-        {false, GGML_OP_TIMESTEP_EMBEDDING, 0, nullptr, nullptr},
-        {false, GGML_OP_ARGSORT, 0, nullptr, nullptr},
-        {false, GGML_OP_TOP_K, 0, nullptr, nullptr},
-        {false, GGML_OP_LEAKY_RELU, 0, nullptr, nullptr},
-        {false, GGML_OP_TRI, 0, nullptr, nullptr},
-        {false, GGML_OP_FILL, 0, nullptr, nullptr},
-        {false, GGML_OP_FLASH_ATTN_EXT, 0, nullptr, nullptr},
-        {false, GGML_OP_FLASH_ATTN_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_SSM_CONV, 0, nullptr, nullptr},
-        {false, GGML_OP_SSM_SCAN, 0, nullptr, nullptr},
-        {false, GGML_OP_WIN_PART, 0, nullptr, nullptr},
-        {false, GGML_OP_WIN_UNPART, 0, nullptr, nullptr},
-        {false, GGML_OP_GET_REL_POS, 0, nullptr, nullptr},
-        {false, GGML_OP_ADD_REL_POS, 0, nullptr, nullptr},
-        {false, GGML_OP_RWKV_WKV6, 0, nullptr, nullptr},
-        {false, GGML_OP_GATED_LINEAR_ATTN, 0, nullptr, nullptr},
-        {false, GGML_OP_RWKV_WKV7, 0, nullptr, nullptr},
-        {false, GGML_OP_SOLVE_TRI, 0, nullptr, nullptr},
-        {false, GGML_OP_GATED_DELTA_NET, 0, nullptr, nullptr},
-        {true,  GGML_OP_UNARY, 2, "ggmlop_dsp_silu", nullptr},
-        {false, GGML_OP_MAP_CUSTOM1, 0, nullptr, nullptr},
-        {false, GGML_OP_MAP_CUSTOM2, 0, nullptr, nullptr},
-        {false, GGML_OP_MAP_CUSTOM3, 0, nullptr, nullptr},
-        {false, GGML_OP_CUSTOM, 0, nullptr, nullptr},
-        {false, GGML_OP_CROSS_ENTROPY_LOSS, 0, nullptr, nullptr},
-        {false, GGML_OP_CROSS_ENTROPY_LOSS_BACK, 0, nullptr, nullptr},
-        {false, GGML_OP_OPT_STEP_ADAMW, 0, nullptr, nullptr},
-        {false, GGML_OP_OPT_STEP_SGD, 0, nullptr, nullptr},
-        {false, GGML_OP_GLU, 0, nullptr, nullptr},
-};
-
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_NONE].supported,     "GGML_OP_NONE is not true");
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_ADD].supported,      "GGML_OP_ADD is not true");
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_RMS_NORM].supported, "GGML_OP_RMS_NORM is not true");
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_SCALE].supported,    "GGML_OP_SCALE is not true");
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_UNARY].supported,    "GGML_OP_UNARY is not true");
-static_assert(ggmlhexagon_k_op_caps[GGML_OP_MUL_MAT].supported,  "GGML_OP_MUL_MAT is not true");
-static_assert(std::size(ggmlhexagon_k_op_caps) == (static_cast<size_t>(GGML_OP_COUNT)),
-              "pls check ggmlhexagon_k_op_caps and ensure is corresponding to latest ggml.h");
-
-// Batch-op relaxed caps table for cgraph offload mode (offload_cgraph_type==2).
-// Only checks op type support — no shape/size/type restrictions.
-// This allows larger subgraphs to be formed, reducing FastRPC call count.
-// Start with minimal set (ADD + MUL_MAT) for validation, expand incrementally.
-static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps_special[] = {
     {true,  GGML_OP_NONE,     0, nullptr, nullptr},
     {false, GGML_OP_DUP,      0, nullptr, nullptr},
     {true,  GGML_OP_ADD,      2, "ggmlop_dsp_add",     ggmlop_dsp_add},
@@ -1571,62 +1453,7 @@ private:
 };
 
 // =================================================================================================
-//  section-3: helper function for WoA(Window on ARM)
-// =================================================================================================
-#if !defined(__ANDROID__) && !defined(__linux__)
-#define RTLD_GLOBAL 0x100
-#define RTLD_LOCAL  0x000
-#define RTLD_LAZY   0x000
-#define RTLD_NOW    0x001
-static void *       dlopen(const char * filename, int flag);
-static int          dlclose(void * handle);
-static void *       dlsym(void* handle, const char* name);
-static const char * dlerror(void);
-
-static const char * last_func = nullptr;
-static long last_err;
-static void * dlopen(const char * dll, int flags) {
-  HINSTANCE h = LoadLibraryA(dll);
-  GGML_UNUSED(flags);
-  if (h == NULL) {
-    last_err  = GetLastError();
-    last_func = "dlopen";
-  }
-  return h;
-}
-
-static int dlclose(void * h) {
-  if (!FreeLibrary((HINSTANCE)h)) {
-    last_err  = GetLastError();
-    last_func = "dlclose";
-    return -1;
-  }
-  return 0;
-}
-
-static void * dlsym(void * h, const char * name) {
-  FARPROC p = GetProcAddress((HINSTANCE)h, name);
-  if (!p) {
-    last_err  = GetLastError();
-    last_func = "dlsym";
-  }
-  return (void*)(intptr_t)p;
-}
-
-static const char * dlerror(void) {
-  static char str[512];
-  if (!last_err) return nullptr;
-
-  snprintf(str, 512, "%s error #%ld", last_func, last_err);
-  last_err  = 0;
-  last_func = NULL;
-
-  return str;
-}
-#endif
-
-// =================================================================================================
-//  section-4: general helper function
+//  section-3: general helper function
 // =================================================================================================
 static const char * ggmlhexagon_get_socmodel_desc(uint32_t soc_model) {
     switch (soc_model) {
@@ -1801,7 +1628,6 @@ static size_t ggmlhexagon_get_op_input_param_count(const ggml_tensor * op) {
 }
 
 static void ggmlhexagon_get_opkey_from_op(const ggml_tensor * op, std::string & output) {
-    //GGML_ASSERT(op->op != GGML_OP_NONE);
     if (op->op == GGML_OP_NONE) {
         output = "GGML_OP_NONE";
         return;
@@ -2039,8 +1865,9 @@ static bool ggmlhexagon_check_valid_appcfg() {
         }
     }
 
-    if (g_hexagon_appcfg.offload_cgraph_type > 2) {
-        GGMLHEXAGON_LOG_WARN("invalid offload_cgraph_type %d, reset to 2", g_hexagon_appcfg.offload_cgraph_type);
+    if (g_hexagon_appcfg.offload_cgraph_type != 0 && g_hexagon_appcfg.offload_cgraph_type != 2) {
+        GGMLHEXAGON_LOG_WARN("invalid offload_cgraph_type %d, reset to 2 (only 0=per-op and 2=ION-batch supported)",
+                             g_hexagon_appcfg.offload_cgraph_type);
         g_hexagon_appcfg.offload_cgraph_type = 2;
     }
 
@@ -2069,7 +1896,6 @@ static bool ggmlhexagon_check_valid_appcfg() {
     return is_valid_appcfg;
 }
 
-static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * ctx) {
     char timestamp[GGMLHEXAGON_TMPBUF_LEN];
     memset(timestamp, 0, GGMLHEXAGON_TMPBUF_LEN);
@@ -2104,7 +1930,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
 }
 
 // =================================================================================================
-//  section-5: cDSP helper function
+//  section-4: cDSP helper function
 // =================================================================================================
 static const char * ggmlhexagon_get_dsp_name(int domain_id) {
     switch (domain_id) {
@@ -3272,7 +3098,187 @@ static int ggmlhexagon_task_execute(ggml_backend_hexagon_context * ctx, struct g
     return hexagon_error;
 }
 
-static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_tensor * op) {
+// ==================== HMX Test Functions ====================
+// Test HMX matrix multiplication with known values
+// Uses RPC mempool to simulate real offload mulmat behavior
+// src0: MxK matrix, all values = 0.5f
+// src1: KxN matrix, all values = 1.0f
+// Expected result: dst = src0^T * src1, each element = K * 0.5 * 1.0 = 0.5*K
+// Note: HMX F16 accumulation has hardware precision characteristics
+static int test_hmx_ap(ggml_backend_hexagon_context * ctx) {
+    // Use 64x64x64 matrices for HMX test (larger than 32x32)
+    // HMX requires all dimensions to be 32-aligned
+    int     sizex               = 64;  // K dimension
+    int     sizey               = 64;  // M dimension (rows of src0)
+    int     sizez               = 64;  // N dimension (rows of src1)
+
+    GGMLHEXAGON_LOG_INFO("DEBUG: sizex=%d, sizey=%d, sizez=%d\n", sizex, sizey, sizez);
+
+    // Calculate aligned sizes (128-byte alignment for RPC mempool)
+    size_t src0_size = sizex * sizey * sizeof(float);
+    size_t src1_size = sizex * sizez * sizeof(float);
+    size_t dst_size = sizey * sizez * sizeof(float);
+
+    size_t src0_size_aligned = ((src0_size + 127) / 128) * 128;
+    size_t src1_size_aligned = ((src1_size + 127) / 128) * 128;
+    size_t dst_size_aligned = ((dst_size + 127) / 128) * 128;
+
+    // Allocate from RPC mempool (simulating real offload behavior)
+    if (nullptr == ctx->rpc_mempool) {
+        GGMLHEXAGON_LOG_INFO("rpc_mempool not initialized, skipping HMX test\n");
+        return 2;
+    }
+
+    size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
+    if (aligned_offset + src0_size_aligned + src1_size_aligned + dst_size_aligned > ctx->rpc_mempool_len) {
+        GGMLHEXAGON_LOG_INFO("rpc_mempool exhausted, skipping HMX test\n");
+        return 2;
+    }
+
+    float * src0_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    aligned_offset += src0_size_aligned;
+    float * src1_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    aligned_offset += src1_size_aligned;
+    float * dst_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
+    ctx->rpc_mempool_usage = aligned_offset + dst_size_aligned;
+
+    GGMLHEXAGON_LOG_INFO("HMX test allocated from rpc_mempool: src0=%p, src1=%p, dst=%p\n",
+                         (void *)src0_data, (void *)src1_data, (void *)dst_data);
+
+    // Initialize tensors with known values
+    // Using 0.5 and 1.0 to test HMX F16 accumulation precision
+    for (int i = 0; i < sizex * sizey; i++) {
+        src0_data[i] = 0.5f;
+    }
+    for (int i = 0; i < sizex * sizez; i++) {
+        src1_data[i] = 1.0f;
+    }
+    memset(dst_data, 0, dst_size);
+
+    GGMLHEXAGON_LOG_INFO("HMX test: src0(%dx%d), src1(%dx%d), dst(%dx%d)\n",
+                         sizex, sizey, sizex, sizez, sizez, sizey);
+    GGMLHEXAGON_LOG_INFO("src0 first 4 elements: %.2f %.2f %.2f %.2f\n",
+                         src0_data[0], src0_data[1], src0_data[2], src0_data[3]);
+    GGMLHEXAGON_LOG_INFO("src1 first 4 elements: %.2f %.2f %.2f %.2f\n",
+                         src1_data[0], src1_data[1], src1_data[2], src1_data[3]);
+
+    // Construct dsptensor structures
+    struct dsptensor dsptensor_0;
+    struct dsptensor dsptensor_1;
+    struct dsptensor dsptensor_2;
+
+    memset(&dsptensor_0, 0, sizeof(dsptensor_0));
+    dsptensor_0.data = (void *)src0_data;
+    dsptensor_0.data_len = src0_size;
+    dsptensor_0.type = GGML_TYPE_F32;
+    dsptensor_0.ne[0] = sizex;
+    dsptensor_0.ne[1] = sizey;
+    dsptensor_0.ne[2] = 1;
+    dsptensor_0.ne[3] = 1;
+    dsptensor_0.nb[0] = sizeof(float);
+    dsptensor_0.nb[1] = dsptensor_0.nb[0] * dsptensor_0.ne[0];
+    dsptensor_0.nb[2] = dsptensor_0.nb[1] * dsptensor_0.ne[1];
+    dsptensor_0.nb[3] = dsptensor_0.nb[2] * dsptensor_0.ne[2];
+
+    memset(&dsptensor_1, 0, sizeof(dsptensor_1));
+    dsptensor_1.data = (void *)src1_data;
+    dsptensor_1.data_len = src1_size;
+    dsptensor_1.type = GGML_TYPE_F32;
+    dsptensor_1.ne[0] = sizex;
+    dsptensor_1.ne[1] = sizez;
+    dsptensor_1.ne[2] = 1;
+    dsptensor_1.ne[3] = 1;
+    dsptensor_1.nb[0] = sizeof(float);
+    dsptensor_1.nb[1] = dsptensor_1.nb[0] * dsptensor_1.ne[0];
+    dsptensor_1.nb[2] = dsptensor_1.nb[1] * dsptensor_1.ne[1];
+    dsptensor_1.nb[3] = dsptensor_1.nb[2] * dsptensor_1.ne[2];
+
+    memset(&dsptensor_2, 0, sizeof(dsptensor_2));
+    dsptensor_2.data = (void *)dst_data;
+    dsptensor_2.data_len = dst_size;
+    dsptensor_2.type = GGML_TYPE_F32;
+    dsptensor_2.ne[0] = sizez;
+    dsptensor_2.ne[1] = sizey;
+    dsptensor_2.ne[2] = 1;
+    dsptensor_2.ne[3] = 1;
+    dsptensor_2.nb[0] = sizeof(float);
+    dsptensor_2.nb[1] = dsptensor_2.nb[0] * dsptensor_2.ne[0];
+    dsptensor_2.nb[2] = dsptensor_2.nb[1] * dsptensor_2.ne[1];
+    dsptensor_2.nb[3] = dsptensor_2.nb[2] * dsptensor_2.ne[2];
+
+    // Execute task on DSP using op_type = 168 (test HMX)
+    GGMLHEXAGON_LOG_INFO("calling ggmlop_dsp_execute_task with op_type=168\n");
+    int hexagon_error = ggmlop_dsp_execute_task(ctx->ggmlop_handle, 168, &dsptensor_0, &dsptensor_1, &dsptensor_2);
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_task failed: %d", hexagon_error);
+    }
+
+    // Dump result (first row)
+    GGMLHEXAGON_LOG_INFO("dst first row: ");
+    for (int j = 0; j < sizez; j++) {
+        GGMLHEXAGON_LOG_INFO("%.2f ", dst_data[j]);
+    }
+    GGMLHEXAGON_LOG_INFO("\n");
+
+    // Verify result: each element should be 64 * 0.5f * 1.0f = 32.0f
+    // Note: HMX F16 accumulation may have small precision differences
+    float expected = (float)sizex * 0.5f;  // 32.0f
+    int errors = 0;
+    int nan_count = 0;
+    int inf_count = 0;
+
+    for (int i = 0; i < sizey * sizez; i++) {
+        float val = dst_data[i];
+
+        // Check for NaN
+        if (isnan(val)) {
+            if (nan_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = NaN", i);
+            }
+            nan_count++;
+            errors++;
+        }
+        // Check for Infinity
+        else if (isinf(val)) {
+            if (inf_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %s\n", i, val > 0 ? "Inf" : "-Inf");
+            }
+            inf_count++;
+            errors++;
+        }
+        // Check for value mismatch (allow 1% tolerance for HMX F16 precision)
+        else if (fabs(val - expected) > expected * 0.01f) {
+            if (errors - nan_count - inf_count < 5) {
+                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %.6f, expected %.6f (diff=%.6f)\n", i, val, expected, fabs(val - expected));
+            }
+            errors++;
+        }
+
+        if (errors >= 20) {
+            GGMLHEXAGON_LOG_INFO("... (more errors truncated)\n");
+            break;
+        }
+    }
+
+    if (errors == 0) {
+        GGMLHEXAGON_LOG_INFO("HMX test PASSED: all %d elements = %.2f\n", sizey * sizez, expected);
+    } else {
+        GGMLHEXAGON_LOG_INFO("HMX test FAILED: %d errors out of %d elements\n", errors, sizey * sizez);
+        if (nan_count > 0) {
+            GGMLHEXAGON_LOG_INFO("  - NaN count: %d\n", nan_count);
+        }
+        if (inf_count > 0) {
+            GGMLHEXAGON_LOG_INFO("  - Infinity count: %d\n", inf_count);
+        }
+        if (errors > nan_count + inf_count) {
+            GGMLHEXAGON_LOG_INFO("  - Value mismatch count: %d\n", errors - nan_count - inf_count);
+        }
+    }
+
+    return errors == 0 ? 0 : 1;
+}
+
+static bool ggmlhexagon_compute_forward(ggml_backend_hexagon_context * ctx, struct ggml_tensor * op) {
     struct dsptensor dsptensor_0;
     struct dsptensor dsptensor_1;
     struct dsptensor dsptensor_2;
@@ -3352,6 +3358,7 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
         hexagon_error = op_func(ctx->ggmlop_handle, &dsptensor_0, &dsptensor_1, &dsptensor_2);
         if (AEE_SUCCESS != hexagon_error) {
             GGMLHEXAGON_LOG_WARN("ggmlop %s computation fail on cdsp", ggml_op_name(op->op));
+            return false;
         }
     } else if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op)].supported) {
         struct ggmlhexagon_task task;
@@ -3360,7 +3367,7 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
         int ret = ggmlhexagon_task_add_op(&task, op->op, src0, src1, dst);
         if (ret != 0) {
             GGMLHEXAGON_LOG_WARN("failed to add op to task");
-            return;
+            return false;
         }
 
         hexagon_error = ggmlhexagon_task_execute(ctx, &task);
@@ -3369,18 +3376,17 @@ static void ggmlhexagon_compute(ggml_backend_hexagon_context * ctx, struct ggml_
         }
     } else {
         GGMLHEXAGON_LOG_DEBUG("op GGML_OP_%s not supported on cDSP", ggml_op_name(op->op));
-        return;
+        return false;
     }
 
     op_perf.info();
-    return;
+    return true;
 }
 
 // =================================================================================================
-//  section-6: implementation of ggml-hexagon backend according to specification in ggml backend subsystem
+//  section-5: implementation of ggml-hexagon backend according to specification in ggml backend subsystem
 // =================================================================================================
-//ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
-
+// ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
 // Check if a ggml_type is allowed by the enabled_types config filter
 // Returns true if the type is in the enabled list, or if the list is empty (all types allowed)
 // Only applies to quantized types and F16/BF16; F32 is always allowed
@@ -3707,7 +3713,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 // but omits the strict size threshold (ne00 >= 1024) that limits per-op granularity.
 // This allows the scheduler to form larger subgraphs with more ops per batch,
 // reducing FastRPC call overhead (the dominant cost).
-static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
     if (!ggmlhexagon_use_ion_mempool()) {
         return false;
     }
@@ -3719,7 +3725,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         return true;
     }
 
-    if (!ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(op_tensor)].supported) {
+    if (!ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op_tensor)].supported) {
         return false;
     }
 
@@ -3885,13 +3891,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_special(ggml_backend_dev_t de
         default:
             return true; // other ops in table: trust the table entry
     }
-}
-
-static bool ggmlhexagon_compute_forward(ggml_backend_t backend, struct ggml_tensor * dst) {
-    ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
-
-    ggmlhexagon_compute(ctx, dst);
-    return true;
 }
 
 struct ggml_backend_hexagon_buffer_context {
@@ -4311,10 +4310,16 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
 
+/*
+# offload type on AP side
+# 0 = per-op (debug, each op = one FastRPC call)
+# 1 = FastRPC-based op-batch (experimental, support has been removed)
+# 2 = ION-based op-batch (production, data via ion shared memory)
+*/
+// MODE 0: per-op FastRPC call (debug only, limited to MUL_MAT and ADD)
 static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     enum ggml_status result         = GGML_STATUS_SUCCESS;
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
-    GGML_UNUSED(ctx);
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
@@ -4323,7 +4328,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
-        bool ok = ggmlhexagon_compute_forward(backend, node);
+        // Mode 0 only supports MUL_MAT and ADD for debugging
+        if (node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_ADD) {
+            continue;
+        }
+        bool ok = ggmlhexagon_compute_forward(ctx, node);
         if (!ok) {
             GGMLHEXAGON_LOG_DEBUG("%s: error: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
         }
@@ -4332,355 +4341,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
     return result;
 }
 
-//1.Qualcomm's dspqueue is a highlevel wrapper of the native FastRPC and it's complicated.
-//2.LLM inference is essentially synchronous.
-//3.ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side.
-//according to 1+2+3, we can implement a simple solution for purose of offload multiple op(a fully single cgraph) to NPU via ggmlop_dsp_execute_batch, this simple solution will also reduce FastRPC overhead observably.
-static enum ggml_status ggmlhexagon_backend_graph_compute_special(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-
-    enum ggml_status result         = GGML_STATUS_SUCCESS;
-    ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
-
-    // collect supported ops
-    std::vector<ggml_tensor *> supported_nodes;
-    std::vector<ggml_tensor *> unsupported_nodes;
-    GGMLHEXAGON_LOG_WARN("cgraph has %d total nodes", cgraph->n_nodes);
-    for (int i = 0; i < cgraph->n_nodes; i++) {
-        ggml_tensor * node = cgraph->nodes[i];
-        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
-            || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
-            || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
-            continue;
-        }
-        //TODO: use relaxed batch table to maximize batching
-        if (ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(node)].supported) {
-            supported_nodes.push_back(node);
-        } else {
-            unsupported_nodes.push_back(node);
-        }
-
-        std::string node_name;
-        ggmlhexagon_get_opkey_from_op(node, node_name);
-        GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
-    }
-
-    if (!unsupported_nodes.empty()) {
-        GGMLHEXAGON_LOG_WARN("special: %d unsupported ops skipped:", (int)unsupported_nodes.size());
-        for (auto * n : unsupported_nodes) {
-            GGMLHEXAGON_LOG_WARN("  node[%s] op=%s(%d), src0=%p src1=%p dst=%p",
-                                  n->name ? n->name : "?", ggml_op_name(n->op), n->op,
-                                  n->src[0] ? n->src[0]->data : nullptr,
-                                  n->src[1] ? n->src[1]->data : nullptr,
-                                  n->data);
-        }
-    }
-
-    if (supported_nodes.empty()) {
-        return result;
-    }
-
-    // deduplicate tensors by data pointer and build tensor list (dsptensor)
-    // FastRPC will translate each dsptensor.data pointer from AP VA to DSP VA
-    // map: tensor data pointer -> index in tensors array
-    std::unordered_map<void *, int32_t> tensor_index_map;
-    std::vector<dsptensor> tensor_list;
-
-    auto get_or_add_tensor = [&](ggml_tensor * t) -> int32_t {
-        if (!t) return -1;
-        auto it = tensor_index_map.find(t->data);
-        if (it != tensor_index_map.end()) {
-            return it->second;
-        }
-        int32_t idx = (int32_t)tensor_list.size();
-        tensor_index_map[t->data] = idx;
-
-        dsptensor dt;
-        memset(&dt, 0, sizeof(dt));
-        dt.type     = t->type;
-        dt.ne[0]    = t->ne[0];
-        dt.ne[1]    = t->ne[1];
-        dt.ne[2]    = t->ne[2];
-        dt.ne[3]    = t->ne[3];
-        dt.nb[0]    = t->nb[0];
-        dt.nb[1]    = t->nb[1];
-        dt.nb[2]    = t->nb[2];
-        dt.nb[3]    = t->nb[3];
-        dt.data     = t->data;          // AP VA, FastRPC translates to DSP VA
-        dt.data_len = (int)ggml_nbytes(t);
-        memcpy(dt.op_params, t->op_params, sizeof(dt.op_params));
-        tensor_list.push_back(dt);
-        // [Diag] check if tensor data resides in ION shared memory or heap
-        {
-            const char * mem_type = "heap";
-            if (ctx->rpc_mempool && ctx->rpc_mempool_len > 0) {
-                const char * data_ptr = (const char *)t->data;
-                const char * ion_base = (const char *)ctx->rpc_mempool;
-                const char * ion_end  = ion_base + ctx->rpc_mempool_len;
-                if (data_ptr >= ion_base && data_ptr < ion_end) {
-                    mem_type = "ION";
-                }
-            }
-            const char * buft_name = "unknown";
-            if (t->buffer) {
-                buft_name = "(has buffer)";
-            }
-            GGMLHEXAGON_LOG_WARN("tensor %d: data=%p %s buf=%s, data_len=%d, type=%d(%s), op(%s,%s)", \
-                                 idx, t->data, mem_type, buft_name, dt.data_len, t->type, ggml_type_name(t->type), ggml_op_name(t->op), ggml_op_symbol(t->op));
-        }
-        return idx;
-    };
-
-    // build op desc list
-    std::vector<dsp_op_desc> op_descs;
-    for (auto * node : supported_nodes) {
-        dsp_op_desc op;
-        memset(&op, 0, sizeof(op));
-        op.opcode = node->op;
-        memcpy(op.params, node->op_params, sizeof(op.params));
-        op.src0_idx = get_or_add_tensor(node->src[0]);
-        op.src1_idx = (node->src[1]) ? get_or_add_tensor(node->src[1]) : -1;
-        op.src2_idx = (node->src[2]) ? get_or_add_tensor(node->src[2]) : -1;
-        op.dst_idx  = get_or_add_tensor(node);
-        op_descs.push_back(op);
-    }
-
-    GGMLHEXAGON_LOG_WARN("special: batching %d ops (%d unique tensors):", (int)op_descs.size(), (int)tensor_list.size());
-    for (size_t i = 0; i < op_descs.size(); i++) {
-        const dsp_op_desc & o = op_descs[i];
-        const dsptensor & t0 = tensor_list[o.src0_idx];
-        const dsptensor & td = tensor_list[o.dst_idx];
-        const char * s1_name = (o.src1_idx >= 0) ? ggml_type_name((enum ggml_type)tensor_list[o.src1_idx].type) : "null";
-        const char * s2_name = (o.src2_idx >= 0) ? ggml_type_name((enum ggml_type)tensor_list[o.src2_idx].type) : "null";
-        GGMLHEXAGON_LOG_WARN("  op[%zu] %s: src0[t%d] %s[%lld] src1[t%d] %s src2[t%d] %s dst[t%d] %s[%lld]",
-                              i, ggml_op_name((ggml_op)o.opcode),
-                              o.src0_idx, ggml_type_name((enum ggml_type)t0.type), (long long)t0.ne[0],
-                              o.src1_idx, s1_name,
-                              o.src2_idx, s2_name,
-                              o.dst_idx, ggml_type_name((enum ggml_type)td.type), (long long)td.ne[0]);
-    }
-
-    // build batch request and submit via single FastRPC call
-    dsp_opbatch_req req;
-    memset(&req, 0, sizeof(req));
-    req.n_tensors = (int32_t)tensor_list.size();
-    req.n_ops     = (int32_t)op_descs.size();
-    req.tensors   = tensor_list.data();
-    req.tensors_len = (int32_t)tensor_list.size();
-    req.ops       = op_descs.data();
-    req.ops_len   = (int32_t)op_descs.size();
-
-    // [Fix-B] Heap->ION mirror for DSP-writable tensors
-    // Root cause: dsp_execute_batch(in req) has NO 'rout' marker, so FastRPC does NOT
-    // copy modified data back from DSP to AP for heap-allocated tensors. Only ION
-    // shared memory is physically visible on both sides. Tensors produced by CPU
-    // backend's fallback path (e.g., RMS_NORM output) live in heap memory -- DSP
-    // writes to them are lost without explicit copy-back.
-    // Fix: mirror heap tensors into temp ION buffers before the call, copy back after.
-    struct ion_mirror {
-        int32_t tensor_idx;
-        void *  original_data;
-        void *  ion_buffer;
-        int     data_len;
-    };
-    std::vector<ion_mirror> mirrors;
-
-    // [Plan-C timing] Phase-1: mirror-in (heap->ION)
-    int64_t t_perf_start = ggml_time_us();
-    int64_t t_perf_mirror_in = 0;
-    {
-        int64_t _t0 = ggml_time_us();
-
-        // collect all tensor indices that DSP will WRITE (dst of any op, plus ADD in-place src0)
-        std::set<int32_t> written_indices;
-        for (const auto & op : op_descs) {
-            if (op.dst_idx >= 0)  written_indices.insert(op.dst_idx);
-            // ADD is an in-place operation: src0 is also modified
-            if (op.opcode == GGML_OP_ADD && op.src0_idx >= 0) written_indices.insert(op.src0_idx);
-        }
-
-        if (ctx->rpc_mempool && ctx->rpc_mempool_len > 0) {
-            const char * ion_base = (const char *)ctx->rpc_mempool;
-            const char * ion_end  = ion_base + ctx->rpc_mempool_len;
-
-            for (int32_t tidx : written_indices) {
-                if (tidx < 0 || tidx >= (int32_t)tensor_list.size()) continue;
-                dsptensor & dt = tensor_list[tidx];
-                if (!dt.data || dt.data_len <= 0) continue;
-
-                const char * data_ptr = (const char *)dt.data;
-                if (data_ptr >= ion_base && data_ptr < ion_end) {
-                    continue; // already in ION pool, no mirror needed
-                }
-
-                // allocate mirror space from existing ION mempool (same fd=17)
-                // NOT via rpcmem_alloc2 which creates a separate fd causing
-                // FastRPC address translation conflict (error 0xe)
-                size_t mirror_size = (size_t)dt.data_len;
-                size_t mirror_align = 128;
-                size_t aligned_mirror_offset = ((ctx->rpc_mempool_usage + mirror_align - 1) / mirror_align) * mirror_align;
-
-                if (aligned_mirror_offset + mirror_size > ctx->rpc_mempool_len) {
-                    GGMLHEXAGON_LOG_WARN("Fix-B: mempool full, cannot mirror tensor[%d] (%d bytes, need %ld at offset %ld)",
-                                         tidx, dt.data_len, mirror_size, aligned_mirror_offset);
-                    continue;
-                }
-
-                void * ion_buf = (char *)ctx->rpc_mempool + aligned_mirror_offset;
-                ctx->rpc_mempool_usage = aligned_mirror_offset + mirror_size;
-
-                // Record mirror as a temporary ION region
-                ion_pool_region mirror_region;
-                mirror_region.offset = aligned_mirror_offset;
-                mirror_region.size   = mirror_size;
-                mirror_region.in_use = true;
-                ctx->ion_regions.push_back(mirror_region);
-
-                // copy original heap data -> ION buffer (input correctness)
-                memcpy(ion_buf, dt.data, dt.data_len);
-
-                // record mirror for post-call restore
-                ion_mirror m;
-                m.tensor_idx    = tidx;
-                m.original_data = dt.data;
-                m.ion_buffer    = ion_buf;
-                m.data_len      = dt.data_len;
-                mirrors.push_back(m);
-
-                // swap: DSP will now write into ION buffer (physically shared)
-                dt.data = ion_buf;
-                GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] heap=%p -> mempool=%p (%d bytes, offset %ld)",
-                                     tidx, m.original_data, ion_buf, dt.data_len, aligned_mirror_offset);
-            }
-        }
-        t_perf_mirror_in = ggml_time_us() - _t0;
-    }
-
-    // Workaround: if total mirror size exceeds threshold, FastRPC scatter-gather
-    // may fail with error 0xe (AEE_EUNSUPPORTED). Fall back to CPU execution.
-    size_t total_mirror_size = 0;
-    {
-        for (const auto & m : mirrors) {
-            total_mirror_size += m.data_len;
-        }
-        static constexpr size_t k_max_safe_mirror = 256 * 1024; // 256 KB safety limit
-        if (total_mirror_size > k_max_safe_mirror) {
-            GGMLHEXAGON_LOG_WARN("[MIRROR] skip batch: mirror=%zu bytes > %zu bytes limit, fallback to CPU",
-                                 total_mirror_size, k_max_safe_mirror);
-            // Free mirror ION regions before returning
-            for (const auto & m : mirrors) {
-                const char * ion_buf = (const char *)m.ion_buffer;
-                const char * pool_base = (const char *)ctx->rpc_mempool;
-                size_t buf_offset = (size_t)(ion_buf - pool_base);
-                for (auto & r : ctx->ion_regions) {
-                    if (r.in_use && r.offset == buf_offset) {
-                        r.in_use = false;
-                        break;
-                    }
-                }
-            }
-            mirrors.clear();
-            return GGML_STATUS_SUCCESS; // skip DSP batch, let scheduler use CPU fallback
-        }
-    }
-
-    // [Direction-1 debug] sample key tensors BEFORE batch call to verify CPU->DSP data integrity
-    if (tensor_list.size() >= 4) {
-        const dsptensor & dt0 = tensor_list[0];  // ADD src0/dst
-        const dsptensor & dt3 = tensor_list[3];  // MUL_MAT dst
-        if (dt0.data && dt0.data_len >= 16) {
-            const float * p0 = (const float *)dt0.data;
-            GGMLHEXAGON_LOG_WARN("BEFORE BATCH: t0(data=%p)=[%f, %f, %f, %f]",
-                                 dt0.data, p0[0], p0[1], p0[2], p0[3]);
-        }
-        if (dt3.data && dt3.data_len >= 16) {
-            const float * p3 = (const float *)dt3.data;
-            GGMLHEXAGON_LOG_WARN("BEFORE BATCH: t3(data=%p)=[%f, %f, %f, %f]",
-                                 dt3.data, p3[0], p3[1], p3[2], p3[3]);
-        }
-    }
-
-    // [Plan-C timing] Phase-2: FastRPC batch call
-    int hexagon_error = AEE_SUCCESS;
-    int64_t t_perf_fastrpc = 0;
-    {
-        int64_t _t1 = ggml_time_us();
-        hexagon_error = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, &req);
-        t_perf_fastrpc = ggml_time_us() - _t1;
-    }
-    if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch failed: 0x%x, batch not executed", hexagon_error);
-    } else {
-        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_batch succeed: 0x%x", hexagon_error);
-    }
-
-    // [Direction-1 debug] sample key tensors AFTER batch call to verify DSP->CPU writeback
-    if (tensor_list.size() >= 4 && hexagon_error == AEE_SUCCESS) {
-        const dsptensor & dt0 = tensor_list[0];  // ADD src0/dst (should be modified by ADD)
-        const dsptensor & dt3 = tensor_list[3];  // MUL_MAT dst (output)
-        if (dt0.data && dt0.data_len >= 16) {
-            const float * p0 = (const float *)dt0.data;
-            GGMLHEXAGON_LOG_WARN("AFTER BATCH:  t0(data=%p)=[%f, %f, %f, %f]",
-                                 dt0.data, p0[0], p0[1], p0[2], p0[3]);
-        }
-        if (dt3.data && dt3.data_len >= 16) {
-            const float * p3 = (const float *)dt3.data;
-            GGMLHEXAGON_LOG_WARN("AFTER BATCH:  t3(data=%p)=[%f, %f, %f, %f]",
-                                 dt3.data, p3[0], p3[1], p3[2], p3[3]);
-        }
-    }
-
-    // [Fix-B] restore: copy ION mirror data back to original heap locations (only on success)
-    // [Plan-C timing] Phase-3: mirror-out (ION->heap)
-    int64_t t_perf_restore = 0;
-    {
-        int64_t _t2 = ggml_time_us();
-        for (const auto & m : mirrors) {
-        if (hexagon_error == AEE_SUCCESS) {
-            memcpy(m.original_data, m.ion_buffer, m.data_len);
-            GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] restored ION=%p -> heap=%p (%d bytes)",
-                                 m.tensor_idx, m.ion_buffer, m.original_data, m.data_len);
-        } else {
-            GGMLHEXAGON_LOG_WARN("Fix-B: tensor[%d] skip restore (batch error 0x%x), ION %p",
-                                 m.tensor_idx, hexagon_error, m.ion_buffer);
-        }
-        // no rpcmem_free needed: mirror was bump-allocated from ctx->rpc_mempool
-        }
-        t_perf_restore = ggml_time_us() - _t2;
-    }
-
-    // Free mirror ION regions (no tail compaction).
-    // Mirrors were temporary for this graph_compute call.
-    if (!mirrors.empty() && ctx->rpc_mempool) {
-        size_t total_freed = 0;
-        for (const auto & m : mirrors) {
-            const char * ion_buf = (const char *)m.ion_buffer;
-            const char * pool_base = (const char *)ctx->rpc_mempool;
-            size_t buf_offset = (size_t)(ion_buf - pool_base);
-            for (auto & r : ctx->ion_regions) {
-                if (r.in_use && r.offset == buf_offset) {
-                    r.in_use = false;
-                    total_freed += r.size;
-                    break;
-                }
-            }
-        }
-        GGMLHEXAGON_LOG_DEBUG("[MIRROR] freed %zu bytes (%.2f MiB), pool_used=%zu/%zu",
-                              total_freed, (double)total_freed / (1024.0 * 1024.0),
-                              ctx->rpc_mempool_usage, ctx->rpc_mempool_len);
-    }
-
-    // [Plan-C timing] summary
-    int64_t t_perf_total = ggml_time_us() - t_perf_start;
-    GGMLHEXAGON_LOG_WARN("[Plan-C] perf: mirror_in=%lld us, fastrpc=%lld us, restore=%lld us, total=%lld us (mirrors=%zu)",
-                         t_perf_mirror_in, t_perf_fastrpc, t_perf_restore, t_perf_total, mirrors.size());
-
-    return result;
-}
+// MODE 1: FastRPC-based op-batch (support has been removed)
 
 // Mode 2: ION-based op-batch — packs all ops into ION shared memory,
 //         passes only (offset, size) via FastRPC as doorbell.
 //         Avoids FastRPC scatter-gather limits entirely.
-static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
+static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
 
     enum ggml_status result         = GGML_STATUS_SUCCESS;
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
@@ -4704,7 +4370,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_special_ion(ggml_backe
         GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
 
         //TODO: use relaxed batch table to maximize batching
-        if (ggmlhexagon_k_op_caps_special[ggmlhexagon_get_op_index(node)].supported) {
+        if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
             supported_nodes.push_back(node);
         } else {
             unsupported_nodes.push_back(node);
@@ -5656,7 +5322,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 }
 
                 if (2 == g_hexagon_appcfg.offload_cgraph_type) {
-                    ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp_special;
+                    ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp_ion;
                 } else {
                     ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp;
                 }
@@ -5738,11 +5404,8 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
 
     if (HEXAGON_BACKEND_CDSP == device) {
         if (2 == g_hexagon_appcfg.offload_cgraph_type) {
-            GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_special_ion (ION-based op-batch)");
-            ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special_ion;
-        } else if (1 == g_hexagon_appcfg.offload_cgraph_type) {
-            GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_special (FastRPC-based op-batch)");
-            ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_special;
+            GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_ion (ION-based op-batch)");
+            ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_ion;
         } else {
             GGMLHEXAGON_LOG_WARN("using ggmlhexagon_backend_graph_compute_general (per-op)");
             ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
@@ -5773,184 +5436,3 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
-
-// ==================== HMX Test Functions ====================
-
-// Test HMX matrix multiplication with known values
-// Uses RPC mempool to simulate real offload mulmat behavior
-// src0: MxK matrix, all values = 0.5f
-// src1: KxN matrix, all values = 1.0f
-// Expected result: dst = src0^T * src1, each element = K * 0.5 * 1.0 = 0.5*K
-// Note: HMX F16 accumulation has hardware precision characteristics
-static int test_hmx_ap(ggml_backend_hexagon_context * ctx) {
-    // Use 64x64x64 matrices for HMX test (larger than 32x32)
-    // HMX requires all dimensions to be 32-aligned
-    int     sizex               = 64;  // K dimension
-    int     sizey               = 64;  // M dimension (rows of src0)
-    int     sizez               = 64;  // N dimension (rows of src1)
-
-    GGMLHEXAGON_LOG_INFO("DEBUG: sizex=%d, sizey=%d, sizez=%d\n", sizex, sizey, sizez);
-
-    // Calculate aligned sizes (128-byte alignment for RPC mempool)
-    size_t src0_size = sizex * sizey * sizeof(float);
-    size_t src1_size = sizex * sizez * sizeof(float);
-    size_t dst_size = sizey * sizez * sizeof(float);
-
-    size_t src0_size_aligned = ((src0_size + 127) / 128) * 128;
-    size_t src1_size_aligned = ((src1_size + 127) / 128) * 128;
-    size_t dst_size_aligned = ((dst_size + 127) / 128) * 128;
-
-    // Allocate from RPC mempool (simulating real offload behavior)
-    if (nullptr == ctx->rpc_mempool) {
-        GGMLHEXAGON_LOG_INFO("rpc_mempool not initialized, skipping HMX test\n");
-        return 2;
-    }
-
-    size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
-    if (aligned_offset + src0_size_aligned + src1_size_aligned + dst_size_aligned > ctx->rpc_mempool_len) {
-        GGMLHEXAGON_LOG_INFO("rpc_mempool exhausted, skipping HMX test\n");
-        return 2;
-    }
-
-    float * src0_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
-    aligned_offset += src0_size_aligned;
-    float * src1_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
-    aligned_offset += src1_size_aligned;
-    float * dst_data = (float *)((char *)ctx->rpc_mempool + aligned_offset);
-    ctx->rpc_mempool_usage = aligned_offset + dst_size_aligned;
-
-    GGMLHEXAGON_LOG_INFO("HMX test allocated from rpc_mempool: src0=%p, src1=%p, dst=%p\n",
-                         (void *)src0_data, (void *)src1_data, (void *)dst_data);
-
-    // Initialize tensors with known values
-    // Using 0.5 and 1.0 to test HMX F16 accumulation precision
-    for (int i = 0; i < sizex * sizey; i++) {
-        src0_data[i] = 0.5f;
-    }
-    for (int i = 0; i < sizex * sizez; i++) {
-        src1_data[i] = 1.0f;
-    }
-    memset(dst_data, 0, dst_size);
-
-    GGMLHEXAGON_LOG_INFO("HMX test: src0(%dx%d), src1(%dx%d), dst(%dx%d)\n",
-                         sizex, sizey, sizex, sizez, sizez, sizey);
-    GGMLHEXAGON_LOG_INFO("src0 first 4 elements: %.2f %.2f %.2f %.2f\n",
-                         src0_data[0], src0_data[1], src0_data[2], src0_data[3]);
-    GGMLHEXAGON_LOG_INFO("src1 first 4 elements: %.2f %.2f %.2f %.2f\n",
-                         src1_data[0], src1_data[1], src1_data[2], src1_data[3]);
-
-    // Construct dsptensor structures
-    struct dsptensor dsptensor_0;
-    struct dsptensor dsptensor_1;
-    struct dsptensor dsptensor_2;
-
-    memset(&dsptensor_0, 0, sizeof(dsptensor_0));
-    dsptensor_0.data = (void *)src0_data;
-    dsptensor_0.data_len = src0_size;
-    dsptensor_0.type = GGML_TYPE_F32;
-    dsptensor_0.ne[0] = sizex;
-    dsptensor_0.ne[1] = sizey;
-    dsptensor_0.ne[2] = 1;
-    dsptensor_0.ne[3] = 1;
-    dsptensor_0.nb[0] = sizeof(float);
-    dsptensor_0.nb[1] = dsptensor_0.nb[0] * dsptensor_0.ne[0];
-    dsptensor_0.nb[2] = dsptensor_0.nb[1] * dsptensor_0.ne[1];
-    dsptensor_0.nb[3] = dsptensor_0.nb[2] * dsptensor_0.ne[2];
-
-    memset(&dsptensor_1, 0, sizeof(dsptensor_1));
-    dsptensor_1.data = (void *)src1_data;
-    dsptensor_1.data_len = src1_size;
-    dsptensor_1.type = GGML_TYPE_F32;
-    dsptensor_1.ne[0] = sizex;
-    dsptensor_1.ne[1] = sizez;
-    dsptensor_1.ne[2] = 1;
-    dsptensor_1.ne[3] = 1;
-    dsptensor_1.nb[0] = sizeof(float);
-    dsptensor_1.nb[1] = dsptensor_1.nb[0] * dsptensor_1.ne[0];
-    dsptensor_1.nb[2] = dsptensor_1.nb[1] * dsptensor_1.ne[1];
-    dsptensor_1.nb[3] = dsptensor_1.nb[2] * dsptensor_1.ne[2];
-
-    memset(&dsptensor_2, 0, sizeof(dsptensor_2));
-    dsptensor_2.data = (void *)dst_data;
-    dsptensor_2.data_len = dst_size;
-    dsptensor_2.type = GGML_TYPE_F32;
-    dsptensor_2.ne[0] = sizez;
-    dsptensor_2.ne[1] = sizey;
-    dsptensor_2.ne[2] = 1;
-    dsptensor_2.ne[3] = 1;
-    dsptensor_2.nb[0] = sizeof(float);
-    dsptensor_2.nb[1] = dsptensor_2.nb[0] * dsptensor_2.ne[0];
-    dsptensor_2.nb[2] = dsptensor_2.nb[1] * dsptensor_2.ne[1];
-    dsptensor_2.nb[3] = dsptensor_2.nb[2] * dsptensor_2.ne[2];
-
-    // Execute task on DSP using op_type = 168 (test HMX)
-    GGMLHEXAGON_LOG_INFO("calling ggmlop_dsp_execute_task with op_type=168\n");
-    int hexagon_error = ggmlop_dsp_execute_task(ctx->ggmlop_handle, 168, &dsptensor_0, &dsptensor_1, &dsptensor_2);
-    if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_WARN("ggmlop_dsp_execute_task failed: %d", hexagon_error);
-    }
-
-    // Dump result (first row)
-    GGMLHEXAGON_LOG_INFO("dst first row: ");
-    for (int j = 0; j < sizez; j++) {
-        GGMLHEXAGON_LOG_INFO("%.2f ", dst_data[j]);
-    }
-    GGMLHEXAGON_LOG_INFO("\n");
-
-    // Verify result: each element should be 64 * 0.5f * 1.0f = 32.0f
-    // Note: HMX F16 accumulation may have small precision differences
-    float expected = (float)sizex * 0.5f;  // 32.0f
-    int errors = 0;
-    int nan_count = 0;
-    int inf_count = 0;
-
-    for (int i = 0; i < sizey * sizez; i++) {
-        float val = dst_data[i];
-
-        // Check for NaN
-        if (isnan(val)) {
-            if (nan_count < 5) {
-                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = NaN", i);
-            }
-            nan_count++;
-            errors++;
-        }
-        // Check for Infinity
-        else if (isinf(val)) {
-            if (inf_count < 5) {
-                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %s\n", i, val > 0 ? "Inf" : "-Inf");
-            }
-            inf_count++;
-            errors++;
-        }
-        // Check for value mismatch (allow 1% tolerance for HMX F16 precision)
-        else if (fabs(val - expected) > expected * 0.01f) {
-            if (errors - nan_count - inf_count < 5) {
-                GGMLHEXAGON_LOG_INFO("ERROR: dst[%d] = %.6f, expected %.6f (diff=%.6f)\n", i, val, expected, fabs(val - expected));
-            }
-            errors++;
-        }
-
-        if (errors >= 20) {
-            GGMLHEXAGON_LOG_INFO("... (more errors truncated)\n");
-            break;
-        }
-    }
-
-    if (errors == 0) {
-        GGMLHEXAGON_LOG_INFO("HMX test PASSED: all %d elements = %.2f\n", sizey * sizez, expected);
-    } else {
-        GGMLHEXAGON_LOG_INFO("HMX test FAILED: %d errors out of %d elements\n", errors, sizey * sizez);
-        if (nan_count > 0) {
-            GGMLHEXAGON_LOG_INFO("  - NaN count: %d\n", nan_count);
-        }
-        if (inf_count > 0) {
-            GGMLHEXAGON_LOG_INFO("  - Infinity count: %d\n", inf_count);
-        }
-        if (errors > nan_count + inf_count) {
-            GGMLHEXAGON_LOG_INFO("  - Value mismatch count: %d\n", errors - nan_count - inf_count);
-        }
-    }
-
-    return errors == 0 ? 0 : 1;
-}
