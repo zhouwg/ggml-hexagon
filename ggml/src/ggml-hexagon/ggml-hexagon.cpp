@@ -326,6 +326,9 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .version                = {"0.99.2"},
 };
 
+// Track tensors repacked in set_tensor to skip Phase 4.5 and mulmat_min_n check
+static std::unordered_set<const void *> g_set_tensor_repacked;
+
 static bool ggmlhexagon_use_ion_mempool() {
     return (HEXAGON_BACKEND_CDSP == g_hexagon_appcfg.hexagon_backend);
 }
@@ -3510,6 +3513,12 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
                 // when N > mulmat_min_n (PP phase) where HMX pipeline is efficient.
                 // For N <= mulmat_min_n (decode/small PP), CPU ARM NEON SDOT is
                 // faster than any DSP path due to tile waste and per-op overhead.
+                // Exception: if weight was repacked to x4x2 in set_tensor,
+                // t->data is no longer Q4_0 so CPU GEMV cannot read it -
+                // must always offload to DSP.
+                if (g_set_tensor_repacked.count(src0->data)) {
+                    return true;
+                }
                 if (n <= g_hexagon_appcfg.mulmat_min_n) {
                     GGMLHEXAGON_LOG_DEBUG("MUL_MAT quantized N=%lld <= %d, keep on CPU\n", (long long)n, g_hexagon_appcfg.mulmat_min_n);
                     return false;
@@ -4071,11 +4080,76 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size, 
     ggml_aligned_free(buf_rp, row_size_rp);
 }
 
+// Inverse of repack_q4_0_q4x4x2: convert x4x2 layout back to Q4_0.
+// Used by get_tensor so CPU backends receive canonical Q4_0 bytes
+// when is_host returns false and ggml_backend_tensor_copy takes the slow path.
+static void repack_q4x4x2_q4_0(const ggml_tensor * t, void * data, size_t size) {
+    const int QK4_0 = 32;
+    const int QK_Q4_0x4x2 = 256;
+
+    int64_t nrows = ggml_nrows(t);
+    size_t  row_size = ggml_row_size(t->type, t->ne[0]);
+    size_t  total = (size_t)nrows * row_size;
+    int64_t n_full_rows = (size >= total) ? nrows : (int64_t)(size / row_size);
+
+    const int qk         = QK_Q4_0x4x2;
+    const int nb         = t->ne[0] / qk;
+    const int qblk_size  = qk / 2;          // 128
+    const int dblk_size  = 8 * 2;           // 16
+    const int qrow_size  = t->ne[0] / 2;
+    const int q4_blk_sz  = QK4_0 / 2 + 2;   // 18
+
+    for (int64_t i = 0; i < n_full_rows; i++) {
+        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
+        uint8_t *       dst = (uint8_t *) data + (i * row_size);
+
+        const uint8_t * x_q = src;
+        const uint8_t * x_d = src + qrow_size;
+
+        for (int ib = 0; ib < nb; ib++) {
+            const uint8_t * q = x_q + (ib * qblk_size);
+
+            uint8_t qs[QK_Q4_0x4x2];
+            for (int j = 0; j < qk / 2; j++) {
+                qs[j]       = q[j] & 0x0F;
+                qs[j + 128] = q[j] >> 4;
+            }
+
+            const uint16_t * d_src = (const uint16_t *)(x_d + ib * dblk_size);
+
+            for (int j = 0; j < 8; j++) {
+                uint8_t * block = dst + (ib * 8 + j) * q4_blk_sz;
+                *(uint16_t *)block = d_src[j];
+                uint8_t * b = block + 2;
+                for (int k = 0; k < QK4_0 / 2; k++) {
+                    b[k] = (qs[j * QK4_0 + k + QK4_0 / 2] << 4) | qs[j * QK4_0 + k];
+                }
+            }
+        }
+    }
+}
+
 static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                ggml_tensor * tensor, const void * data,
                                                size_t offset, size_t size) {
     GGML_UNUSED(buffer);
     memcpy((char *)tensor->data + offset, data, size);
+
+    // Repack Q4_0 weights to x4x2 format at set_tensor time (one-time cost)
+    // to avoid repeated repacking in graph_compute Phase 4.5.
+    // Only repack when the entire tensor is set at once (offset==0, full size).
+    // Only repack when mulmat_min_n==0 (all MUL_MAT goes to DSP, no CPU GEMV).
+    // When mulmat_min_n>0, CPU GEMV may read t->data as Q4_0, so keep original format.
+    if (g_hexagon_appcfg.mulmat_algotype == 30 &&
+        g_hexagon_appcfg.mulmat_min_n == 0 &&
+        tensor->type == GGML_TYPE_Q4_0 &&
+        offset == 0 && size == ggml_nbytes(tensor)) {
+        const int32_t K = tensor->ne[0];
+        if (K % 256 == 0 && K > 0) {
+            repack_q4_0_q4x4x2(tensor, tensor->data, size);
+            g_set_tensor_repacked.insert(tensor->data);
+        }
+    }
 }
 
 static void ggml_backend_hexagon_buffer_memset_tensor(ggml_backend_buffer_t buffer,
@@ -4089,7 +4163,16 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                                                const ggml_tensor * tensor,
                                                void * data, size_t offset, size_t size) {
     GGML_UNUSED(buffer);
-    memcpy(data, (const char *)tensor->data + offset, size);
+    // Inverse repack: if this tensor was repacked to x4x2 in set_tensor,
+    // convert back to canonical Q4_0 so CPU backends see the original layout.
+    // Only full-tensor reads (offset==0, full size) are handled; partial reads
+    // would require block-aligned inverse transform which is not needed today.
+    if (g_set_tensor_repacked.count(tensor->data) &&
+        offset == 0 && size == ggml_nbytes(tensor)) {
+        repack_q4x4x2_q4_0(tensor, data, size);
+    } else {
+        memcpy(data, (const char *)tensor->data + offset, size);
+    }
 }
 
 static bool ggml_backend_hexagon_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
@@ -4284,9 +4367,11 @@ static bool ggml_backend_buft_is_hexagon(ggml_backend_buffer_type_t buft) {
 }
 
 static bool ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft) {
-    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
-    GGML_ASSERT(nullptr != ctx);
-    GGML_UNUSED(ctx);
+    // Must return true: ION shared memory is system memory (DDR) that both AP
+    // and DSP can access via their own VAs. Returning false would prevent the
+    // scheduler from falling back unsupported ops (e.g. SET_ROWS on KV cache)
+    // to CPU, causing "cannot run the operation" aborts.
+    GGML_UNUSED(buft);
     return true;
 }
 
@@ -4613,6 +4698,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
             if (K % 256 != 0 || K <= 0) continue;
             if (g_x4x2_repacked.find(t->data) != g_x4x2_repacked.end()) {
                 continue;  // already repacked, g_x4x2_ion_offsets has the offset
+            }
+            if (g_set_tensor_repacked.count(t->data)) {
+                // Already repacked in set_tensor: t->data is x4x2 format.
+                // Phase 4 mirror already copied x4x2 data to ION mirror.
+                // Skip Phase 4.5 repack - Phase 7 will use the ION mirror offset.
+                continue;
             }
 
             const char * dp = (const char *)t->data;
