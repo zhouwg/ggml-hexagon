@@ -4,7 +4,7 @@ this self-contained file is part of JZ's ggml-hexagon:
     - ported from original ggml(https://github.com/ggml-org/ggml)
     - ggml-dsp.c can be easily ported to other xPU(x86/arm/riscv... CPU, POSIX friendly DSP / NPU)
 
-          - v0.99.02 - 2026-06-24
+          - v0.99.03 - 2026-06-27
 Jeff Zhou - zhouwg2000@gmail.com
 GitHub:   - https://github.com/zhouwg/ggml-hexagon
 */
@@ -2061,7 +2061,6 @@ void quantize_row_f32_to_f16_ref(const float * GGML_RESTRICT x, uint16_t * GGML_
     }
 }
 
-// reference implementation for deterministic creation of model files
 void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK8_0 == 0);
     const int nb = k / QK8_0;
@@ -2087,7 +2086,6 @@ void quantize_row_q8_0_ref(const float * GGML_RESTRICT x, block_q8_0 * GGML_REST
     }
 }
 
-// reference implementation for deterministic creation of model files
 void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_RESTRICT y, int64_t k) {
     assert(QK8_1 == 32);
     assert(k % QK8_1 == 0);

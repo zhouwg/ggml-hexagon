@@ -847,8 +847,8 @@ function show_usage()
     echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
     echo "  $0 clean"
     echo "  $0 run_testops"
-    echo "  $0 run_testop     ADD/MUL_MAT                                                    (verify accuracy    of ADD/MUL_MAT)"
-    echo "  $0 run_perfop     ADD/MUL_MAT                                                    (verify performance of ADD/MUL_MAT)"
+    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify accuracy    of ADD/MUL_MAT)"
+    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify performance of ADD/MUL_MAT)"
     echo "  $0 run_llamacli                 <main_gpu_index>"
     echo "  $0 run_llamabench               <main_gpu_index>"
     echo "  $0 run_threadsafety             <main_gpu_index>"
@@ -899,6 +899,14 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_testops" ]; then
         run_test-ops
+        exit 0
+    elif [ "$1" == "run_llamacli" ]; then
+        hexagon_backend=0
+        run_llamacli
+        exit 0
+    elif [ "$1" == "run_llamabench" ]; then
+        hexagon_backend=0
+        run_llamabench
         exit 0
     else
         show_usage

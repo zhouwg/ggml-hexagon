@@ -156,6 +156,14 @@ typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor *
 static int  test_hmx_ap(ggml_backend_hexagon_context * ctx);
 static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 
+// Forward declarations of buffer-type interface functions
+static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
+static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
+           ggml_backend_buffer_type_t buft, size_t size);
+static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
+static size_t ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
+static bool ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
+
 struct ggmlhexagon_task {
     int32 op_type;
     ggml_tensor * src0;
@@ -189,11 +197,6 @@ enum qcom_chipset_soc_model {
     SM8550 = 43,  // v73, SD 8 Gen 2
     SM8650 = 57,  // v75, SD 8 Gen 3
     SM8750 = 69,  // v79, SD 8 Elite
-#if !defined(__ANDROID__) && !defined(__linux__)
-    SC7280X     = 44,
-    SC8280X     = 37,
-    SC8380XP    = 60,
-#endif
 };
 
 //borrowed from Android source code, might not be accurate
@@ -391,30 +394,6 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
                 .htp_arch          = V79,
                 .vtcm_size_in_mb   = 8,
                 .soc_desc          = "Qualcomm SnapDragon 8 Elite"},
-
-#if !defined(__ANDROID__) && !defined(__linux__)
-        /* Qualcomm SnapDragon 7c Gen 2 */
-        {
-                .soc_model         = SC7280X,
-                .htp_arch          = V68,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 7c Gen 2"},
-
-        /* Qualcomm SnapDragon 8cx Gen 3 */
-        {
-                .soc_model         = SC8280X,
-                .htp_arch          = V68,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 8cx Gen 3"},
-
-        /* Qualcomm SnapDragon 8cx Gen 4 */
-        {
-                .soc_model         = SC8380XP,
-                .htp_arch          = V73,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 8cx Gen 4"},
-#endif
-
 };
 
 // Contexts are dynamically allocated in ggml_backend_hexagon_reg() so that
@@ -464,7 +443,6 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
     {true,  GGML_OP_MUL_MAT,  2, "ggmlop_dsp_mulmat",   ggmlop_dsp_mulmat},
-    // ... all others false until DSP kernels are validated ...
     {false, GGML_OP_MUL_MAT_ID, 0, nullptr, nullptr},
     {false, GGML_OP_OUT_PROD, 0, nullptr, nullptr},
     {true,  GGML_OP_SCALE,    1, "ggmlop_dsp_scale", nullptr},
@@ -843,17 +821,9 @@ public:
         std::string filename = std::string(g_hexagon_appcfg.runtime_libpath) + "/";
         if (g_hexagon_appcfg.thread_counts > 1) {
             //multi-threading feature enabled on cDSP side
-            if (ggmlhexagon_use_ion_mempool()) {
-                filename = filename + "hexagon_perf_cdsp_ion_mt.dat";
-            } else {
-                filename = filename + "hexagon_perf_cdsp_mt.dat";
-            }
+            filename = filename + "hexagon_perf_cdsp_mt.dat";
         } else {
-            if (ggmlhexagon_use_ion_mempool()) {
-                filename = filename + "hexagon_perf_cdsp_ion.dat";
-            } else {
-                filename = filename + "hexagon_perf_cdsp.dat";
-            }
+            filename = filename + "hexagon_perf_cdsp.dat";
         }
         GGMLHEXAGON_LOG_DEBUG("profiler name:%s", filename.c_str());
         const char * profiler_filename = filename.c_str();
@@ -1277,7 +1247,6 @@ public:
                 }
             }
 
-
             if (is_founded) {
                 is_key = true;
                 key = "";
@@ -1484,16 +1453,6 @@ static size_t ggmlhexagon_get_system_total_memory_in_bytes() {
     size_t page_size  = (size_t)sysconf(_SC_PAGE_SIZE);
 
     return pages * page_size;
-#else
-    //TODO: Snapdragon based WoA(Windows on ARM)
-    MEMORYSTATUSEX statex;
-    statex.dwLength = sizeof(statex);
-    if (GlobalMemoryStatusEx(&statex)) {
-        GGMLHEXAGON_LOG_INFO("total physical mem:%llu Mb", statex.ullTotalPhys >> 20);
-        GGMLHEXAGON_LOG_INFO("avail physical mem:%llu Mb", statex.ullAvailPhys >> 20);
-        return statex.ullTotalPhys;
-    }
-    return 0;
 #endif
 }
 
@@ -1507,16 +1466,6 @@ static size_t ggmlhexagon_get_system_free_memory_in_bytes() {
     size_t page_size   = (size_t)sysconf(_SC_PAGE_SIZE);
 
     return avail_pages * page_size;
-#else
-    //TODO: Snapdragon based WoA(Windows on ARM)
-    MEMORYSTATUSEX statex;
-    statex.dwLength = sizeof(statex);
-    if (GlobalMemoryStatusEx(&statex)) {
-        GGMLHEXAGON_LOG_INFO("total physical mem:%llu Mb", statex.ullTotalPhys >> 20);
-        GGMLHEXAGON_LOG_INFO("avail physical mem:%llu Mb", statex.ullAvailPhys >> 20);
-        return statex.ullAvailPhys;
-    }
-    return 0;
 #endif
 }
 
@@ -1596,73 +1545,6 @@ static void ggmlhexagon_get_opkey_from_op(const ggml_tensor * op, std::string & 
         output += '_';
         ggmlhexagon_append_tensor_dimensions(input, output);
     }
-}
-
-static void * ggmlhexagon_type_trait(ggml_backend_hexagon_context * ctx, ggml_tensor * op) {
-    const ggml_tensor * src0        = op->src[0];
-    const ggml_tensor * src1        = op->src[1];
-    ggml_tensor * dst               = op;
-    const enum ggml_type src0_type  = src0->type;
-
-    GGML_TENSOR_BINARY_OP_LOCALS
-    GGML_ASSERT(ne0 == ne01);
-    GGML_ASSERT(ne1 == ne11);
-    GGML_ASSERT(ne2 == ne12);
-    GGML_ASSERT(ne3 == ne13);
-    GGML_ASSERT(nb00 == ggml_type_size(src0_type));
-    GGML_ASSERT(nb10 == ggml_type_size(src1->type));
-
-    const int64_t ne_plane = ne01 * ne00;
-    const size_t desired_size = ((GGML_TYPE_F32 == src0_type) ? 0 : ne03 * ne02 * ne_plane * sizeof(float));
-    ctx->desired_size   = desired_size;
-    if (ctx->work_size < desired_size) {
-        ctx->work_data.reset(new char[desired_size]);
-        ctx->work_size  = desired_size;
-    }
-    ctx->n_threads = std::thread::hardware_concurrency();
-    void * wdata = ctx->work_data.get();
-    // convert src0 to float
-    if (src0_type != GGML_TYPE_F32) {
-        const auto * type_traits        = ggml_get_type_traits(src0_type);
-        ggml_to_float_t const to_float  = type_traits->to_float;
-
-        for (int64_t i03 = 0; i03 < ne03; i03++) {
-            for (int64_t i02 = 0; i02 < ne02; i02++) {
-                const void * x          = (char *)src0->data + i02 * nb02 + i03 * nb03;
-                float * const wplane    = (float *)wdata + i02 * ne_plane + i03 * ne02 * ne_plane;
-
-                const int min_cols_per_thread = 4096;
-                const int min_rows_per_thread = std::max((int)(min_cols_per_thread / ne00), 1);
-                const int n_threads = std::max(std::min(ctx->n_threads, (int)(ne01 / min_rows_per_thread)), 1);
-                for (int i = 1; i < n_threads; i++) {
-                    const int64_t start = i * ne01 / n_threads;
-                    const int64_t end   = (i + 1) * ne01 / n_threads;
-                    if (start < end) {
-                        ctx->tasks.push_back(std::async(std::launch::async, [=]() {
-                            for (int64_t i01 = start; i01 < end; i01++) {
-                                to_float((const char *)x + i01 * nb01, wplane + i01 * ne00, ne00);
-                            }
-                        }));
-                    }
-                }
-                {
-                    // reuse the current thread for the first task
-                    const int64_t start = 0;
-                    const int64_t end = ne01 / n_threads;
-                    for (int64_t i01 = start; i01 < end; i01++) {
-                        to_float((const char *) x + i01 * nb01, wplane + i01 * ne00, ne00);
-                    }
-                }
-            }
-        }
-
-        // wait for all tasks to finish
-        for (auto &task: ctx->tasks) {
-            task.get();
-        }
-        ctx->tasks.clear();
-    }
-    return wdata;
 }
 
 static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path) {
@@ -2439,246 +2321,242 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_INFO("capacity of rpc memory %d MiB", ctx->rpc_mempool_capacity / SIZE_IN_MB);
     }
 
-    if (ggmlhexagon_use_ion_mempool()) {
-        GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
-        ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-        // NOTE: Do NOT use RPCMEM_TRY_MAP_STATIC here!
-        // It pre-registers the ION fd with FastRPC kernel driver,
-        // which causes implicit fd_mmap_create on every invoke.
+    GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
+    ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
+    // NOTE: Do NOT use RPCMEM_TRY_MAP_STATIC here!
+    // It pre-registers the ION fd with FastRPC kernel driver,
+    // which causes implicit fd_mmap_create on every invoke.
+    // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
+    if (2 == g_hexagon_appcfg.offload_cgraph_type) {
+        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
+    } else {
+        ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
+    }
+    if (nullptr == ctx->rpc_mempool) {
+        GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
+        return 2;
+    } else {
+        GGMLHEXAGON_LOG_DEBUG("alloc rpc memorypool %p successfully %ld(%d MiB)",
+                              ctx->rpc_mempool, ctx->rpc_mempool_len,
+                              ctx->rpc_mempool_len / SIZE_IN_MB);
+    }
+    ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
+    GGMLHEXAGON_LOG_WARN("rpc mempool handle %d", ctx->rpc_mempool_handle);
+    GGMLHEXAGON_LOG_WARN("rpc mempool addr %p", ctx->rpc_mempool);
+    GGMLHEXAGON_LOG_WARN("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
+    if (2 == g_hexagon_appcfg.offload_cgraph_type) {
+        // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
+        // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
+        // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
+        // Without this registration, invoke() still triggers implicit fd_mmap_create.
+        int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
+                                     ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
+                                     FASTRPC_MAP_FD_DELAYED);
+        if (mmap_err != 0) {
+            GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
+                                 mmap_err, ctx->rpc_mempool_handle);
+        } else {
+            GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
+                                 ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+        }
+
+        // NOTE: Do NOT call remote_register_buf() here!
+        // It registers the ION fd with FastRPC kernel driver, which causes
+        // implicit fd_mmap_create on every subsequent invoke.
         // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
-        if (2 == g_hexagon_appcfg.offload_cgraph_type) {
-            ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
+        // Strategy: let DSP map via HAP_mmap2 exclusively
+        // remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
+
+        // Register ION pool on DSP side via pure-scalar IDL call.
+        // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
+        // implicit fd_mmap_create when dsptensor.data pointers are passed.
+        // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
+        // same as QCOM's htp_iface_mmap() in htp/main.c.
+        uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
+        uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
+        uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
+
+        int reg_err = ggmlop_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+        if (reg_err != AEE_SUCCESS) {
+            GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
         } else {
-            ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS | RPCMEM_TRY_MAP_STATIC, ctx->rpc_mempool_len);
+            GGMLHEXAGON_LOG_WARN("registered ION base via scalar call: fd=%d, size=%dMB",
+                                 ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
         }
-        if (nullptr == ctx->rpc_mempool) {
-            GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
-            return 2;
+
+        // Reserve tail of ION for FP16 weight cache
+        // Cache region: [cache_offset, rpc_mempool_len)
+        // AP bump allocator must not exceed cache_offset
+        // Set to 0 to disable cache; set to e.g. 512 for 512MB cache pool
+        // FP16 tiles are ~3.56x larger than Q4_0 weights; cache as many as possible
+        const size_t cache_pool_size = (size_t)512 * SIZE_IN_MB;
+        if (cache_pool_size > 0 && ctx->rpc_mempool_len > cache_pool_size) {
+            ctx->rpc_mempool_cache_offset = ctx->rpc_mempool_len - cache_pool_size;
         } else {
-            GGMLHEXAGON_LOG_DEBUG("alloc rpc memorypool %p successfully %ld(%d MiB)",
-                                  ctx->rpc_mempool, ctx->rpc_mempool_len,
-                                  ctx->rpc_mempool_len / SIZE_IN_MB);
+            ctx->rpc_mempool_cache_offset = 0;  // no cache
         }
-        ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_WARN("rpc mempool handle %d", ctx->rpc_mempool_handle);
-        GGMLHEXAGON_LOG_WARN("rpc mempool addr %p", ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_WARN("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
-        if (2 == g_hexagon_appcfg.offload_cgraph_type) {
-            // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
-            // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
-            // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
-            // Without this registration, invoke() still triggers implicit fd_mmap_create.
-            int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
-                                         ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
-                                         FASTRPC_MAP_FD_DELAYED);
-            if (mmap_err != 0) {
-                GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
-                                     mmap_err, ctx->rpc_mempool_handle);
+        GGMLHEXAGON_LOG_WARN("ION layout: total=%zuMB, cache_offset=%zuMB, cache_size=%zuMB, data_region=%zuMB",
+                             ctx->rpc_mempool_len / SIZE_IN_MB,
+                             ctx->rpc_mempool_cache_offset / SIZE_IN_MB,
+                             (ctx->rpc_mempool_len - ctx->rpc_mempool_cache_offset) / SIZE_IN_MB,
+                             ctx->rpc_mempool_cache_offset / SIZE_IN_MB);
+
+        // Set up FP16 weight cache region on DSP side
+        // Uses special batch_size=0xFFFF to signal cache setup mode
+        if (ctx->rpc_mempool_cache_offset > 0) {
+            uint32_t cache_offset_lo = (uint32_t)(ctx->rpc_mempool_cache_offset & 0xFFFFFFFF);
+            int cache_err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, cache_offset_lo, 0xFFFF);
+            if (cache_err == AEE_SUCCESS) {
+                GGMLHEXAGON_LOG_WARN("DSP FP16 weight cache set up: offset=%zuMB, size=%zuMB",
+                                     ctx->rpc_mempool_cache_offset / SIZE_IN_MB,
+                                     (ctx->rpc_mempool_len - ctx->rpc_mempool_cache_offset) / SIZE_IN_MB);
             } else {
-                GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
-                                     ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+                GGMLHEXAGON_LOG_ERROR("DSP FP16 weight cache setup failed: 0x%x", cache_err);
             }
+        }
 
-            // NOTE: Do NOT call remote_register_buf() here!
-            // It registers the ION fd with FastRPC kernel driver, which causes
-            // implicit fd_mmap_create on every subsequent invoke.
-            // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
-            // Strategy: let DSP map via HAP_mmap2 exclusively
-            // remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
+        // [ION-PROBE] Verify bidirectional ION shared memory access.
+        // Call with batch_size=0 → DSP enters probe mode: writes 0xAB at base+0,
+        // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
+        {
+            int probe_err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
+            if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
+                // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
+                __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
 
-            // Register ION pool on DSP side via pure-scalar IDL call.
-            // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
-            // implicit fd_mmap_create when dsptensor.data pointers are passed.
-            // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
-            // same as QCOM's htp_iface_mmap() in htp/main.c.
-            uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
-            uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
-            uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
-
-            int reg_err = ggmlop_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
-            if (reg_err != AEE_SUCCESS) {
-                GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
-            } else {
-                GGMLHEXAGON_LOG_WARN("registered ION base via scalar call: fd=%d, size=%dMB",
-                                     ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
-            }
-
-            // Reserve tail of ION for FP16 weight cache
-            // Cache region: [cache_offset, rpc_mempool_len)
-            // AP bump allocator must not exceed cache_offset
-            // Set to 0 to disable cache; set to e.g. 512 for 512MB cache pool
-            // FP16 tiles are ~3.56x larger than Q4_0 weights; cache as many as possible
-            const size_t cache_pool_size = (size_t)512 * SIZE_IN_MB;
-            if (cache_pool_size > 0 && ctx->rpc_mempool_len > cache_pool_size) {
-                ctx->rpc_mempool_cache_offset = ctx->rpc_mempool_len - cache_pool_size;
-            } else {
-                ctx->rpc_mempool_cache_offset = 0;  // no cache
-            }
-            GGMLHEXAGON_LOG_WARN("ION layout: total=%zuMB, cache_offset=%zuMB, cache_size=%zuMB, data_region=%zuMB",
-                                 ctx->rpc_mempool_len / SIZE_IN_MB,
-                                 ctx->rpc_mempool_cache_offset / SIZE_IN_MB,
-                                 (ctx->rpc_mempool_len - ctx->rpc_mempool_cache_offset) / SIZE_IN_MB,
-                                 ctx->rpc_mempool_cache_offset / SIZE_IN_MB);
-
-            // Set up FP16 weight cache region on DSP side
-            // Uses special batch_size=0xFFFF to signal cache setup mode
-            if (ctx->rpc_mempool_cache_offset > 0) {
-                uint32_t cache_offset_lo = (uint32_t)(ctx->rpc_mempool_cache_offset & 0xFFFFFFFF);
-                int cache_err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, cache_offset_lo, 0xFFFF);
-                if (cache_err == AEE_SUCCESS) {
-                    GGMLHEXAGON_LOG_WARN("DSP FP16 weight cache set up: offset=%zuMB, size=%zuMB",
-                                         ctx->rpc_mempool_cache_offset / SIZE_IN_MB,
-                                         (ctx->rpc_mempool_len - ctx->rpc_mempool_cache_offset) / SIZE_IN_MB);
+                const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
+                bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
+                bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
+                GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
+                                     p[0], p[1], p[2], p[3],
+                                     ok_ab ? "PASS" : "FAIL");
+                GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
+                                     p[64], p[65], p[66], p[67],
+                                     ok_cd ? "PASS" : "FAIL");
+                if (ok_ab && ok_cd) {
+                    GGMLHEXAGON_LOG_WARN("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
                 } else {
-                    GGMLHEXAGON_LOG_ERROR("DSP FP16 weight cache setup failed: 0x%x", cache_err);
+                    GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
                 }
+                // clean up probe patterns
+                memset((void *)p, 0, 16);
+                memset((void *)(p + 64), 0, 16);
+            } else {
+                GGMLHEXAGON_LOG_WARN("[AP-PROBE] dsp_execute_batch_ion probe failed: 0x%x", probe_err);
             }
 
-            // [ION-PROBE] Verify bidirectional ION shared memory access.
-            // Call with batch_size=0 → DSP enters probe mode: writes 0xAB at base+0,
-            // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
+            // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
+            // Call dsp_execute_batch_ion N times with different write patterns.
+            // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
             {
-                int probe_err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
-                if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
-                    // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
-                    __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
+                const int N_ROUNDS = 5;
+                bool multi_ok = true;
 
-                    const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
-                    bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
-                    bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
-                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
-                                         p[0], p[1], p[2], p[3],
-                                         ok_ab ? "PASS" : "FAIL");
-                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
-                                         p[64], p[65], p[66], p[67],
-                                         ok_cd ? "PASS" : "FAIL");
-                    if (ok_ab && ok_cd) {
-                        GGMLHEXAGON_LOG_WARN("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
-                    } else {
-                        GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
+                for (int round = 0; round < N_ROUNDS; round++) {
+                    uint8_t pattern = (uint8_t)(0xA0 + round);
+                    // Write pattern from AP side first (AP→DSP direction)
+                    memset((void *)ctx->rpc_mempool, pattern, 16);
+                    __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                            (char *)ctx->rpc_mempool + 16);
+
+                    int err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
+                    if (err != AEE_SUCCESS) {
+                        GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
+                                              round + 1, N_ROUNDS, err);
+                        multi_ok = false;
+                        break;
                     }
-                    // clean up probe patterns
-                    memset((void *)p, 0, 16);
-                    memset((void *)(p + 64), 0, 16);
-                } else {
-                    GGMLHEXAGON_LOG_WARN("[AP-PROBE] dsp_execute_batch_ion probe failed: 0x%x", probe_err);
+
+                    // Read back DSP-written data (DSP→AP direction)
+                    __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                            (char *)ctx->rpc_mempool + 80);
+                    const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
+                    if (r[0] != 0xAB || r[64] != 0xCD) {
+                        GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
+                                              "base+0=0x%02x base+64=0x%02x",
+                                              round + 1, N_ROUNDS, r[0], r[64]);
+                        multi_ok = false;
+                        break;
+                    }
+
+                    GGMLHEXAGON_LOG_WARN("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
+                                         round + 1, N_ROUNDS);
+
+                    // Clean up for next round
+                    memset((void *)r, 0, 16);
+                    memset((void *)(r + 64), 0, 16);
                 }
 
-                // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
-                // Call dsp_execute_batch_ion N times with different write patterns.
-                // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
-                {
-                    const int N_ROUNDS = 5;
-                    bool multi_ok = true;
-
-                    for (int round = 0; round < N_ROUNDS; round++) {
-                        uint8_t pattern = (uint8_t)(0xA0 + round);
-                        // Write pattern from AP side first (AP→DSP direction)
-                        memset((void *)ctx->rpc_mempool, pattern, 16);
-                        __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                                (char *)ctx->rpc_mempool + 16);
-
-                        int err = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0);
-                        if (err != AEE_SUCCESS) {
-                            GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
-                                                  round + 1, N_ROUNDS, err);
-                            multi_ok = false;
-                            break;
-                        }
-
-                        // Read back DSP-written data (DSP→AP direction)
-                        __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                                (char *)ctx->rpc_mempool + 80);
-                        const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
-                        if (r[0] != 0xAB || r[64] != 0xCD) {
-                            GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
-                                                  "base+0=0x%02x base+64=0x%02x",
-                                                  round + 1, N_ROUNDS, r[0], r[64]);
-                            multi_ok = false;
-                            break;
-                        }
-
-                        GGMLHEXAGON_LOG_WARN("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
-                                             round + 1, N_ROUNDS);
-
-                        // Clean up for next round
-                        memset((void *)r, 0, 16);
-                        memset((void *)(r + 64), 0, 16);
-                    }
-
-                    if (multi_ok) {
-                        GGMLHEXAGON_LOG_WARN("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
-                                             N_ROUNDS);
-                    } else {
-                        GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
-                    }
+                if (multi_ok) {
+                    GGMLHEXAGON_LOG_WARN("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
+                                         N_ROUNDS);
+                } else {
+                    GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
                 }
             }
-        } else {
-            remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
-
-            // Register ION pool base address on DSP side
-            // FastRPC translates dsptensor.data from AP VA to DSP VA automatically
-            // Use src1 to pass fd and size information as a special "metadata" tensor
-            struct dsptensor ion_base_tensor;
-            struct dsptensor ion_meta_tensor;  // metadata tensor for fd and size
-            struct dsptensor ion_dst_dummy;
-            int32_t dummy = 0;
-            int32_t meta_data[16] = {0};  // metadata array
-
-            memset(&ion_base_tensor, 0, sizeof(ion_base_tensor));
-            memset(&ion_meta_tensor, 0, sizeof(ion_meta_tensor));
-            memset(&ion_dst_dummy, 0, sizeof(ion_dst_dummy));
-
-            // Main tensor: ION buffer base address
-            // For remote_register_buf'd ION buffers, FastRPC translates the pointer
-            // (not copy data). data_len tells FastRPC how many bytes to validate/map.
-            // Must be > sizeof(float) to get real pointer translation, but small enough
-            // that stub-layer allocation doesn't fail (data_len * sizeof(float) must fit).
-            ion_base_tensor.data = ctx->rpc_mempool;
-            ion_base_tensor.data_len = (int)(64 * 1024);  // 64KB: enough for pointer translation, safe for allocation
-            ion_base_tensor.type = 0;
-
-            // Metadata tensor: contains fd and size
-            // Use a small buffer on stack, FastRPC will copy it to DSP
-            meta_data[0] = ctx->rpc_mempool_handle;  // fd
-            meta_data[1] = (int32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);  // size lower 32 bits
-            meta_data[2] = (int32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);  // size upper 32 bits
-            meta_data[3] = (int32_t)(ctx->rpc_mempool_len >> 20);  // size in MB
-            ion_meta_tensor.data = meta_data;
-            ion_meta_tensor.data_len = sizeof(meta_data);
-            ion_meta_tensor.type = 0;
-
-            ion_dst_dummy.data = &dummy;
-            ion_dst_dummy.data_len = sizeof(dummy);
-
-            ggmlop_dsp_execute_task(ctx->ggmlop_handle, GGML_OP_NONE, &ion_base_tensor, &ion_meta_tensor, &ion_dst_dummy);
-            GGMLHEXAGON_LOG_INFO("registered ION DSP base, AP VA %p, size=%lldMB, fd=%d",
-                                 ctx->rpc_mempool, ctx->rpc_mempool_len / SIZE_IN_MB, ctx->rpc_mempool_handle);
         }
-    } //end if (ggmlhexagon_use_ion_mempool())
+    } else {
+        remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
+
+        // Register ION pool base address on DSP side
+        // FastRPC translates dsptensor.data from AP VA to DSP VA automatically
+        // Use src1 to pass fd and size information as a special "metadata" tensor
+        struct dsptensor ion_base_tensor;
+        struct dsptensor ion_meta_tensor;  // metadata tensor for fd and size
+        struct dsptensor ion_dst_dummy;
+        int32_t dummy = 0;
+        int32_t meta_data[16] = {0};  // metadata array
+
+        memset(&ion_base_tensor, 0, sizeof(ion_base_tensor));
+        memset(&ion_meta_tensor, 0, sizeof(ion_meta_tensor));
+        memset(&ion_dst_dummy, 0, sizeof(ion_dst_dummy));
+
+        // Main tensor: ION buffer base address
+        // For remote_register_buf'd ION buffers, FastRPC translates the pointer
+        // (not copy data). data_len tells FastRPC how many bytes to validate/map.
+        // Must be > sizeof(float) to get real pointer translation, but small enough
+        // that stub-layer allocation doesn't fail (data_len * sizeof(float) must fit).
+        ion_base_tensor.data = ctx->rpc_mempool;
+        ion_base_tensor.data_len = (int)(64 * 1024);  // 64KB: enough for pointer translation, safe for allocation
+        ion_base_tensor.type = 0;
+
+        // Metadata tensor: contains fd and size
+        // Use a small buffer on stack, FastRPC will copy it to DSP
+        meta_data[0] = ctx->rpc_mempool_handle;  // fd
+        meta_data[1] = (int32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);  // size lower 32 bits
+        meta_data[2] = (int32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);  // size upper 32 bits
+        meta_data[3] = (int32_t)(ctx->rpc_mempool_len >> 20);  // size in MB
+        ion_meta_tensor.data = meta_data;
+        ion_meta_tensor.data_len = sizeof(meta_data);
+        ion_meta_tensor.type = 0;
+
+        ion_dst_dummy.data = &dummy;
+        ion_dst_dummy.data_len = sizeof(dummy);
+
+        ggmlop_dsp_execute_task(ctx->ggmlop_handle, GGML_OP_NONE, &ion_base_tensor, &ion_meta_tensor, &ion_dst_dummy);
+        GGMLHEXAGON_LOG_INFO("registered ION DSP base, AP VA %p, size=%lldMB, fd=%d",
+                             ctx->rpc_mempool, ctx->rpc_mempool_len / SIZE_IN_MB, ctx->rpc_mempool_handle);
+    }
 
     return 0;
 }
 
 static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
-    if (ggmlhexagon_use_ion_mempool()) {
-        if (ctx->rpc_mempool) {
-            if (2 != g_hexagon_appcfg.offload_cgraph_type) {
-                //deregister rpc memory pool
-                remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, -1);
-            }
-            GGMLHEXAGON_LOG_DEBUG("free rpc mempool %p", ctx->rpc_mempool);
-            rpcmem_free(ctx->rpc_mempool);
-            ctx->rpc_mempool = nullptr;
-            ctx->rpc_mempool_len = 0;
-            ctx->rpc_mempool_capacity = 0;
+    if (ctx->rpc_mempool) {
+        if (2 != g_hexagon_appcfg.offload_cgraph_type) {
+            //deregister rpc memory pool
+            remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, -1);
         }
+        GGMLHEXAGON_LOG_DEBUG("free rpc mempool %p", ctx->rpc_mempool);
+        rpcmem_free(ctx->rpc_mempool);
+        ctx->rpc_mempool = nullptr;
+        ctx->rpc_mempool_len = 0;
+        ctx->rpc_mempool_capacity = 0;
     }
 }
 
 static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
-    if (!ggmlhexagon_use_ion_mempool()) {
+    if (ctx == nullptr) {
         return;
     }
     uint32_t dsp_version = 0;
@@ -3009,16 +2887,6 @@ bail:
     return -1;
 }
 
-// Forward declarations of buffer-type interface functions (defined later in this file)
-// so the context constructor can initialize buffer_type.iface.
-static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
-static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
-           ggml_backend_buffer_type_t buft, size_t size);
-static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
-static size_t ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
-static bool ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
-
-// Constructor: initialize fields and perform DSP init (ala qcom ggml_hexagon_session)
 ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev)
     : device(dev_id),
       backend(nullptr),
@@ -3044,8 +2912,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       last_graph_end_us(0),
       buffer_type{},
       has_vtcm(false),
-      has_hvx(false)
-{
+      has_hvx(false) {
     snprintf(name, sizeof(name), "Hexagon-cDSP%d", dev_id);
     snprintf(desc, sizeof(desc), "Qualcomm NPU(cDSP%d)", dev_id);
     snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
@@ -3067,9 +2934,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
 }
 
 ggml_backend_hexagon_context::~ggml_backend_hexagon_context() {
-    if (0 != ggmlop_handle) {
-        ggmlhexagon_deinit_cdsp(this);
-    }
+    ggmlhexagon_deinit_cdsp(this);
+    ggmlhexagon_print_running_timestamp(NULL);
 }
 
 static void ggmlhexagon_task_init(struct ggmlhexagon_task * task) {
@@ -3431,7 +3297,6 @@ static bool ggmlhexagon_compute_forward(ggml_backend_hexagon_context * ctx, stru
 // =================================================================================================
 //  section-5: implementation of ggml-hexagon backend according to specification in ggml backend subsystem
 // =================================================================================================
-// ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
 // Check if a ggml_type is allowed by the enabled_types config filter
 // Returns true if the type is in the enabled list, or if the list is empty (all types allowed)
 // Only applies to quantized types and F16/BF16; F32 is always allowed
@@ -3483,6 +3348,7 @@ static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
     return false;
 }
 
+// ref: ggml_hexagon_supported_mul_mat in Qualcomm's official ggml-hexagon backend
 static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
@@ -3504,6 +3370,11 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     }
 
     if (!ggmlhexagon_type_is_enabled(src0->type)) {
+        return false;
+    }
+
+    if (g_hexagon_appcfg.mulmat_min_n >= n) {
+        GGMLHEXAGON_LOG_DEBUG("MUL_MAT quantized N=%lld <= %d, keep on CPU\n", (long long)n, g_hexagon_appcfg.mulmat_min_n);
         return false;
     }
 
@@ -3561,10 +3432,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
                 if (g_set_tensor_repacked.count(src0->data)) {
                     return true;
                 }
-                if (n <= g_hexagon_appcfg.mulmat_min_n) {
-                    GGMLHEXAGON_LOG_DEBUG("MUL_MAT quantized N=%lld <= %d, keep on CPU\n", (long long)n, g_hexagon_appcfg.mulmat_min_n);
-                    return false;
-                }
                 return true;
             } else {
                 return false;
@@ -3582,9 +3449,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
             }
             if (ggml_nrows(src1) > 1024) {
                 //return false;  // no huge batches (for now)
-            }
-            if (n <= g_hexagon_appcfg.mulmat_min_n) {
-                return false;
             }
             break;
 
@@ -3604,9 +3468,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
                 //GGMLHEXAGON_LOG_WARN("no huge batches");
                 return false;  // no huge batches (for now)
             }
-            if (n <= g_hexagon_appcfg.mulmat_min_n) {
-                return false;
-            }
+
             break;
 
         default:
@@ -3680,9 +3542,6 @@ static bool ggmlhexagon_supports_op_none(ggml_backend_dev_t dev, const struct gg
 }
 
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
-    if (!ggmlhexagon_use_ion_mempool()) {
-        return false;
-    }
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
     }
@@ -3775,9 +3634,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 // This allows the scheduler to form larger subgraphs with more ops per batch,
 // reducing FastRPC call overhead (the dominant cost).
 static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
-    if (!ggmlhexagon_use_ion_mempool()) {
-        return false;
-    }
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
     }
@@ -3964,7 +3820,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
 struct ggml_backend_hexagon_buffer_context {
     ~ggml_backend_hexagon_buffer_context() {
         if (buffer) {
-            if (ggmlhexagon_use_ion_mempool()) {
+            if (is_ion_buffer) {
                 // Mark the ION pool region as free so it can be reused.
                 if (backend_ctx && backend_ctx->rpc_mempool) {
                     const char * buf_ptr = (const char *)buffer;
@@ -3988,6 +3844,7 @@ struct ggml_backend_hexagon_buffer_context {
 
     void * buffer       = nullptr;
     size_t buffer_size  = 0;
+    bool   is_ion_buffer= false;
 
     struct ggml_backend_hexagon_context * backend_ctx = nullptr;
 };
@@ -4295,80 +4152,74 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
     GGMLHEXAGON_LOG_WARN("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
     ggml_backend_hexagon_buffer_context * buffer_ctx = new ggml_backend_hexagon_buffer_context;
     buffer_ctx->backend_ctx = ctx;
+    buffer_ctx->is_ion_buffer = true;
 
     size_t size_page = 0;
 #if defined(__ANDROID__) || defined(__linux__)
     size_page = sysconf(_SC_PAGESIZE);
-#else
-    SYSTEM_INFO systeminfo;
-    GetSystemInfo(&systeminfo);
-    size_page = systeminfo.dwPageSize;
 #endif
     size_t size_aligned = size;
     if (0 != (size_aligned % size_page)) {
         size_aligned += (size_page - (size_aligned % size_page));
     }
 
-    if (ggmlhexagon_use_ion_mempool()) {
-        GGMLHEXAGON_LOG_DEBUG("device %d(%s)", ctx->device, ctx->name);
-        GGML_ASSERT(nullptr != ctx->rpc_mempool);
-        GGMLHEXAGON_LOG_WARN("device=%d size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
-                              ctx->device, size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
-                              ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
+    GGMLHEXAGON_LOG_DEBUG("device %d(%s)", ctx->device, ctx->name);
+    GGML_ASSERT(nullptr != ctx->rpc_mempool);
+    GGMLHEXAGON_LOG_WARN("device=%d size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
+                          ctx->device, size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
+                          ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
 
-        size_t data_limit = ctx->rpc_mempool_cache_offset > 0 ? ctx->rpc_mempool_cache_offset : ctx->rpc_mempool_len;
+    size_t data_limit = ctx->rpc_mempool_cache_offset > 0 ? ctx->rpc_mempool_cache_offset : ctx->rpc_mempool_len;
 
-        // Try to reuse a free region (best fit)
-        size_t best_idx = (size_t)-1;
-        size_t best_waste = (size_t)-1;
-        for (size_t ri = 0; ri < ctx->ion_regions.size(); ri++) {
-            const auto & r = ctx->ion_regions[ri];
-            if (!r.in_use && r.size >= size_aligned) {
-                size_t waste = r.size - size_aligned;
-                if (waste < best_waste) {
-                    best_waste = waste;
-                    best_idx = ri;
-                }
+    // Try to reuse a free region (best fit)
+    size_t best_idx = (size_t)-1;
+    size_t best_waste = (size_t)-1;
+    for (size_t ri = 0; ri < ctx->ion_regions.size(); ri++) {
+        const auto & r = ctx->ion_regions[ri];
+        if (!r.in_use && r.size >= size_aligned) {
+            size_t waste = r.size - size_aligned;
+            if (waste < best_waste) {
+                best_waste = waste;
+                best_idx = ri;
             }
         }
-
-        if (best_idx != (size_t)-1) {
-            // Reuse free region
-            auto & r = ctx->ion_regions[best_idx];
-            buffer_ctx->buffer      = (char *)ctx->rpc_mempool + r.offset;
-            buffer_ctx->buffer_size = size_aligned;  // actual requested size, not region size
-            r.in_use = true;
-            if (r.offset + size_aligned > ctx->rpc_mempool_usage) {
-                ctx->rpc_mempool_usage = r.offset + size_aligned;
-            }
-            GGMLHEXAGON_LOG_WARN("[ALLOC] device=%d reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
-                                 ctx->device, r.offset, r.size, size_aligned, r.size - size_aligned);
-        } else {
-            // Allocate new region from bump allocator tail
-            size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
-            if (aligned_offset + size_aligned <= data_limit) {
-                buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
-                buffer_ctx->buffer_size = size_aligned;
-                ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
-                // Record new region
-                ion_pool_region new_region;
-                new_region.offset = aligned_offset;
-                new_region.size   = size_aligned;
-                new_region.in_use = true;
-                ctx->ion_regions.push_back(new_region);
-                GGMLHEXAGON_LOG_WARN("[ALLOC] device=%d new region: offset=%zu size=%zu", ctx->device, aligned_offset, size_aligned);
-            } else {
-                GGMLHEXAGON_LOG_WARN("device=%d ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to system memory",
-                                     ctx->device, size_aligned / SIZE_IN_MB,
-                                     (data_limit - ctx->rpc_mempool_usage) / SIZE_IN_MB);
-                buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
-                buffer_ctx->buffer_size = size_aligned;
-            }
-        }
-    } else {
-        buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
-        buffer_ctx->buffer_size = size_aligned;
     }
+
+    if (best_idx != (size_t)-1) {
+        // Reuse free region
+        auto & r = ctx->ion_regions[best_idx];
+        buffer_ctx->buffer      = (char *)ctx->rpc_mempool + r.offset;
+        buffer_ctx->buffer_size = size_aligned;  // actual requested size, not region size
+        r.in_use = true;
+        if (r.offset + size_aligned > ctx->rpc_mempool_usage) {
+            ctx->rpc_mempool_usage = r.offset + size_aligned;
+        }
+        GGMLHEXAGON_LOG_WARN("[ALLOC] device=%d reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
+                             ctx->device, r.offset, r.size, size_aligned, r.size - size_aligned);
+    } else {
+        // Allocate new region from bump allocator tail
+        size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
+        if (aligned_offset + size_aligned <= data_limit) {
+            buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
+            buffer_ctx->buffer_size = size_aligned;
+            ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
+            // Record new region
+            ion_pool_region new_region;
+            new_region.offset = aligned_offset;
+            new_region.size   = size_aligned;
+            new_region.in_use = true;
+            ctx->ion_regions.push_back(new_region);
+            GGMLHEXAGON_LOG_WARN("[ALLOC] device=%d new region: offset=%zu size=%zu", ctx->device, aligned_offset, size_aligned);
+        } else {
+            GGMLHEXAGON_LOG_WARN("device=%d ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to system memory",
+                                 ctx->device, size_aligned / SIZE_IN_MB,
+                                 (data_limit - ctx->rpc_mempool_usage) / SIZE_IN_MB);
+            buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+            buffer_ctx->buffer_size = size_aligned;
+            buffer_ctx->is_ion_buffer = false;
+        }
+    }
+
     if (nullptr == buffer_ctx->buffer) {
         GGMLHEXAGON_LOG_WARN("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
         return nullptr;
@@ -4376,7 +4227,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         //GGMLHEXAGON_LOG_DEBUG("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
     }
     // Report allocation result and current mempool state
-    if (ggmlhexagon_use_ion_mempool()) {
+    if (buffer_ctx->is_ion_buffer) {
         const char * mem_type = "heap";
         const char * data_ptr = (const char *)buffer_ctx->buffer;
         const char * ion_base = (const char *)ctx->rpc_mempool;
@@ -4401,23 +4252,14 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
  */
 static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
     GGML_UNUSED(buft);
-    if (ggmlhexagon_use_ion_mempool()) {
-        return 128;
-    } else {
-        return 32;
-    }
+    return 128;
 }
 
 static size_t ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
-    if (ggmlhexagon_use_ion_mempool()) {
-        GGML_ASSERT(ctx->rpc_mempool_len > (8 * SIZE_IN_MB));
-        return ctx->rpc_mempool_len - (8 * SIZE_IN_MB);
-    } else {
-        //TODO:this is an experimental value for LLM models
-        return (1024 * SIZE_IN_MB);
-    }
+    GGML_ASSERT(ctx->rpc_mempool_len > (8 * SIZE_IN_MB));
+    return ctx->rpc_mempool_len - (8 * SIZE_IN_MB);
 }
 
 static bool ggml_backend_buft_is_hexagon(ggml_backend_buffer_type_t buft) {
@@ -4555,11 +4397,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
     // for cleanup after Phase 8. Mark them as free (no tail compaction).
     std::vector<size_t> temp_region_indices;
 
-    // Reset DSP-side FP16 weight cache. ION regions may be reused across
-    // graph_compute calls, making cached FP16 tiles stale.
-    if (ctx->rpc_mempool_cache_offset > 0) {
-        ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, 0, 0xFFFE);
-    }
+    // FP16 weight cache is keyed by (src0_data, M, K, type). Static weight
+    // tensors keep stable ION addresses across graph_compute calls, so cached
+    // tiles remain valid and TG can reuse them (first call miss, later hit).
+    // Do NOT reset cache here: resetting kills TG hit rate and has no benefit
+    // for PP (each weight is computed once per graph_compute anyway).
 
     // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
     // Each tensor object gets its own descriptor with correct ne/nb,
@@ -5162,14 +5004,8 @@ static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev)
 }
 
 static const char * ggml_backend_hexagon_device_get_description(ggml_backend_dev_t dev) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
-    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-    if (nullptr == ctx) {
-        GGMLHEXAGON_LOG_ERROR("pls check why ctx is null");
-        return "unknown";
-    }
-
-    return ctx->desc;
+    GGML_UNUSED(dev);
+    return "Hexagon-cDSP";
 }
 
 static void ggml_backend_hexagon_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
@@ -5214,15 +5050,10 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
     ggml_backend_hexagon_device_get_memory(dev, &props->memory_free, &props->memory_total);
     props->caps = {
             /* .async                 = */ false,
-            /* .host_buffer           = */ true,
+            /* .host_buffer           = */ false,
             /* .buffer_from_host_ptr  = */ false,
             /* .events                = */ false,
     };
-
-    if (ggmlhexagon_use_ion_mempool()) {
-        //don't use system memory in this scenario
-        props->caps.host_buffer       = false;
-    }
 }
 
 static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
@@ -5286,20 +5117,16 @@ static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(gg
 
 
 static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    if (ggmlhexagon_use_ion_mempool()) {
-        if (ggml_backend_buft_is_hexagon(buft)) {
-            ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
-            ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
-            return buft_ctx->device == dev_ctx->device;
-        }
-        // ATTENTION: in ION mempool mode, only support hexagon buffer type (ION memory).
-        // Do NOT accept host buffer type, otherwise the scheduler will allocate
-        // tensors on the heap, requiring ION mirror + copy-back which has
-        // unsolvable cache coherency issues on ARM64 (no DC IVAC in user-space).
-        return false;
+    if (ggml_backend_buft_is_hexagon(buft)) {
+        ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
+        ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
+        return buft_ctx->device == dev_ctx->device;
     }
-
-    return ggml_backend_buft_is_host(buft);
+    // ATTENTION: in ION mempool mode, only support hexagon buffer type (ION memory).
+    // Do NOT accept host buffer type, otherwise the scheduler will allocate
+    // tensors on the heap, requiring ION mirror + copy-back which has
+    // unsolvable cache coherency issues on ARM64 (no DC IVAC in user-space).
+    return false;
 }
 
 static struct ggml_backend_device_i ggml_backend_hexagon_device_interface = {
@@ -5365,7 +5192,28 @@ int ggml_backend_hexagon_get_device_count() {
 
 struct ggml_backend_hexagon_reg_context {
     std::vector<ggml_backend_dev_t> devices;
+    ~ggml_backend_hexagon_reg_context() {
+        for (auto * dev : devices) {
+            auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
+            delete hctx;
+            delete dev;
+        }
+    }
 };
+
+// Owning pointer to the reg context. The framework's ~ggml_backend_registry()
+// does not delete reg->context (see FIXME in ggml-backend-reg.cpp), so we rely
+// on an atexit handler to release DSP sessions. atexit runs before static
+// dtors, so function-local std::mutex objects (e.g. the log mutex) are still
+// alive when ~ggml_backend_hexagon_context calls ggmlhexagon_deinit_cdsp.
+static ggml_backend_hexagon_reg_context * g_reg_ctx = nullptr;
+
+static void ggml_backend_hexagon_atexit_cleanup() {
+    if (g_reg_ctx) {
+        delete g_reg_ctx;
+        g_reg_ctx = nullptr;
+    }
+}
 
 static const char * ggml_backend_hexagon_reg_get_name(ggml_backend_reg_t reg) {
     GGML_UNUSED(reg);
@@ -5422,13 +5270,13 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
         static std::mutex mutex;
         std::lock_guard<std::mutex> lock(mutex);
         if (!initialized) {
-            ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
-
             int ret = htpdrv_init();
             if (AEE_SUCCESS != ret) {
                 GGMLHEXAGON_LOG_ERROR("htpdrv_init failed with error %d", ret);
                 return nullptr;
             }
+
+            ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
 
             if (2 == g_hexagon_appcfg.offload_cgraph_type) {
                 ggml_backend_hexagon_device_interface.supports_op = ggmlhexagon_can_handle_op_through_cdsp_ion;
@@ -5476,6 +5324,9 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                     /* .iface       = */ ggml_backend_hexagon_reg_interface,
                     /* .context     = */ ctx
             };
+
+            g_reg_ctx = ctx;
+            std::atexit(ggml_backend_hexagon_atexit_cleanup);
         }
 
         initialized = true;

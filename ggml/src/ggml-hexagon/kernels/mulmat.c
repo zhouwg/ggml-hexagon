@@ -3215,6 +3215,275 @@ fallback:
     }
 }
 
+// GEMV: N=1 matrix-vector multiply with VTCM + DMA + multithread + HVX
+// ======================================================================
+
+typedef struct {
+    const struct dsptensor *src0, *src1;
+    struct dsptensor *dst;
+    const void *wdata;
+    ggml_vec_dot_t vec_dot;
+    int32_t ne00, ir0, ir1;
+    size_t nb01, nb01_src, s1s2, s1s3, vtcm_size;
+    uint8_t *vtcm;
+    dma_queue *dma;
+    worker_synctoken_t *token;
+    int is_x4x2;        // src0 is Q4_0x4x2, dequantize to FP16 in VTCM
+} gemv_td_t;
+
+// Repack one row from Q4_0x4x2 layout to standard Q4_0 layout.
+// Matches repack_q4x4x2_q4_0 in ggml-hexagon.cpp.
+static void repack_x4x2_to_q4_0_row(const uint8_t *src, uint8_t *dst, int32_t k) {
+    const int qk_q4_0 = QK4_0;              // 32
+    const int qk_x4x2 = 256;
+    const int nb = k / qk_x4x2;
+    const int qblk_size = qk_x4x2 / 2;      // 128
+    const int dblk_size = 8 * 2;            // 16
+    const int qrow_size = k / 2;
+    const int q4_blk_sz = qk_q4_0 / 2 + 2;  // 18
+
+    const uint8_t *x_q = src;
+    const uint8_t *x_d = src + qrow_size;
+
+    for (int ib = 0; ib < nb; ib++) {
+        const uint8_t *q = x_q + ib * qblk_size;
+        uint8_t qs[256];
+        for (int j = 0; j < qblk_size; j++) {
+            qs[j]           = q[j] & 0x0F;
+            qs[j + qblk_size] = q[j] >> 4;
+        }
+        const uint16_t *d_src = (const uint16_t *)(x_d + ib * dblk_size);
+        for (int j = 0; j < 8; j++) {
+            uint8_t *block = dst + (ib * 8 + j) * q4_blk_sz;
+            *(uint16_t *)block = d_src[j];
+            uint8_t *b = block + 2;
+            for (int kk = 0; kk < qk_q4_0 / 2; kk++) {
+                b[kk] = (qs[j * qk_q4_0 + kk + qk_q4_0 / 2] << 4) | qs[j * qk_q4_0 + kk];
+            }
+        }
+    }
+}
+
+// Dequantize one row from Q4_0x4x2 layout to row-major FP16.
+// Processes sub-blocks in pairs and stores 64 fp16 values (128 bytes) with HVX.
+static void dequantize_x4x2_row_to_f16_hvx(const uint8_t *src, __fp16 *dst, int32_t k) {
+    const int qk_x4x2 = 256;
+    const int nb = k / qk_x4x2;
+    const int qrow_size = k / 2;
+    const int dblk_size = 8 * 2;
+
+    for (int ib = 0; ib < nb; ib++) {
+        const uint8_t *q = src + ib * (qk_x4x2 / 2);
+        const uint8_t *d = src + qrow_size + ib * dblk_size;
+        for (int s = 0; s < 8; s += 2) {
+            const int packed_off0 = (s < 4 ? s : s - 4) * 32;
+            const int packed_off1 = ((s + 1) < 4 ? (s + 1) : (s + 1) - 4) * 32;
+            const bool upper0 = (s >= 4);
+            const bool upper1 = ((s + 1) >= 4);
+            const __fp16 *scale0 = (const __fp16 *)(d + s * 2);
+            const __fp16 *scale1 = (const __fp16 *)(d + (s + 1) * 2);
+            HVX_Vector v0 = dequantize_x4x2_q4_0_group_hvx(q + packed_off0, upper0, scale0);
+            HVX_Vector v1 = dequantize_x4x2_q4_0_group_hvx(q + packed_off1, upper1, scale1);
+            HVX_Vector v0_rot = Q6_V_vror_VR(v0, 64);
+            HVX_Vector combined = Q6_V_valign_VVR(v1, v0_rot, 64);
+            HVX_Vector *out = (HVX_Vector *)(dst + ib * qk_x4x2 + s * 32);
+            *out = combined;
+        }
+    }
+}
+
+static void gemv_load_chunk(gemv_td_t *t, const char *src0_base, uint8_t *buf, int32_t iir0, int32_t rows, int *pending) {
+    if (rows <= 0 || !t->vtcm) { *pending = 0; return; }
+    // Prefetch source rows into L2 before load/dequant.
+    l2fetch(src0_base + iir0 * t->nb01_src, t->nb01_src, t->nb01_src, rows, 0);
+    if (t->is_x4x2) {
+        for (int32_t r = 0; r < rows; r++) {
+            dequantize_x4x2_row_to_f16_hvx(
+                (const uint8_t *)(src0_base + (iir0 + r) * t->nb01_src),
+                (__fp16 *)(buf + r * t->nb01), t->ne00);
+        }
+        *pending = 0;
+    } else {
+        dma_queue_push_ddr_to_vtcm(t->dma, dma_make_ptr(buf, src0_base + iir0 * t->nb01_src), t->nb01, t->nb01, rows);
+        *pending = 1;
+    }
+}
+
+static void gemv_compute_chunk(gemv_td_t *t, const uint8_t *buf, const char *src0_base, float *dst_col, int32_t iir0, int32_t rows, const char *src1_col) {
+    for (int32_t r = 0; r < rows; r++) {
+        const void *row = buf ? (const void *)(buf + r * t->nb01) : (const void *)(src0_base + (iir0 + r) * t->nb01_src);
+        t->vec_dot(t->ne00, &dst_col[iir0 + r], 0, row, 0, src1_col, 0, 1);
+    }
+}
+
+static void gemv_thread(void *p) {
+    gemv_td_t *t = (gemv_td_t *)p;
+    const int32_t r2 = t->src1->ne[2] / t->src0->ne[2];
+    const int32_t r3 = t->src1->ne[3] / t->src0->ne[3];
+
+    const size_t vtcm_half = t->vtcm ? (t->vtcm_size / 2) & ~(size_t)127 : 0;
+    const int32_t rows_per_buf = t->vtcm ? (int32_t)(vtcm_half / t->nb01) : 0;
+    const int use_double_buf = (rows_per_buf > 0);
+
+    for (int i3 = 0; i3 < t->src1->ne[3]; ++i3) {
+        for (int i2 = 0; i2 < t->src1->ne[2]; ++i2) {
+            const int32_t i02 = i2 / r2, i03 = i3 / r3;
+            const char *src0_base = (const char *)t->src0->data + i02 * t->src0->nb[2] + i03 * t->src0->nb[3];
+            const char *src1_col  = (const char *)t->wdata + i3 * t->s1s3 + i2 * t->s1s2;
+            float *dst_col = (float *)((char *)t->dst->data + i3 * t->dst->nb[3] + i2 * t->dst->nb[2]);
+
+            if (!t->vtcm) {
+                // No VTCM: compute directly from DDR.
+                gemv_compute_chunk(t, NULL, src0_base, dst_col, t->ir0, t->ir1 - t->ir0, src1_col);
+                continue;
+            }
+
+            uint8_t *buf[2] = { t->vtcm, t->vtcm + vtcm_half };
+            int32_t chunk_rows[2] = {0, 0};
+            int32_t chunk_start[2] = {0, 0};
+            int pending = 0;
+
+            // First chunk: synchronous load so it is ready to compute.
+            int32_t iir0 = t->ir0;
+            int cur = 0;
+            chunk_rows[cur] = t->ir1 - iir0;
+            if (chunk_rows[cur] > rows_per_buf) chunk_rows[cur] = rows_per_buf;
+            if (!use_double_buf) {
+                // Use full VTCM as single buffer.
+                buf[1] = NULL;
+                chunk_rows[cur] = t->ir1 - iir0;
+                if ((size_t)chunk_rows[cur] * t->nb01 > t->vtcm_size) chunk_rows[cur] = (int32_t)(t->vtcm_size / t->nb01);
+            }
+            chunk_start[cur] = iir0;
+            gemv_load_chunk(t, src0_base, buf[cur], chunk_start[cur], chunk_rows[cur], &pending);
+            if (pending) { dma_queue_pop(t->dma); pending = 0; }
+            iir0 += chunk_rows[cur];
+
+            while (iir0 < t->ir1) {
+                int next = 1 - cur;
+                chunk_rows[next] = t->ir1 - iir0;
+                if (chunk_rows[next] > rows_per_buf) chunk_rows[next] = rows_per_buf;
+                chunk_start[next] = iir0;
+
+                // Prefetch next chunk while computing current chunk.
+                gemv_load_chunk(t, src0_base, buf[next], chunk_start[next], chunk_rows[next], &pending);
+
+                gemv_compute_chunk(t, buf[cur], src0_base, dst_col, chunk_start[cur], chunk_rows[cur], src1_col);
+
+                if (pending) { dma_queue_pop(t->dma); pending = 0; }
+                iir0 += chunk_rows[next];
+                cur = next;
+            }
+
+            // Compute final chunk.
+            if (chunk_rows[cur] > 0) {
+                gemv_compute_chunk(t, buf[cur], src0_base, dst_col, chunk_start[cur], chunk_rows[cur], src1_col);
+            }
+        }
+    }
+    if (t->token) worker_pool_synctoken_jobdone(t->token);
+}
+
+static int ggmlop_dsp_gemv(remote_handle64 h, const struct dsptensor *src0, const struct dsptensor *src1, dsptensor *dst) {
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
+    GGML_UNUSED(h);
+
+    dst->ne[0] = src0->ne[1]; dst->ne[1] = src1->ne[1]; dst->ne[2] = src1->ne[2]; dst->ne[3] = src1->ne[3];
+    dst->nb[0] = 4;
+    dst->nb[1] = dst->nb[0] * dst->ne[0];
+    dst->nb[2] = dst->nb[1] * dst->ne[1];
+    dst->nb[3] = dst->nb[2] * dst->ne[2];
+
+    const int32_t ne00 = src0->ne[0], nr0 = src0->ne[1], ne10 = src1->ne[0];
+    const size_t nb01_src = src0->nb[1];
+    const int is_x4x2 = (src0->type == GGML_TYPE_Q4_0x4x2);
+    const enum ggml_type gemv_type = is_x4x2 ? GGML_TYPE_F16 : src0->type;
+    const size_t nb01 = ggml_row_size(gemv_type, ne00);
+    const struct ggml_type_traits_dsp *tr = ggml_get_type_traits_dsp(gemv_type);
+    const enum ggml_type vdt = tr->vec_dot_type;
+    const ggml_vec_dot_t vdf = tr->vec_dot;
+
+    const void *wdata = src1->data;
+    size_t s1s2 = src1->nb[2], s1s3 = src1->nb[3];
+    if (src1->type != vdt) {
+        const size_t rw = ggml_row_size(vdt, ne10);
+        const size_t r2 = rw * src1->ne[1], r3 = r2 * src1->ne[2];
+        void *q = ggmlop_get_work_data(r3 * src1->ne[3]);
+        if (!q) { GGMLHEXAGON_LOG_ERROR("GEMV: work data alloc failed"); return -1; }
+        const struct ggml_type_traits_dsp *qt = ggml_get_type_traits_dsp(vdt);
+        if (qt->from_float) {
+            for (int i3 = 0; i3 < src1->ne[3]; ++i3)
+                for (int i2 = 0; i2 < src1->ne[2]; ++i2)
+                    for (int i1 = 0; i1 < src1->ne[1]; ++i1)
+                        qt->from_float((const float *)((const char *)src1->data + i3 * src1->nb[3] + i2 * src1->nb[2] + i1 * src1->nb[1]),
+                                       (char *)q + i3 * r3 + i2 * r2 + i1 * rw, ne10);
+        }
+        wdata = q; s1s2 = r2; s1s3 = r3;
+    }
+
+    unsigned int nth = num_workers;
+    if (nth < 1) nth = 1;
+    if (nth > MAX_NUM_WORKERS) nth = MAX_NUM_WORKERS;
+
+    int use_vtcm = 0;
+    void *vtcm_base = NULL;
+    size_t pool = 0, vtcm_per_thread = 0;
+    if (!ggmlop_ensure_vtcm_available()) {
+        vtcm_base = ggmlop_get_vtcm_pool(&pool);
+        if (vtcm_base && pool >= nth * (64 * 1024)) use_vtcm = 1;
+    }
+    if (use_vtcm) {
+        vtcm_per_thread = 64 * 1024;
+        while (vtcm_per_thread * 2 * nth <= pool) vtcm_per_thread *= 2;
+        while (vtcm_per_thread < nb01 && nth > 1) {
+            nth--;
+            vtcm_per_thread = 64 * 1024;
+            while (vtcm_per_thread * 2 * nth <= pool) vtcm_per_thread *= 2;
+        }
+        if (vtcm_per_thread < nb01) use_vtcm = 0;
+    }
+
+    // x4x2 -> FP16 dequant requires VTCM; fallback to HMX if unavailable.
+    if (is_x4x2 && !use_vtcm) {
+        GGMLHEXAGON_LOG_INFO("GEMV: x4x2 fallback to HMX (no VTCM)");
+        return ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
+    }
+
+    GGMLHEXAGON_LOG_INFO("GEMV: nth=%u nr0=%d vtcm=%zu", nth, nr0, use_vtcm ? vtcm_per_thread : 0);
+
+    gemv_td_t td[MAX_NUM_WORKERS];
+    dma_queue *dma[MAX_NUM_WORKERS];
+    worker_synctoken_t token;
+    if (nth > 1) worker_pool_synctoken_init(&token, nth - 1);
+    for (unsigned t = 0; t < nth; t++) dma[t] = use_vtcm ? dma_queue_create(16) : NULL;
+
+    const int32_t rows_per_th = (nr0 + nth - 1) / nth;
+    for (unsigned t = 0; t < nth; t++) {
+        td[t].src0 = src0; td[t].src1 = src1; td[t].dst = dst; td[t].wdata = wdata;
+        td[t].vec_dot = vdf; td[t].ne00 = ne00; td[t].nb01 = nb01; td[t].nb01_src = nb01_src;
+        td[t].s1s2 = s1s2; td[t].s1s3 = s1s3;
+        td[t].ir0 = t * rows_per_th;
+        td[t].ir1 = MIN(td[t].ir0 + rows_per_th, nr0);
+        td[t].vtcm_size = use_vtcm ? vtcm_per_thread : 0;
+        td[t].vtcm = use_vtcm ? (uint8_t *)vtcm_base + t * vtcm_per_thread : NULL;
+        td[t].dma = dma[t];
+        td[t].token = (nth > 1 && t > 0) ? &token : NULL;
+        td[t].is_x4x2 = is_x4x2;
+        if (t == 0 || nth == 1) {
+            gemv_thread(&td[t]);
+        } else {
+            worker_pool_job_t job = { gemv_thread, &td[t] };
+            worker_pool_submit(NULL, job);
+        }
+    }
+
+    if (nth > 1) worker_pool_synctoken_wait(&token);
+    for (unsigned t = 0; t < nth; t++) if (dma[t]) { dma_queue_flush(dma[t]); dma_queue_delete(dma[t]); }
+
+    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
+    return 0;
+}
+
 // mulmat dispatch table: maps algotype to implementation function + description
 typedef int (*mulmat_fn_t)(remote_handle64, const struct dsptensor *, const struct dsptensor *, dsptensor *);
 
@@ -3260,6 +3529,18 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const st
         } else {
             fn = ggmlop_dsp_mulmat_singlethread;
             desc = "singlethread mode";
+        }
+    }
+
+    // N-based dispatch: N=1 (TG/decode) uses GEMV (DMA + VTCM + HVX vec_dot)
+    // for efficiency (HMX 32x32 tile wastes 31/32 rows for N=1).
+    // N>1 (PP) uses HMX.
+    if (fn == ggmlop_dsp_mulmat_hmx) {
+        const int32_t N = src1->ne[1];
+        if (N == 1) {
+            fn = ggmlop_dsp_gemv;
+            desc = "GEMV mode (N=1)";
+            log_use_hvx = 0;
         }
     }
 
