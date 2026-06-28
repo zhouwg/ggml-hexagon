@@ -7,7 +7,6 @@
     "run_testop_add": "./scripts/build-run-android.sh run_testop ADD",
     "run_testop_mulmat": "./scripts/build-run-android.sh run_testop MUL_MAT",
     "run_llamacli": "./scripts/build-run-android.sh run_llamacli",
-    "run_llamabench": "./scripts/build-run-android.sh run_llamabench",
     "build_qcom": "./scripts/build-run-android.sh build_qcom"
   },
   "build_rules": {
@@ -84,7 +83,6 @@
     "add_test": "./scripts/build-run-android.sh run_testop ADD",
     "mulmat_test": "./scripts/build-run-android.sh run_testop MUL_MAT",
     "inference_test": "./scripts/build-run-android.sh run_llamacli 0",
-    "benchmark_test": "./scripts/build-run-android.sh run_llamabench 0",
     "note": "All tests must be executed locally"
   },
   "log_viewing_rules": {

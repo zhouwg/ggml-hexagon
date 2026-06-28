@@ -22,6 +22,7 @@ struct dsp_op_desc {
     int32_t src0_idx;      // tensor index (-1 if none)
     int32_t src1_idx;      // tensor index (-1 if none)
     int32_t src2_idx;      // tensor index (-1 if none, e.g., ROPE freq_factors)
+    int32_t src3_idx;      // tensor index (-1 if none, e.g., FLASH_ATTN mask/sinks)
     int32_t dst_idx;       // tensor index
 };
 

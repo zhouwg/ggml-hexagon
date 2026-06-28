@@ -9,8 +9,8 @@ Jeff Zhou - zhouwg2000@gmail.com
 GitHub:   - https://github.com/zhouwg/ggml-hexagon
 */
 
-#ifndef ggmldsp_h
-#define ggmldsp_h
+#ifndef GGMLDSP_H
+#define GGMLDSP_H
 
 #ifdef  __cplusplus
 extern "C" {
@@ -33,7 +33,8 @@ extern "C" {
 #include "AEEStdErr.h"
 #include "hexagon_types.h"
 #include "hexagon_protos.h"
-#include "skel.h"
+
+#include "ggml-ops.h"
 
 #define ggml_tensor                     dsptensor
 
@@ -2200,4 +2201,4 @@ static inline ggml_bf16_t ggml_compute_fp32_to_bf16(float s) {
 }
 #endif
 
-#endif  /* ggmldsp_h */
+#endif  /* GGMLDSP_H */

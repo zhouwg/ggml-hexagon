@@ -273,18 +273,18 @@ struct Interface {
 #endif
 
 static const Type types[9];
-static const Type* const typeArrays[17] = {&(types[0]),&(types[1]),&(types[1]),&(types[0]),&(types[2]),&(types[0]),&(types[3]),&(types[0]),&(types[2]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[5]),&(types[7])};
-static const StructType structTypes[3] = {{0x7,&(typeArrays[0]),0x70,0x4,0x6c,0x4,0x4,0x4},{0x4,&(typeArrays[13]),0x10,0x8,0x8,0x4,0x4,0x4},{0x6,&(typeArrays[7]),0x54,0x0,0x54,0x4,0x1,0x4}};
+static const Type* const typeArrays[18] = {&(types[0]),&(types[2]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[0]),&(types[1]),&(types[1]),&(types[0]),&(types[2]),&(types[0]),&(types[3]),&(types[0]),&(types[0]),&(types[5]),&(types[7])};
+static const StructType structTypes[3] = {{0x7,&(typeArrays[7]),0x70,0x4,0x6c,0x4,0x4,0x4},{0x4,&(typeArrays[14]),0x10,0x8,0x8,0x4,0x4,0x4},{0x7,&(typeArrays[0]),0x58,0x0,0x58,0x4,0x1,0x4}};
 static const SequenceType sequenceTypes[1] = {{&(types[6]),0x0,0x70,0x4,0x6c}};
-static const Type types[9] = {{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{0x10,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x4}}, 8,0x4},{0x40,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x10}}, 8,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[4]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(sequenceTypes[0]),0}}, 25,SLIM_IFPTR32(0x4,0x8)},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8)},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[8]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x54,{{(const uintptr_t)&(structTypes[2]),0}}, 6,0x4}};
-static const Parameter parameters[7] = {{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)0x0,0}}, 4,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x18,0x28),{{(const uintptr_t)&(structTypes[1]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0}};
-static const Parameter* const parameterArrays[12] = {(&(parameters[3])),(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[0])),(&(parameters[1])),(&(parameters[6])),(&(parameters[2]))};
-static const Method methods[6] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[8])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[11])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,4,(&(parameterArrays[4])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[1])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe8,0x6c,4,4,(&(parameterArrays[0])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x2,0x1,0x0,0x0),0x10,0x0,1,1,(&(parameterArrays[10])),0x4,0x0}};
-static const Method* const methodArrays[7] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3]),&(methods[4]),&(methods[5])};
-static const char strings[253] = "dsp_execute_batch\0dsp_execute_task\0mulmat_algotype\0thread_counts\0dsp_setclocks\0ggml_op_type\0power_level\0dsp_mulmat\0n_tensors\0op_params\0src2_idx\0src1_idx\0src0_idx\0dst_idx\0dsp_add\0latency\0opcode\0n_ops\0flags\0close\0src1\0data\0src0\0open\0req\0dst\0uri\0op\0nb\0ne\0";
-static const uint16_t methodStrings[105] = {18,79,221,46,249,246,243,125,199,216,211,46,249,246,243,125,199,216,235,46,249,246,243,125,199,216,104,221,46,249,246,243,125,199,216,211,46,249,246,243,125,199,216,235,46,249,246,243,125,199,216,170,221,46,249,246,243,125,199,216,211,46,249,246,243,125,199,216,235,46,249,246,243,125,199,216,0,231,115,193,117,195,46,249,246,243,125,199,216,186,128,153,144,135,162,65,92,178,35,51,226,239,16,205,16};
-static const uint16_t methodStringsArrays[7] = {100,103,95,51,26,0,76};
-__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {7,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
+static const Type types[9] = {{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{0x10,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x4}}, 8,0x4},{0x40,{{(const uintptr_t)&(types[0]),(const uintptr_t)0x10}}, 8,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[4]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(sequenceTypes[0]),0}}, 25,SLIM_IFPTR32(0x4,0x8)},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8)},{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)&(types[8]),(const uintptr_t)0x0}}, 9,SLIM_IFPTR32(0x4,0x8)},{0x58,{{(const uintptr_t)&(structTypes[2]),0}}, 6,0x4}};
+static const Parameter parameters[8] = {{SLIM_IFPTR32(0x8,0x10),{{(const uintptr_t)0x0,0}}, 4,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x4,0x8),{{(const uintptr_t)0xdeadc0de,(const uintptr_t)0}}, 0,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0},{SLIM_IFPTR32(0x74,0x80),{{(const uintptr_t)&(structTypes[0]),0}}, 22,SLIM_IFPTR32(0x4,0x8),3,0},{SLIM_IFPTR32(0x18,0x28),{{(const uintptr_t)&(structTypes[1]),0}}, 22,SLIM_IFPTR32(0x4,0x8),0,0},{0x4,{{(const uintptr_t)0,(const uintptr_t)1}}, 2,0x4,0,0}};
+static const Parameter* const parameterArrays[15] = {(&(parameters[3])),(&(parameters[4])),(&(parameters[4])),(&(parameters[5])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[3])),(&(parameters[7])),(&(parameters[7])),(&(parameters[7])),(&(parameters[0])),(&(parameters[1])),(&(parameters[6])),(&(parameters[2]))};
+static const Method methods[8] = {{REMOTE_SCALARS_MAKEX(0,0,0x2,0x0,0x0,0x1),0x4,0x0,2,2,(&(parameterArrays[11])),0x4,0x1},{REMOTE_SCALARS_MAKEX(0,0,0x0,0x0,0x1,0x0),0x0,0x0,1,1,(&(parameterArrays[14])),0x1,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x10,0x0,4,4,(&(parameterArrays[4])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe4,0x6c,3,3,(&(parameterArrays[1])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x3,0x2,0x0,0x0),0xe8,0x6c,4,4,(&(parameterArrays[0])),0x4,0x4},{REMOTE_SCALARS_MAKEX(0,0,0x2,0x1,0x0,0x0),0x10,0x0,1,1,(&(parameterArrays[13])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0x8,0x0,2,2,(&(parameterArrays[8])),0x4,0x0},{REMOTE_SCALARS_MAKEX(0,0,0x1,0x0,0x0,0x0),0xc,0x0,3,3,(&(parameterArrays[8])),0x4,0x0}};
+static const Method* const methodArrays[9] = {&(methods[0]),&(methods[1]),&(methods[2]),&(methods[3]),&(methods[3]),&(methods[4]),&(methods[5]),&(methods[6]),&(methods[7])};
+static const char strings[348] = "dsp_execute_batch_ion\0dsp_execute_batch\0dsp_register_ion\0dsp_execute_task\0mulmat_algotype\0thread_counts\0dsp_setclocks\0batch_offset\0ggml_op_type\0power_level\0batch_size\0dsp_mulmat\0n_tensors\0op_params\0src3_idx\0src2_idx\0src1_idx\0src0_idx\0size_hi\0size_lo\0dst_idx\0dsp_add\0latency\0ion_fd\0opcode\0n_ops\0flags\0close\0src1\0data\0src0\0open\0req\0dst\0uri\0op\0nb\0ne\0";
+static const uint16_t methodStrings[113] = {57,131,316,85,344,341,338,188,294,311,306,85,344,341,338,188,294,311,330,85,344,341,338,188,294,311,167,316,85,344,341,338,188,294,311,306,85,344,341,338,188,294,311,330,85,344,341,338,188,294,311,258,316,85,344,341,338,188,294,311,306,85,344,341,338,188,294,311,330,85,344,341,338,188,294,311,22,326,178,288,180,290,85,344,341,338,188,294,311,281,191,225,216,207,198,250,104,144,266,74,90,40,274,242,234,0,118,156,321,334,38,300,38};
+static const uint16_t methodStringsArrays[9] = {108,111,96,51,26,0,76,105,101};
+__QAIC_SLIM_EXPORT const Interface __QAIC_SLIM(ggmlop_slim) = {9,&(methodArrays[0]),0,0,&(methodStringsArrays [0]),methodStrings,strings};
 #endif //_GGMLOP_SLIM_H
 
 
@@ -313,9 +313,9 @@ static __inline int _stub_method(remote_handle64 _handle, uint32_t _mid, uint32_
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 dump_diag_info, int32 offload_cgraph_type, int32 mulmat_algotype, int32 thread_counts) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_setclocks)(remote_handle64 _handle, int32 power_level, int32 latency, int32 mulmat_algotype, int32 thread_counts) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 2;
-   return _stub_method(_handle, _mid, (uint32_t*)&dump_diag_info, (uint32_t*)&offload_cgraph_type, (uint32_t*)&mulmat_algotype, (uint32_t*)&thread_counts);
+   return _stub_method(_handle, _mid, (uint32_t*)&power_level, (uint32_t*)&latency, (uint32_t*)&mulmat_algotype, (uint32_t*)&thread_counts);
 }
 static __inline int _stub_unpack(_ATTRIBUTE_UNUSED remote_arg* _praROutPost, _ATTRIBUTE_UNUSED remote_arg* _ppraROutPost[1], _ATTRIBUTE_UNUSED void* _primROut, _ATTRIBUTE_UNUSED uint32_t _rout0[1], _ATTRIBUTE_UNUSED uint32_t _rout1[4], _ATTRIBUTE_UNUSED uint32_t _rout2[4], _ATTRIBUTE_UNUSED uint32_t _rout3[1], _ATTRIBUTE_UNUSED uint32_t _rout4[16], _ATTRIBUTE_UNUSED uint32_t _rout5[1], _ATTRIBUTE_UNUSED char* _rout6[1], _ATTRIBUTE_UNUSED uint32_t _rout6Len[1]) {
    int _nErr = 0;
@@ -578,7 +578,7 @@ static __inline int _stub_pack_4(_ATTRIBUTE_UNUSED _allocator* _al, _ATTRIBUTE_U
    }
    _COPY(_primIn, 12, _in3Len, 0, 4);
    _praIn[1].buf.pv = (void*) _in3[0];
-   _praIn[1].buf.nLen = (84 * _in3Len[0]);
+   _praIn[1].buf.nLen = (88 * _in3Len[0]);
    _ppraInStart[0] += (_praIn - _praInStart) + 2;
    _ppraROutStart[0] += (_praROut - _praROutStart) +0;
    _QAIC_CATCH(_nErr) {}
@@ -674,9 +674,9 @@ static __inline int _stub_method_4(remote_handle64 _handle, uint32_t _mid, uint3
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch_ion)(remote_handle64 _handle, uint32_t batch_offset, uint32_t batch_size) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch_ion)(remote_handle64 _handle, uint32 batch_offset, uint32 batch_size) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 7;
-   return _stub_method_4(_handle, _mid, &batch_offset, &batch_size);
+   return _stub_method_4(_handle, _mid, (uint32_t*)&batch_offset, (uint32_t*)&batch_size);
 }
 static __inline int _stub_method_5(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint32_t _in1[1], uint32_t _in2[1]) {
    remote_arg _pra[1] = {0};
@@ -693,9 +693,9 @@ static __inline int _stub_method_5(remote_handle64 _handle, uint32_t _mid, uint3
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_register_ion)(remote_handle64 _handle, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_register_ion)(remote_handle64 _handle, uint32 ion_fd, uint32 size_lo, uint32 size_hi) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 8;
-   return _stub_method_5(_handle, _mid, &ion_fd, &size_lo, &size_hi);
+   return _stub_method_5(_handle, _mid, (uint32_t*)&ion_fd, (uint32_t*)&size_lo, (uint32_t*)&size_hi);
 }
 #ifdef __cplusplus
 }

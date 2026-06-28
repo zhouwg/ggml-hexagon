@@ -61,12 +61,6 @@
 #include <stdatomic.h>
 #endif
 
-#if !defined(__ANDROID__) && !defined(__linux__)
-#include <wchar.h>
-#include <malloc.h>
-#include <Windows.h>
-#endif
-
 #if defined(__ANDROID__)
 #include "android/log.h"
 
@@ -84,7 +78,7 @@
 #include "ggml-backend-impl.h"
 
 #include "kernels/skel.h"
-#include "kernels/hex_batch.h"
+#include "kernels/ggml-ops.h"
 
 // =================================================================================================
 //  section-1: forward/prototype declaration, global vars, macros, data structures
@@ -487,7 +481,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
     {false, GGML_OP_LEAKY_RELU, 0, nullptr, nullptr},
     {false, GGML_OP_TRI,      0, nullptr, nullptr},
     {false, GGML_OP_FILL,     0, nullptr, nullptr},
-    {false, GGML_OP_FLASH_ATTN_EXT, 0, nullptr, nullptr},
+    {true,  GGML_OP_FLASH_ATTN_EXT, 4, "ggmlop_dsp_flash_attn", nullptr},
     {false, GGML_OP_FLASH_ATTN_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_SSM_CONV, 0, nullptr, nullptr},
     {false, GGML_OP_SSM_SCAN, 0, nullptr, nullptr},
@@ -3478,6 +3472,47 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst) {
     return true;
 }
 
+// Decide whether a FLASH_ATTN_EXT node can be offloaded to the DSP.
+// Mirrors the shape/type checks in the JZ kernel (kernels/flash_attn.c) so
+// that the AP-side scheduler agrees with what the DSP will actually accept.
+static bool ggmlhexagon_supported_flash_attn(const struct ggml_tensor * dst) {
+    const struct ggml_tensor * q   = dst->src[0];
+    const struct ggml_tensor * k   = dst->src[1];
+    const struct ggml_tensor * v   = dst->src[2];
+    const struct ggml_tensor * msk = dst->src[3];
+
+    if (!q || !k || !v) {
+        return false;
+    }
+    // Q / K / V shape consistency.
+    if (q->ne[0] != k->ne[0]) {
+        return false;
+    }
+    if (k->ne[1] != v->ne[1] || k->ne[2] != v->ne[2] || k->ne[3] != v->ne[3]) {
+        return false;
+    }
+    // Q can be f16 or f32; K/V must be f16 in the JZ kernel.
+    if (q->type != GGML_TYPE_F16 && q->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16) {
+        return false;
+    }
+    // dst must be f16 or f32.
+    if (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    // Mask (optional) must be f16 if present.
+    if (msk && msk->type != GGML_TYPE_F16) {
+        return false;
+    }
+    // n_head must fit the per-op slopes scratch in the JZ kernel.
+    if (q->ne[2] > 512) {
+        return false;
+    }
+    return true;
+}
+
 // Check if an op is allowed by the enabled_ops config filter
 // Returns true if the op is in the enabled list, or if the list is empty (all ops allowed)
 // Shape/meta ops are always allowed since they are zero-copy metadata operations
@@ -3622,6 +3657,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
                 return false;
             return true;
         }
+        case GGML_OP_FLASH_ATTN_EXT:
+        {
+            return ggmlhexagon_supported_flash_attn(op_tensor);
+        }
         default:
             break;
     }
@@ -3637,15 +3676,28 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
     }
-    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
-    if (op_tensor->op == GGML_OP_NONE) {
-        return true;
+
+    // Shape/meta ops are zero-copy and never need a real backend op. Allow them
+    // before consulting k_op_caps, since the caps table only lists "compute" ops
+    // and would falsely report them as not supported.
+    switch (op_tensor->op) {
+        case GGML_OP_NONE:
+        case GGML_OP_VIEW:
+        case GGML_OP_RESHAPE:
+        case GGML_OP_PERMUTE:
+        case GGML_OP_TRANSPOSE:
+        case GGML_OP_CONT:
+        case GGML_OP_REPEAT:
+            return true;
+        default:
+            break;
     }
 
     if (!ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op_tensor)].supported) {
         return false;
     }
 
+    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
     const ggml_tensor * src0 = op_tensor->src[0];
     const ggml_tensor * src1 = (op_tensor->src[1] != nullptr) ? op_tensor->src[1] : nullptr;
     const ggml_tensor * dst  = op_tensor;
@@ -3811,6 +3863,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
             if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(dst))
                 return false;
             return true;
+        }
+        case GGML_OP_FLASH_ATTN_EXT:
+        {
+            return ggmlhexagon_supported_flash_attn(op_tensor);
         }
         default:
             return true; // other ops in table: trust the table entry
@@ -4429,6 +4485,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         op.src0_idx = get_or_add_tensor_idx(node->src[0]);
         op.src1_idx = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
         op.src2_idx = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
+        op.src3_idx = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
         op.dst_idx  = get_or_add_tensor_idx(node);
         hex_ops.push_back(op);
     }

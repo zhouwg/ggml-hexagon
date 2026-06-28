@@ -3,14 +3,15 @@
 #include <HAP_dcvs.h>
 #include <HAP_mem.h>
 #include <HAP_compute_res.h>
+
 #include "ggml-dsp.h"
+#include "ggml-ops.h"
 #include "worker_pool.h"
-#include "hex_batch.h"
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
 static int g_offload_cgraph_type            = 2;
-static int g_dump_diag_info                 = 0;
+static int g_dump_diag_info                 = 1;
 static void * g_work_data                   = NULL;
 static size_t g_work_size                   = 0;
 
@@ -685,6 +686,11 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_CPY task");
             ggmlop_dsp_cpy(h, src0, src1, dst);
             break;
+        case GGML_OP_FLASH_ATTN_EXT:
+            // Not supported through the per-task path (requires 4 src tensors).
+            // Use the batch path (ggmlop_dsp_execute_batch / _ion) instead.
+            GGMLHEXAGON_LOG_ERROR("FLASH_ATTN_EXT not supported via per-task path; use batch");
+            return AEE_EUNSUPPORTED;
         case 168:  // Test HMX operation
             GGMLHEXAGON_LOG_INFO("executing TEST_HMX task (op=168)");
             GGMLHEXAGON_LOG_INFO("src0: data=%p, ne[0]=%d, ne[1]=%d", src0->data, src0->ne[0], src0->ne[1]);
@@ -736,6 +742,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
         const dsptensor * src0_dt = &req->tensors[op->src0_idx];
         const dsptensor * src1_dt = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
         const dsptensor * src2_dt = (op->src2_idx >= 0) ? &req->tensors[op->src2_idx] : NULL;
+        const dsptensor * src3_dt = (op->src3_idx >= 0) ? &req->tensors[op->src3_idx] : NULL;
         const dsptensor * dst_dt  = &req->tensors[op->dst_idx];
 
         if (1 == g_dump_diag_info) {
@@ -805,6 +812,10 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
                 break;
             case GGML_OP_CPY:
                 op_ret = ggmlop_dsp_cpy(h, src0_dt, src1_dt, dst_dt);
+                break;
+            case GGML_OP_FLASH_ATTN_EXT:
+                // Q=src0, K=src1, V=src2, mask=src3 (optional)
+                op_ret = ggmlop_dsp_flash_attn(h, src0_dt, src1_dt, src2_dt, src3_dt, dst_dt);
                 break;
             default:
                 GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
@@ -923,8 +934,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
-        dsptensor src0_dt, src1_dt_buf, src2_dt_buf, dst_dt;
-        const dsptensor *src1_dt_ptr = NULL, *src2_dt_ptr = NULL;
+        dsptensor src0_dt, src1_dt_buf, src2_dt_buf, src3_dt_buf, dst_dt;
+        const dsptensor *src1_dt_ptr = NULL, *src2_dt_ptr = NULL, *src3_dt_ptr = NULL;
 
         /* Build src0 from hex_tensor_desc using ION base + offset */
         const hex_tensor_desc * t0 = &tens[op->src0_idx];
@@ -979,6 +990,18 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             src2_dt_buf.data_len = t2->data_len;
             src2_dt_ptr = &src2_dt_buf;
         }
+        if (op->src3_idx >= 0) {
+            const hex_tensor_desc * t3 = &tens[op->src3_idx];
+            memset(&src3_dt_buf, 0, sizeof(src3_dt_buf));
+            src3_dt_buf.type     = t3->type;
+            memcpy(src3_dt_buf.ne, t3->ne, sizeof(src3_dt_buf.ne));
+            memcpy(src3_dt_buf.nb, t3->nb, sizeof(src3_dt_buf.nb));
+            memcpy(src3_dt_buf.op_params, t3->op_params, sizeof(src3_dt_buf.op_params));
+            src3_dt_buf.flags    = t3->flags;
+            src3_dt_buf.data     = (void *)(base + t3->data_offset);
+            src3_dt_buf.data_len = t3->data_len;
+            src3_dt_ptr = &src3_dt_buf;
+        }
 
         const hex_tensor_desc * td = &tens[op->dst_idx];
         memset(&dst_dt, 0, sizeof(dst_dt));
@@ -1004,6 +1027,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         ggmlop_dsp_cache_inval_range_nosync(src0_dt.data, src0_dt.data_len);
         if (src1_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src1_dt_buf.data, src1_dt_buf.data_len);
         if (src2_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src2_dt_buf.data, src2_dt_buf.data_len);
+        if (src3_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src3_dt_buf.data, src3_dt_buf.data_len);
         __asm__ __volatile__("syncht\n");
 
         int op_ret = 0;
@@ -1036,6 +1060,9 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
                 op_ret = ggmlop_dsp_repeat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
             case GGML_OP_DIAG_MASK_INF:
                 op_ret = ggmlop_dsp_diag_mask_inf(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
+            case GGML_OP_FLASH_ATTN_EXT:
+                // Q=src0, K=src1, V=src2, mask=src3 (optional, may be NULL).
+                op_ret = ggmlop_dsp_flash_attn(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr, &dst_dt); break;
             default:
                 GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
                 return AEE_EUNSUPPORTED;

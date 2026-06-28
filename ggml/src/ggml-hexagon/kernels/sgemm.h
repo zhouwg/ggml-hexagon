@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * llamafile-style sgemm for Hexagon DSP
  *
@@ -43,10 +47,6 @@ struct ggmldsp_compute_params {
     int ith;
     int nth;
 };
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 bool ggmldsp_llamafile_sgemm(const struct ggmldsp_compute_params * params, struct sgemm_params * s_params);
 
