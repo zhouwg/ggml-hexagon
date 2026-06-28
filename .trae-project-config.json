@@ -1,6 +1,12 @@
 {
   "project": "ggml-hexagon",
   "local_workdir": "/home/zhouwg/develop/ggml-hexagon",
+  "code_modification_rules": {
+    "description": "Rules governing code modifications by the agent",
+    "no_silent_modification": "The agent MUST NOT silently modify the user's code in the background without explicit user consent. Any code change must be transparent, explicitly announced, and approved by the user before being applied. Unauthorized background modifications cause confusion and disrupt the user's workflow.",
+    "scope_of_approval": "Approval is per-change. A prior approved change does not grant blanket permission for subsequent unrelated edits.",
+    "applies_to": "All source files, scripts, configs, and documentation in the workspace."
+  },
   "scripts": {
     "build": "./scripts/build-run-android.sh build",
     "run_testops": "./scripts/build-run-android.sh run_testops",
