@@ -576,8 +576,10 @@ void * ggmlop_cache_mempool_alloc(size_t size) {
 // Must be called before using VTCM in each operation
 int ggmlop_ensure_vtcm_available(void) {
     if (g_compute_res_ctx_id == 0) {
-        // Not using compute_res, VTCM is always available
-        return 0;
+        // compute_res acquire failed at init. VTCM is available only if the
+        // legacy HAP_request_VTCM fallback succeeded (g_vtcm_base != NULL).
+        // On unsigned PDs (e.g. domain 7) both paths fail and g_vtcm_base is NULL.
+        return (g_vtcm_base != NULL) ? 0 : -1;
     }
 
     // In cache mode, VTCM needs to be acquired before each use

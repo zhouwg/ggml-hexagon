@@ -6,11 +6,10 @@
     "run_testops": "./scripts/build-run-android.sh run_testops",
     "run_testop_add": "./scripts/build-run-android.sh run_testop ADD",
     "run_testop_mulmat": "./scripts/build-run-android.sh run_testop MUL_MAT",
-    "run_llamacli": "./scripts/build-run-android.sh run_llamacli 0",
-    "run_llamabench": "./scripts/build-run-android.sh run_llamabench 0",
+    "run_llamacli": "./scripts/build-run-android.sh run_llamacli",
+    "run_llamabench": "./scripts/build-run-android.sh run_llamabench",
     "build_qcom": "./scripts/build-run-android.sh build_qcom"
   },
-  "hexagon_backend_cdsp_index": 0,
   "build_rules": {
     "documentation": "docs/how-to-build-ggmlhexagon.md",
     "build_command": "./scripts/build-run-android.sh build",

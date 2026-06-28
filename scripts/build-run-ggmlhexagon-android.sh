@@ -111,6 +111,7 @@ PROMPT_STRING="You are a powerful domain expert and know many things, now pls he
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
 #running_params=" -ngl 99 -t 6 -n 256 --no-mmap --poll 1000"
 running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000"
+#running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --device Hexagon-cDSP0,Hexagon-cDSP1"
 
 ######## part-3: utilities and functions ########
 
@@ -704,16 +705,6 @@ function run_test-ops()
 }
 
 
-function check_hexagon_backend
-{
-    if [[ ${hexagon_backend} != 0 ]] && [[ ${hexagon_backend} != 1 ]]; then
-        printf "invalid hexagon backend\n"
-        printf "valid hexagon backend: 0(cDSP), 1(ggml)\n"
-        exit 1
-    fi
-}
-
-
 function check_mulmat_algotype
 {
     printf "mulmat_algotype ${mulmat_algotype} \n"
@@ -728,7 +719,7 @@ function check_mulmat_algotype
 function run_test-op()
 {
     prog_name=test-backend-ops
-    prog_param="-o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+    prog_param="-o ${opname} -a ${mulmat_algotype}"
     prepare_run_on_phone ${prog_name}
 
     check_mulmat_algotype
@@ -754,12 +745,12 @@ function run_perf-op()
 
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype}"
 
     echo "\n"
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype} -i ${hexagon_backend}"
+               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype}"
 
 }
 
@@ -858,13 +849,13 @@ function show_usage()
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT                                                    (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT                                                    (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli                 0(cdsp)/1(ggml)"
-    echo "  $0 run_llamabench               0(cdsp)/1(ggml)"
-    echo "  $0 run_threadsafety             0(cdsp)/1(ggml)"
-    echo "  $0 run_perfop     MUL_MAT       0(cdsp)/1(ggml) (verify performance of MUL_MAT)"
-    echo "  $0 run_testop     MUL_MAT       0(cdsp)/1(ggml) (verify accuracy    of MUL_MAT)"
-    echo "  $0 run_perfop     MUL_MAT       0(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     MUL_MAT       0(cdsp)   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
+    echo "  $0 run_llamacli                 <main_gpu_index>"
+    echo "  $0 run_llamabench               <main_gpu_index>"
+    echo "  $0 run_threadsafety             <main_gpu_index>"
+    echo "  $0 run_perfop     MUL_MAT       <main_gpu_index> (verify performance of MUL_MAT)"
+    echo "  $0 run_testop     MUL_MAT       <main_gpu_index> (verify accuracy    of MUL_MAT)"
+    echo "  $0 run_perfop     MUL_MAT       0   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
+    echo "  $0 run_testop     MUL_MAT       0   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
 
     echo -e "\n\n\n"
 }
@@ -927,24 +918,20 @@ elif [ $# == 2 ]; then
         opname=$2
         mulmat_algotype=30
         hexagon_backend=0
-        check_hexagon_backend
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
         hexagon_backend=$2
-        check_hexagon_backend
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
         mulmat_algotype=30
         hexagon_backend=$2
-        check_hexagon_backend
         run_llamabench
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
         mulmat_algotype=30
         hexagon_backend=$2
-        check_hexagon_backend
         run_threadsafety
         exit 0
     else
@@ -956,7 +943,6 @@ elif [ $# == 3 ]; then
         opname=MUL_MAT
         mulmat_algotype=32
         hexagon_backend=$3
-        check_hexagon_backend
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
