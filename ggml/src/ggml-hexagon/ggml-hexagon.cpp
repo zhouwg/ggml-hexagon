@@ -252,6 +252,7 @@ struct ggml_backend_hexagon_context {
     size_t rpc_mempool_len;
     size_t rpc_mempool_usage;
     size_t rpc_mempool_cache_offset;  // ION offset where FP16 cache region starts
+    bool   weights_dirty;             // set by set_tensor/memset_tensor, cleared by Phase 6.5
     void * rpc_mempool;
     int rpc_mempool_handle;
     void * rpc_mempool_dsp_base;   // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
@@ -2894,6 +2895,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       rpc_mempool_len(0),
       rpc_mempool_usage(0),
       rpc_mempool_cache_offset(0),
+      weights_dirty(false),
       rpc_mempool(nullptr),
       rpc_mempool_handle(0),
       rpc_mempool_dsp_base(nullptr),
@@ -3527,7 +3529,6 @@ static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
         case GGML_OP_VIEW:
         case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE:
-        case GGML_OP_CONT:
         case GGML_OP_REPEAT:
             return true;
         default:
@@ -3675,22 +3676,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
-    }
-
-    // Shape/meta ops are zero-copy and never need a real backend op. Allow them
-    // before consulting k_op_caps, since the caps table only lists "compute" ops
-    // and would falsely report them as not supported.
-    switch (op_tensor->op) {
-        case GGML_OP_NONE:
-        case GGML_OP_VIEW:
-        case GGML_OP_RESHAPE:
-        case GGML_OP_PERMUTE:
-        case GGML_OP_TRANSPOSE:
-        case GGML_OP_CONT:
-        case GGML_OP_REPEAT:
-            return true;
-        default:
-            break;
     }
 
     if (!ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op_tensor)].supported) {
@@ -3950,8 +3935,12 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size, 
     void * buf_rp = ggml_aligned_malloc(row_size_rp);
     GGML_ASSERT(buf_rp != NULL);
 
+    // src stride: t->nb[1] handles padded (non-contiguous) tensors (e.g. KV cache views);
+    // for contiguous tensors nb[1] == row_size. dst stays contiguous (x4x2 repacked output).
+    const size_t src_stride = t->nb[1];
+
     for (int64_t i = 0; i < n_full_rows; i++) {
-        const uint8_t * src = (const uint8_t *) data + (i * row_size);
+        const uint8_t * src = (const uint8_t *) data + (i * src_stride);
         uint8_t *       dst = out_base + (i * row_size);
 
         memcpy(buf_pd, src, row_size);
@@ -3997,7 +3986,7 @@ static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size, 
     }
 
     if (n_rem_bytes > 0) {
-        const uint8_t * src = (const uint8_t *) data + (n_full_rows * row_size);
+        const uint8_t * src = (const uint8_t *) data + (n_full_rows * src_stride);
         uint8_t *       dst = out_base + (n_full_rows * row_size);
 
         memset(buf_pd, 0, row_size_pd);
@@ -4104,22 +4093,19 @@ static void repack_q4x4x2_q4_0(const ggml_tensor * t, void * data, size_t size) 
 static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                ggml_tensor * tensor, const void * data,
                                                size_t offset, size_t size) {
-    GGML_UNUSED(buffer);
     memcpy((char *)tensor->data + offset, data, size);
 
-    // Repack Q4_0 weights to x4x2 format at set_tensor time (one-time cost)
-    // to avoid repeated repacking in graph_compute Phase 4.5.
-    // Only repack when the entire tensor is set at once (offset==0, full size).
-    // Only repack when mulmat_min_n==0 (all MUL_MAT goes to DSP, no CPU GEMV).
-    // When mulmat_min_n>0, CPU GEMV may read t->data as Q4_0, so keep original format.
-    if (g_hexagon_appcfg.mulmat_algotype == 30 &&
-        g_hexagon_appcfg.mulmat_min_n == 0 &&
-        tensor->type == GGML_TYPE_Q4_0 &&
-        offset == 0 && size == ggml_nbytes(tensor)) {
-        const int32_t K = tensor->ne[0];
-        if (K % 256 == 0 && K > 0) {
-            repack_q4_0_q4x4x2(tensor, tensor->data, size);
-            g_set_tensor_repacked.insert(tensor->data);
+    // Mark weights dirty so Phase 6.5 flushes them on the next batch.
+    // Phase 6.5 normally skips weight tensors (read-only across batches),
+    // but set_tensor modifies them.
+    ggml_backend_hexagon_buffer_context * bctx =
+        (ggml_backend_hexagon_buffer_context *)buffer->context;
+    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
+        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
+        const char * dp   = (const char *)tensor->data + offset;
+        const char * base = (const char *)hctx->rpc_mempool;
+        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+            hctx->weights_dirty = true;
         }
     }
 }
@@ -4127,8 +4113,18 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
 static void ggml_backend_hexagon_buffer_memset_tensor(ggml_backend_buffer_t buffer,
                                                   struct ggml_tensor * tensor,
                                                   uint8_t value, size_t offset, size_t size) {
-    GGML_UNUSED(buffer);
     memset((char *)tensor->data + offset, value, size);
+
+    ggml_backend_hexagon_buffer_context * bctx =
+        (ggml_backend_hexagon_buffer_context *)buffer->context;
+    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
+        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
+        const char * dp   = (const char *)tensor->data + offset;
+        const char * base = (const char *)hctx->rpc_mempool;
+        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+            hctx->weights_dirty = true;
+        }
+    }
 }
 
 static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
@@ -4456,8 +4452,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
     // FP16 weight cache is keyed by (src0_data, M, K, type). Static weight
     // tensors keep stable ION addresses across graph_compute calls, so cached
     // tiles remain valid and TG can reuse them (first call miss, later hit).
-    // Do NOT reset cache here: resetting kills TG hit rate and has no benefit
-    // for PP (each weight is computed once per graph_compute anyway).
+    // Do NOT reset cache here: resetting kills TG hit rate.
 
     // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
     // Each tensor object gets its own descriptor with correct ne/nb,
@@ -4855,7 +4850,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
-            if (weight_indices.count(i)) continue;
+            if (weight_indices.count(i) && !ctx->weights_dirty) continue;
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 uint32_t off = (uint32_t)(dp - ion_base);
@@ -4886,6 +4881,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
         int ion_fd = ctx->rpc_mempool_handle;
         if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+
+        ctx->weights_dirty = false;
     }
 
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----

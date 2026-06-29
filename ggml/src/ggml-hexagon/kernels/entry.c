@@ -11,10 +11,9 @@
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
 static int g_offload_cgraph_type            = 2;
-static int g_dump_diag_info                 = 1;
+static int g_dump_diag_info                 = 0;
 static void * g_work_data                   = NULL;
 static size_t g_work_size                   = 0;
-static qurt_mutex_t g_work_data_mutex;        // protects grow path of g_work_data
 
 static void * g_vtcm_base                   = NULL;
 static size_t g_vtcm_size                   = 0;
@@ -133,8 +132,6 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     tptr = (void *)malloc(1);
     GGML_ASSERT(NULL != tptr);
     *handle = (remote_handle64)tptr;
-
-    qurt_mutex_init(&g_work_data_mutex);
 
     unsigned int api_version = qurt_api_version();
     FARF(ALWAYS, "qurt_api_version            = 0x%x", api_version);
@@ -266,7 +263,6 @@ int ggmlop_dsp_close(remote_handle64 handle) {
         g_work_data = NULL;
         g_work_size = 0;
     }
-    qurt_mutex_destroy(&g_work_data_mutex);
 
     if (g_compute_res_ctx_id != 0) {
         HAP_compute_res_release_cached(g_compute_res_ctx_id);
@@ -538,27 +534,20 @@ bool ggmlop_is_ion_mode(void) {
 }
 
 void * ggmlop_get_work_data(size_t size) {
-    // Thread-safe via g_work_data_mutex. Callers must not hold the returned
-    // pointer across another call to this function: a grow event frees the
-    // old buffer and returns a new one. Current callers (mulmat dispatch,
-    // flash-attn driver) all invoke this from the main thread before
-    // spawning workers, so the returned pointer stays valid during worker
-    // execution.
-    qurt_mutex_lock(&g_work_data_mutex);
+    // All callers (mulmat dispatch, flash-attn driver) invoke this from the
+    // main thread before spawning workers, so the returned pointer stays
+    // valid during worker execution.
     if (g_work_data == NULL || g_work_size < size) {
+        if (g_work_data != NULL) {
+            free(g_work_data);
+        }
         size = (size > MAX_WORK_SIZE) ? MAX_WORK_SIZE : size;
-        void * new_data = memalign(128, size);
-        if (new_data != NULL) {
-            if (g_work_data != NULL) {
-                free(g_work_data);
-            }
-            g_work_data = new_data;
+        g_work_data = memalign(128, size);
+        if (g_work_data != NULL) {
             g_work_size = size;
         }
     }
-    void * ret = g_work_data;
-    qurt_mutex_unlock(&g_work_data_mutex);
-    return ret;
+    return g_work_data;
 }
 
 void * ggmlop_get_vtcm_pool(size_t * size) {
