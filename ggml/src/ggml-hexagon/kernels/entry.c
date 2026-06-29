@@ -54,7 +54,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_DCVS_v3;
     req.dcvs_v3.set_dcvs_enable = 1;
-    req.dcvs_v3.dcvs_enable = 1;
+    req.dcvs_v3.dcvs_enable = 0;  // disable DVFS, pin to fixed frequency for stable performance
     req.dcvs_v3.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
     req.dcvs_v3.set_bus_params = 1;
     req.dcvs_v3.bus_params.min_corner = HAP_DCVS_VCORNER_MAX;
@@ -293,7 +293,7 @@ static AEEResult set_power_boost(remote_handle64 handle, uint32 on) {
     if(on) {
         request.type = HAP_power_set_DCVS_v3;
         request.dcvs_v3.set_dcvs_enable = TRUE;
-        request.dcvs_v3.dcvs_enable = TRUE;
+        request.dcvs_v3.dcvs_enable = FALSE;  // keep DVFS disabled, only re-assert max corners
         request.dcvs_v3.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
         request.dcvs_v3.set_bus_params = TRUE;
         request.dcvs_v3.bus_params.min_corner = HAP_DCVS_VCORNER_MAX;
@@ -503,7 +503,7 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     hap_probe_dsp(handle);
 
-    //set_power_boost(handle, 1);
+    set_power_boost(handle, 1);  // re-assert max corners after initialization
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return AEE_SUCCESS;
