@@ -4,7 +4,7 @@
 
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
-LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
+LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
 REMOTE_PATH=/data/local/tmp
 
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
@@ -62,6 +62,8 @@ cd ${PROJECT_ROOT_PATH}
 #${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
 
 cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=v79 HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} DEBUG_FLAG=${DEBUG_FLAG}
+/bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${TARGET}
+/bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
 if [  -f ${TARGET} ]; then
     is_so_file_changed ${TARGET}
     if [ $? -eq 0 ]; then

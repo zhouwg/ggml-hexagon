@@ -7,6 +7,7 @@
 #include "ggml-dsp.h"
 #include "ggml-ops.h"
 #include "worker_pool.h"
+#include "hmx-queue.h"
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
@@ -20,6 +21,7 @@ static size_t g_vtcm_size                   = 0;
 static unsigned int g_compute_res_ctx_id    = 0;
 static int g_power_ctx                      = 0;
 static int g_hmx_available                  = 0;
+static struct hmx_queue * g_hmx_queue        = NULL;  // Async HMX queue (created when HMX is available)
 static volatile int g_vtcm_needs_release    = 0;  // For cache mode VTCM management
 static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently valid/available
 
@@ -219,6 +221,25 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
         }
     }
 
+    /* Step 3.5: Create async HMX queue for pipeline overlap (DMA/HVX/HMX) */
+    if (g_hmx_available && g_compute_res_ctx_id != 0) {
+        if (g_hmx_queue != NULL) {
+            GGMLHEXAGON_LOG_INFO("hmx_queue already exists, deleting old one\n");
+            hmx_queue_delete(g_hmx_queue);
+            g_hmx_queue = NULL;
+        }
+        g_hmx_queue = hmx_queue_create(16, g_compute_res_ctx_id);
+        if (g_hmx_queue) {
+            GGMLHEXAGON_LOG_INFO("async HMX queue created (capacity %u, rctx %u)\n",
+                                 hmx_queue_capacity(g_hmx_queue), g_compute_res_ctx_id);
+        } else {
+            GGMLHEXAGON_LOG_INFO("hmx_queue_create failed, HMX path will run synchronously\n");
+        }
+    } else {
+        GGMLHEXAGON_LOG_INFO("HMX not available (hmx=%d, rctx=%u), skipping hmx_queue creation\n",
+                             g_hmx_available, g_compute_res_ctx_id);
+    }
+
     /* Step 4: probe DSP memory for information only (no allocation) */
     {
         struct HAP_mem_stats mem_stats;
@@ -262,6 +283,12 @@ int ggmlop_dsp_close(remote_handle64 handle) {
         free(g_work_data);
         g_work_data = NULL;
         g_work_size = 0;
+    }
+
+    if (g_hmx_queue != NULL) {
+        hmx_queue_delete(g_hmx_queue);
+        g_hmx_queue = NULL;
+        GGMLHEXAGON_LOG_INFO("released async HMX queue");
     }
 
     if (g_compute_res_ctx_id != 0) {
@@ -527,6 +554,10 @@ unsigned int ggmlop_get_compute_res_ctx_id(void) {
 
 int ggmlop_is_hmx_available(void) {
     return g_hmx_available;
+}
+
+struct hmx_queue * ggmlop_get_hmx_queue(void) {
+    return g_hmx_queue;
 }
 
 bool ggmlop_is_ion_mode(void) {

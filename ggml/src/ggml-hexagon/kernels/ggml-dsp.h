@@ -2109,6 +2109,12 @@ GGML_API void           ggmlop_dsp_cache_inval_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
 
+// Async HMX queue: dedicated worker thread holding the HMX hardware lock.
+// Returns NULL if HMX queue is not initialized (caller should fall back to
+// synchronous HMX execution).
+struct hmx_queue;
+GGML_API struct hmx_queue * ggmlop_get_hmx_queue(void);
+
 // FP16 weight cache: allocates from ION shared memory tail region
 GGML_API void *         ggmlop_cache_mempool_alloc(size_t size);  // returns ptr or NULL if full
 

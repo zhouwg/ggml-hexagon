@@ -32,7 +32,10 @@ VERBOSE=ON
 REMOTE_PATH=/data/local/tmp
 
 #path of built artifacts
+is_build_jz_ggmlhexagon=1
 LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
+LOCAL_BUILD_DIR_JZ=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
+LOCAL_BUILD_DIR_QCOM=${PROJECT_ROOT_PATH}/out/qcom-ggmlhexagon-android
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
 #path of toolchain, for purpose of share same toolchain in multiple instance of JZ's ggml-hexagon
@@ -347,6 +350,8 @@ function build_idl()
 
 function build_arm64
 {
+    update_local_build_dir 1
+
     build_idl
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
@@ -364,6 +369,8 @@ function build_arm64
 
 function build_arm64_debug
 {
+    update_local_build_dir 1
+
     build_idl
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
@@ -378,10 +385,28 @@ function build_arm64_debug
     cd -
 }
 
+function update_local_build_dir
+{
+    if [ $# != 1 ]; then
+        print "invalid param"
+        return
+    fi
+    is_build_jz_ggmlhexagon=$1
+
+    if [ ${is_build_jz_ggmlhexagon} -eq 1 ]; then
+        LOCAL_BUILD_DIR=${LOCAL_BUILD_DIR_JZ}
+    else
+        LOCAL_BUILD_DIR=${LOCAL_BUILD_DIR_QCOM}
+    fi
+
+    echo ${is_build_jz_ggmlhexagon} > /tmp/ggmlhexagon-buildowner.txt
+}
 
 #build qualcomm's official ggml-hexagon backend for performance comparison
 function build_arm64_qcom
 {
+    update_local_build_dir 0
+
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom
 
@@ -413,9 +438,9 @@ function build_arm64_qcom
 
 function remove_temp_dir()
 {
-    if [ -d ${LOCAL_BUILD_DIR} ]; then
-        echo "remove ${LOCAL_BUILD_DIR} directory"
-        rm -rf ${LOCAL_BUILD_DIR}
+    if [ -d ${LOCAL_BUILD_DIR_JZ} ]; then
+        echo "remove ${LOCAL_BUILD_DIR_JZ} directory"
+        rm -rf ${LOCAL_BUILD_DIR_JZ}
     fi
 }
 
@@ -619,6 +644,10 @@ function prepare_run_on_phone()
     program=$1
 
     update_cfg
+
+    local is_build_jz
+    is_build_jz=$(cat /tmp/ggmlhexagon-buildowner.txt)
+    update_local_build_dir ${is_build_jz}
 
     check_prebuilt_models
 

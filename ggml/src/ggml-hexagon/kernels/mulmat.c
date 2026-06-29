@@ -1,6 +1,9 @@
+// HMX feature ported from Qualcomm's official ggml-hexagon
+//
 #include "ggml-dsp.h"
 #include "worker_pool.h"
 #include "sgemm.h"
+#include "hmx-queue.h"        // for hmx_queue_push/pop/suspend/make_desc (static inline)
 #include <stdlib.h>
 #include <string.h>
 #include "../htp/hex-dma.h"    // for Qualcomm's official DMA async transfers
@@ -2516,7 +2519,252 @@ static const struct hmx_weight_traits * hmx_weight_traits_lookup(enum ggml_type 
     return NULL;
 }
 
-int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+// ============================================================================
+// Step 4 helpers: async HMX job + multi-thread HVX dequant/output writeback
+// (mirrors Qualcomm's hmx_matmul_job_t + worker_pool_run_func pattern,
+//  adapted to our worker_pool_submit + worker_synctoken API)
+// ============================================================================
+
+// Async HMX compute job descriptor (mirror Qualcomm's hmx_matmul_job_t)
+typedef struct {
+    __fp16 *       output;
+    const __fp16 * activation;
+    const __fp16 * weight;
+    const __fp16 * scales;
+    int            n_row_tiles;
+    int            n_col_tiles;
+    int            n_dot_tiles;
+} hmx_matmul_job_t;
+
+// HMX queue worker entry: runs core_dot_chunk_fp16 on dedicated HMX thread
+static void hmx_matmul_worker_fn(void * data) {
+    hmx_matmul_job_t * job = (hmx_matmul_job_t *) data;
+    core_dot_chunk_fp16(job->output, job->activation, job->weight, job->scales,
+                        job->n_row_tiles, job->n_col_tiles, job->n_dot_tiles);
+}
+
+static inline void hmx_matmul_job_init(hmx_matmul_job_t * job,
+                                       __fp16 *           output,
+                                       const __fp16 *     activation,
+                                       const __fp16 *     weight,
+                                       const __fp16 *     scales,
+                                       int                n_row_tiles,
+                                       int                n_col_tiles,
+                                       int                n_dot_tiles) {
+    job->output       = output;
+    job->activation   = activation;
+    job->weight       = weight;
+    job->scales       = scales;
+    job->n_row_tiles  = n_row_tiles;
+    job->n_col_tiles  = n_col_tiles;
+    job->n_dot_tiles  = n_dot_tiles;
+}
+
+// --- Multi-thread weight dequant ---
+
+typedef struct {
+    __fp16 *               vtcm_dst;       // this worker's sub-region in VTCM FP16 tile dst
+    const char *           weight_chunk;   // DDR weight sub-range start
+    float *                vtcm_fp32_buf;   // VTCM FP32 scratch (F32 path only, unused otherwise)
+    dma_queue *            dma;            // per-worker DMA queue (NULL if not used)
+    int                    M_cols;         // # cols in this worker's sub-range
+    int                    K;
+    size_t                 row_stride;
+    hmx_weight_dequant_fn  dequant_fn;
+    worker_synctoken_t *   synctoken;
+} weight_dequant_mt_td_t;
+
+static void weight_dequant_mt_worker(void * data) {
+    weight_dequant_mt_td_t * td = (weight_dequant_mt_td_t *) data;
+    struct hmx_weight_dequant_params wparams = {
+        .vtcm_weight   = td->vtcm_dst,
+        .weight_chunk  = td->weight_chunk,
+        .vtcm_fp32_buf = td->vtcm_fp32_buf,
+        .dma           = td->dma,
+        .M_cols        = td->M_cols,
+        .K             = td->K,
+        .row_stride    = td->row_stride,
+    };
+    td->dequant_fn(&wparams);
+    worker_pool_synctoken_jobdone(td->synctoken);
+}
+
+// Multi-thread weight dequant: split M_cols (tile-aligned) into n_threads sub-ranges.
+// Falls back to single thread when n_threads<=1 or when F32 weight needs DMA
+// (DMA queue + fp32_buf are shared, not safe to parallelize without per-thread buffers).
+static void weight_dequant_mt(__fp16 *                vtcm_dst,
+                              const char *            weight_chunk,
+                              float *                 vtcm_fp32_buf,
+                              dma_queue *             dma,
+                              int                     M_cols,
+                              int                     K,
+                              size_t                  row_stride,
+                              hmx_weight_dequant_fn   dequant_fn,
+                              int                     n_threads,
+                              bool                    src0_needs_fp32_buf) {
+    if (n_threads <= 1 || src0_needs_fp32_buf || M_cols < HMX_FP16_TILE_N_COLS) {
+        struct hmx_weight_dequant_params wparams = {
+            .vtcm_weight   = vtcm_dst,
+            .weight_chunk  = weight_chunk,
+            .vtcm_fp32_buf = vtcm_fp32_buf,
+            .dma           = dma,
+            .M_cols        = M_cols,
+            .K             = K,
+            .row_stride    = row_stride,
+        };
+        dequant_fn(&wparams);
+        return;
+    }
+
+    // Split across threads. M_cols may not be tile-aligned; dequant_fn handles
+    // padding within the last tile (row_global < n_cols check).
+    const int n_tiles_total = (M_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+    int n_thr = n_threads;
+    if (n_thr > n_tiles_total) n_thr = n_tiles_total;
+    if (n_thr <= 1) {
+        struct hmx_weight_dequant_params wparams = {
+            .vtcm_weight   = vtcm_dst,
+            .weight_chunk  = weight_chunk,
+            .vtcm_fp32_buf = vtcm_fp32_buf,
+            .dma           = dma,
+            .M_cols        = M_cols,
+            .K             = K,
+            .row_stride    = row_stride,
+        };
+        dequant_fn(&wparams);
+        return;
+    }
+
+    const int tiles_per_thread = (n_tiles_total + n_thr - 1) / n_thr;
+    const int cols_per_thread = tiles_per_thread * HMX_FP16_TILE_N_COLS;
+    const int n_dot_tiles = K / HMX_FP16_TILE_N_COLS;
+
+    // Pre-compute actual thread count. synctoken must be initialized with the
+    // final job count; the original code initialized it with n_thr and then
+    // reduced n_thr inside the loop when m_count<=0, causing synctoken_wait
+    // to hang waiting for jobs that were never submitted.
+    const int actual_n_thr = (M_cols + cols_per_thread - 1) / cols_per_thread;
+
+    worker_synctoken_t token;
+    worker_pool_synctoken_init(&token, actual_n_thr - 1);
+
+    weight_dequant_mt_td_t td[MAX_NUM_WORKERS];
+    for (int t = 0; t < actual_n_thr; t++) {
+        int m_start = t * cols_per_thread;
+        int m_end = (m_start + cols_per_thread < M_cols) ? (m_start + cols_per_thread) : M_cols;
+        int m_count = m_end - m_start;
+
+        td[t].vtcm_dst       = vtcm_dst + (m_start / HMX_FP16_TILE_N_COLS) * n_dot_tiles * HMX_FP16_TILE_N_ELMS;
+        td[t].weight_chunk   = weight_chunk + m_start * row_stride;
+        td[t].vtcm_fp32_buf  = NULL;
+        td[t].dma            = NULL;
+        td[t].M_cols         = m_count;
+        td[t].K              = K;
+        td[t].row_stride     = row_stride;
+        td[t].dequant_fn     = dequant_fn;
+        td[t].synctoken      = &token;
+
+        if (t == 0) continue;  // main thread handles t==0 directly below
+
+        worker_pool_job_t job = { weight_dequant_mt_worker, &td[t] };
+        worker_pool_submit(NULL, job);
+    }
+
+    // Main thread: execute t==0 (no jobdone, no worker_pool involvement)
+    struct hmx_weight_dequant_params wparams0 = {
+        .vtcm_weight   = td[0].vtcm_dst,
+        .weight_chunk  = td[0].weight_chunk,
+        .vtcm_fp32_buf = NULL,
+        .dma           = NULL,
+        .M_cols        = td[0].M_cols,
+        .K             = K,
+        .row_stride    = row_stride,
+    };
+    dequant_fn(&wparams0);
+
+    worker_pool_synctoken_wait(&token);
+}
+
+// --- Multi-thread output writeback ---
+
+typedef struct {
+    float *               dst;          // chunk-relative dst start (dst[nr, mc])
+    const __fp16 *        vtcm_src;     // chunk-relative HMX output tiles start
+    int                   n_rows;       // total rows in chunk (actual, not padded)
+    int                   n_cols;       // actual cols in chunk
+    int                   dst_row_stride;
+    int                   r_start;      // worker sub-range start (inclusive)
+    int                   r_end;        // worker sub-range end (exclusive)
+    worker_synctoken_t *  synctoken;
+} output_writeback_mt_td_t;
+
+static void output_writeback_mt_worker(void * data) {
+    output_writeback_mt_td_t * td = (output_writeback_mt_td_t *) data;
+    transfer_output_chunk_fp16_to_fp32_range(td->dst, td->vtcm_src, td->n_rows, td->n_cols,
+                                             td->dst_row_stride, td->r_start, td->r_end);
+    worker_pool_synctoken_jobdone(td->synctoken);
+}
+
+// Multi-thread output writeback: split n_rows into n_threads sub-ranges.
+// dst and vtcm_src are chunk-relative starts; n_rows is actual row count (not padded).
+static void output_writeback_mt(float *           dst,
+                                const __fp16 *    vtcm_src,
+                                int               n_rows,
+                                int               n_cols,
+                                int               dst_row_stride,
+                                int               n_threads) {
+    if (n_threads <= 1 || n_rows <= HMX_FP16_TILE_N_ROWS) {
+        transfer_output_chunk_fp16_to_fp32_range(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
+        return;
+    }
+
+    // Split rows into n_threads sub-ranges, each sub-range aligned to 2 rows
+    // (transfer_output_chunk_fp16_to_fp32_range iterates r+=2).
+    int rows_per_thread = (n_rows + n_threads - 1) / n_threads;
+    rows_per_thread = (rows_per_thread + 1) & ~1;  // align up to 2
+    if (rows_per_thread < 2) rows_per_thread = 2;
+
+    int actual_n = (n_rows + rows_per_thread - 1) / rows_per_thread;
+    if (actual_n <= 1) {
+        transfer_output_chunk_fp16_to_fp32_range(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
+        return;
+    }
+
+    worker_synctoken_t token;
+    worker_pool_synctoken_init(&token, actual_n - 1);
+
+    output_writeback_mt_td_t td[MAX_NUM_WORKERS];
+    for (int t = 0; t < actual_n; t++) {
+        int r_start = t * rows_per_thread;
+        int r_end = (r_start + rows_per_thread < n_rows) ? (r_start + rows_per_thread) : n_rows;
+        // actual_n was computed as ceil(n_rows/rows_per_thread), so r_start is
+        // always < n_rows for t < actual_n. Keep the guard but do not modify
+        // actual_n here - synctoken was already initialized with its value.
+        if (r_start >= n_rows) { break; }
+
+        td[t].dst            = dst;
+        td[t].vtcm_src       = vtcm_src;
+        td[t].n_rows         = n_rows;
+        td[t].n_cols         = n_cols;
+        td[t].dst_row_stride = dst_row_stride;
+        td[t].r_start        = r_start;
+        td[t].r_end          = r_end;
+        td[t].synctoken      = &token;
+
+        if (t == 0) continue;
+
+        worker_pool_job_t job = { output_writeback_mt_worker, &td[t] };
+        worker_pool_submit(NULL, job);
+    }
+
+    // Main thread: t==0
+    transfer_output_chunk_fp16_to_fp32_range(td[0].dst, td[0].vtcm_src, td[0].n_rows, td[0].n_cols,
+                                             td[0].dst_row_stride, td[0].r_start, td[0].r_end);
+
+    worker_pool_synctoken_wait(&token);
+}
+
+int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     // Early type checks before acquiring any resources
     // src0 (weight) types supported by HMX path
     const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
@@ -2930,6 +3178,461 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     }
     GGMLHEXAGON_LOG_INFO("end real vtcm + hmx");
 
+    return 0;
+}
+
+// ============================================================================
+// Step 4: ggmlop_dsp_mulmat_hmx (pipeline version)
+//
+// Implements DMA (weight prefetch) + multi-thread HVX (dequant/output writeback)
+// + async HMX (compute) three-stage pipeline with double buffering.
+//
+// Reference: htp/matmul-ops.c hmx_mm_2d_precomputed (lines 2483-2571)
+//
+// Naming mapping (Qualcomm -> ours):
+//   Qualcomm m (activation rows)        -> our N
+//   Qualcomm n (weight cols)            -> our M
+//   Qualcomm m_chunk_n_rows              -> our N_chunk_n_rows
+//   Qualcomm n_chunk_n_cols              -> our M_chunk_n_cols
+//
+// Pipeline condition (mirror Qualcomm's htp_mm_hmx_pipeline): N > 32.
+// Falls back to ggmlop_dsp_mulmat_hmx_sync otherwise.
+// ============================================================================
+
+// Pipeline debug logging - change #if 0 to #if 1 to re-enable
+// NOTE: PIPE_DBG uses FARF(ALWAYS,...) which is SYNCHRONOUS - the DSP thread blocks
+// until the message is delivered to AP-side logcat. With ~30 PIPE_DBG calls per N-chunk,
+// the FastRPC channel / logcat buffer saturates after ~9 N-chunks, causing the DSP to
+// hang in FARF. This was the root cause of the intermittent pipeline hang.
+// Keep this #if 0 unless you need detailed per-operation tracing for a specific debug session.
+#if 0
+#define PIPE_DBG(...) GGMLHEXAGON_LOG_INFO(__VA_ARGS__)
+#else
+#define PIPE_DBG(...) ((void)0)
+#endif
+
+int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
+    // Step 1: hmx_queue availability + basic type checks
+    struct hmx_queue * hmx_q = ggmlop_get_hmx_queue();
+    if (hmx_q == NULL) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    const struct hmx_weight_traits *wt = hmx_weight_traits_lookup(src0->type);
+    if (wt == NULL) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_BF16) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // Dimensions: src0 = weight [K, M], src1 = activation [K, N]
+    const int32_t M = src0->ne[1];
+    const int32_t K = src0->ne[0];
+    const int32_t N = src1->ne[1];
+    const int32_t ne12 = src1->ne[2];
+    const int32_t ne13 = src1->ne[3];
+
+    // Pipeline condition: N must be > 32 (matching Qualcomm's htp_mm_hmx_pipeline)
+    if (N <= HMX_FP16_TILE_N_ROWS) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    if (K % HMX_FP16_TILE_N_COLS != 0) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // Batched weights not supported in pipeline path (rare case)
+    if (src0->ne[2] > 1 || src0->ne[3] > 1) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // F32 weight needs an fp32 intermediate buffer + DMA queue for dequant,
+    // which the pipeline VTCM layout does not allocate. Fall back to sync.
+    if (src0->type == GGML_TYPE_F32) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // Ensure VTCM resource is available (cache mode)
+    int vtcm_err = ggmlop_ensure_vtcm_available();
+    if (vtcm_err != 0) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    size_t vtcm_size = 0;
+    void * vtcm_base = ggmlop_get_vtcm_pool(&vtcm_size);
+    if (vtcm_base == NULL || (uintptr_t)vtcm_base % HMX_FP16_TILE_SIZE != 0) {
+        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // Set dst shape
+    dst->ne[0] = src0->ne[1];
+    dst->ne[1] = src1->ne[1];
+    dst->ne[2] = src1->ne[2];
+    dst->ne[3] = src1->ne[3];
+    dst->nb[0] = 4;
+    dst->nb[1] = dst->nb[0] * dst->ne[0];
+    dst->nb[2] = dst->nb[1] * dst->ne[1];
+    dst->nb[3] = dst->nb[2] * dst->ne[2];
+
+    PIPE_DBG("HMX pipeline matmul: M=%d, N=%d, K=%d, vtcm_size=%zu", M, N, K, vtcm_size);
+
+    // Step 2: VTCM double-buffer budget sweep
+    // Layout: weight_raw[2] + weight_fp16[2] + act(single) + output[2] + act_fp32(single) + scales
+    const bool src0_needs_fp32_buf = (src0->type == GGML_TYPE_F32);
+    const bool src1_needs_fp32_buf = (src1->type == GGML_TYPE_F32);
+    const size_t vec_dot_size = K * sizeof(__fp16);
+    const size_t scales_size  = 256;
+
+    const size_t M_padded = ((size_t)M + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS * HMX_FP16_TILE_N_COLS;
+    size_t M_chunk_n_cols = 0;
+    size_t N_chunk_n_rows = 0;
+
+    for (size_t mc = M_padded; mc >= HMX_FP16_TILE_N_COLS; mc -= HMX_FP16_TILE_N_COLS) {
+        const size_t w_raw   = hex_align_up(mc * src0->nb[1], HMX_FP16_TILE_SIZE);
+        const size_t w_fp16  = hex_align_up(mc * vec_dot_size, HMX_FP16_TILE_SIZE);
+        // double buffer weight + act(single) + output(double) + act_fp32 + scales
+        const size_t remain  = (vtcm_size > 2*w_raw + 2*w_fp16 + scales_size) ? (vtcm_size - 2*w_raw - 2*w_fp16 - scales_size) : 0;
+        if (remain == 0) continue;
+
+        // per-N-row cost: act_tiles + 2*output_tiles (double) + act_fp32_per_n (single)
+        const size_t act_fp32_per_n = src1_needs_fp32_buf ? K * sizeof(float) : 0;
+        const size_t per_n_act   = K * sizeof(__fp16);
+        const size_t per_n_out   = mc * sizeof(__fp16) * 2;  // double buffer
+        const size_t per_n       = per_n_act + per_n_out + act_fp32_per_n;
+        if (per_n == 0) continue;
+
+        size_t nc = hex_align_down(remain / per_n, HMX_FP16_TILE_N_ROWS);
+        if (nc == 0) nc = HMX_FP16_TILE_N_ROWS;
+        if (nc > (size_t)N) nc = (size_t)N;
+
+        // Verify fit with padded nc
+        const size_t nc_padded = ((nc + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+        const size_t a_fp32   = src1_needs_fp32_buf ? hex_align_up(nc_padded * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
+        const size_t a_tiles  = hex_align_up(nc_padded * vec_dot_size, HMX_FP16_TILE_SIZE);
+        const size_t o_tiles  = hex_align_up(nc_padded * mc * sizeof(__fp16), HMX_FP16_TILE_SIZE);
+        const size_t total    = 2*w_raw + 2*w_fp16 + a_tiles + 2*o_tiles + a_fp32 + scales_size;
+
+        if (total <= vtcm_size) {
+            M_chunk_n_cols = mc;
+            N_chunk_n_rows = nc;
+            break;
+        }
+    }
+
+    if (M_chunk_n_cols == 0) {
+        GGMLHEXAGON_LOG_INFO("HMX pipeline: VTCM too small for double buffer, falling back to sync\n");
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+    }
+
+    // Step 3: VTCM layout (sequential allocation)
+    const size_t M_chunk_padded = ((M_chunk_n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS) * HMX_FP16_TILE_N_COLS;
+    const size_t N_chunk_padded = ((N_chunk_n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS) * HMX_FP16_TILE_N_ROWS;
+
+    const size_t weight_raw_size     = hex_align_up(M_chunk_padded * src0->nb[1], HMX_FP16_TILE_SIZE);
+    const size_t weight_fp16_size    = hex_align_up(M_chunk_padded * vec_dot_size, HMX_FP16_TILE_SIZE);
+    const size_t act_area_size       = hex_align_up(N_chunk_padded * vec_dot_size, HMX_FP16_TILE_SIZE);
+    const size_t output_area_size    = hex_align_up(N_chunk_padded * M_chunk_padded * sizeof(__fp16), HMX_FP16_TILE_SIZE);
+    const size_t act_fp32_buf_size   = src1_needs_fp32_buf ? hex_align_up(N_chunk_padded * K * sizeof(float), HMX_FP16_TILE_SIZE) : 0;
+
+    const size_t total_vtcm_needed = 2*weight_raw_size + 2*weight_fp16_size + act_area_size + 2*output_area_size + act_fp32_buf_size + scales_size;
+    PIPE_DBG("HMX pipeline VTCM: M_chunk=%zu, N_chunk=%zu, total=%zu (w_raw=%zu x2, w_fp16=%zu x2, act=%zu, out=%zu x2, act_fp32=%zu, scales=%zu)",
+                          M_chunk_n_cols, N_chunk_n_rows, total_vtcm_needed,
+                          weight_raw_size, weight_fp16_size, act_area_size, output_area_size, act_fp32_buf_size, scales_size);
+
+    uint8_t *vtcm_ptr = (uint8_t *)vtcm_base;
+    // Double-buffered weight raw (DMA targets)
+    uint8_t *vtcm_weight_raw[2] = { NULL, NULL };
+    if (weight_raw_size > 0) {
+        vtcm_weight_raw[0] = vtcm_ptr;  vtcm_ptr += weight_raw_size;
+        vtcm_weight_raw[1] = vtcm_ptr;  vtcm_ptr += weight_raw_size;
+    }
+    // Double-buffered weight FP16 tiles (HMX input)
+    __fp16 *vtcm_weight_fp16[2] = { NULL, NULL };
+    if (weight_fp16_size > 0) {
+        vtcm_weight_fp16[0] = (__fp16 *)vtcm_ptr;  vtcm_ptr += weight_fp16_size;
+        vtcm_weight_fp16[1] = (__fp16 *)vtcm_ptr;  vtcm_ptr += weight_fp16_size;
+    }
+    // Single activation buffer
+    __fp16 *vtcm_activation = (__fp16 *)vtcm_ptr;  vtcm_ptr += act_area_size;
+    // Double-buffered output (HMX output, HVX writeback input)
+    __fp16 *vtcm_output[2] = { NULL, NULL };
+    vtcm_output[0] = (__fp16 *)vtcm_ptr;  vtcm_ptr += output_area_size;
+    vtcm_output[1] = (__fp16 *)vtcm_ptr;  vtcm_ptr += output_area_size;
+    // Activation FP32 scratch (F32 activation only)
+    float *vtcm_act_fp32 = (float *)vtcm_ptr;  vtcm_ptr += act_fp32_buf_size;
+    // Scales
+    __fp16 *vtcm_scales = (__fp16 *)vtcm_ptr;
+
+    HVX_Vector v_scale = Q6_V_vsplat_R(0x3c00);
+    volatile HVX_Vector *pv_scales = (volatile HVX_Vector *) vtcm_scales;
+    pv_scales[0] = v_scale;
+    pv_scales[1] = Q6_V_vzero();
+
+    const size_t n_dot_tiles = K / HMX_FP16_TILE_N_COLS;
+    const size_t src0_row_stride = src0->nb[1];
+    const size_t src1_row_stride = src1->nb[1];
+    const int use_hvx = ggml_get_dsp_use_hvx();
+    const hmx_weight_dequant_fn weight_dequant_fn =
+        (use_hvx && wt->dequant_hvx) ? wt->dequant_hvx :
+        (wt->dequant ? wt->dequant : wt->dequant_hvx);
+
+    int n_threads = ggmlop_get_thread_counts();
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > MAX_NUM_WORKERS) n_threads = MAX_NUM_WORKERS;
+
+    // Create DMA queue for weight prefetch
+    dma_queue *dma = dma_queue_create(16);
+
+    const char * src0_type_name = (src0->type == GGML_TYPE_Q4_0x4x2) ? "Q4_0x4x2" : ggml_get_type_traits((enum ggml_type)src0->type)->type_name;
+    PIPE_DBG("HMX pipeline begin: src0=%s, M=%d, N=%d, K=%d, M_chunk=%zu, N_chunk=%zu, n_threads=%d",
+                         src0_type_name, M, N, K, M_chunk_n_cols, N_chunk_n_rows, n_threads);
+    // Diagnostics: hmx_queue state at pipeline entry (detect state accumulation across calls)
+    PIPE_DBG("hmx_queue state: iw=%u ir=%u ip=%u seqn=%u locked=%d depth=%u",
+                         hmx_q->idx_write, hmx_q->idx_read, hmx_q->idx_pop,
+                         hmx_q->seqn, hmx_q->hmx_locked,
+                         (hmx_q->idx_write - hmx_q->idx_read) & hmx_q->idx_mask);
+
+    // Step 4: Main pipeline loop
+    // Outer: batch (ne12, ne13); Middle: N (activation chunks); Inner: M (weight chunks) pipeline
+    for (int32_t i13 = 0; i13 < ne13; ++i13) {
+        for (int32_t i12 = 0; i12 < ne12; ++i12) {
+            const char *src1_batch = (const char *)src1->data + i13 * src1->nb[3] + i12 * src1->nb[2];
+            char *dst_batch = (char *)dst->data + i13 * dst->nb[3] + i12 * dst->nb[2];
+
+            for (size_t nr = 0; nr < (size_t)N; nr += N_chunk_n_rows) {
+                const size_t N_rows = ((size_t)N - nr > N_chunk_n_rows) ? N_chunk_n_rows : ((size_t)N - nr);
+                const size_t N_row_tiles = (N_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
+
+                // Progress log: one line per N-chunk (helps locate hang position)
+                PIPE_DBG("PIPE nr=%zu/%d N_rows=%zu",
+                                     nr, N, N_rows);
+
+                // Synchronously prepare activation chunk (no DMA pipeline for activation in this version)
+                if (src1->type == GGML_TYPE_F16) {
+                    const __fp16 *act_chunk = (const __fp16 *)(src1_batch + nr * src1_row_stride);
+                    if (use_hvx) {
+                        transfer_activation_chunk_f16_to_f16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+                    } else {
+                        transfer_activation_chunk_f16_to_f16_tiles(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(__fp16));
+                    }
+                } else if (src1->type == GGML_TYPE_BF16) {
+                    const ggml_bf16_t *act_chunk = (const ggml_bf16_t *)(src1_batch + nr * src1_row_stride);
+                    convert_activation_bf16_to_fp16_tiles_hvx(vtcm_activation, act_chunk, N_rows, K, src1_row_stride / sizeof(ggml_bf16_t));
+                } else if (src1->type == GGML_TYPE_F32) {
+                    // F32 activation: use single-thread DMA copy then convert
+                    const float *act_chunk = (const float *)(src1_batch + nr * src1_row_stride);
+                    PIPE_DBG("PIPE act_dma_push: dst=%p src=%p dst_stride=%zu src_stride=%zu row_size=%zu nrows=%zu",
+                                          vtcm_act_fp32, act_chunk, K * sizeof(float), src1_row_stride, K * sizeof(float), N_rows);
+                    dma_queue_push(dma,
+                        dma_make_ptr(vtcm_act_fp32, act_chunk),
+                        K * sizeof(float),
+                        src1_row_stride,
+                        K * sizeof(float),
+                        N_rows);
+                    PIPE_DBG("PIPE act_dma_pop: begin");
+                    dma_queue_pop(dma);
+                    PIPE_DBG("PIPE act_dma_pop: done");
+                    transfer_activation_chunk_fp32_to_fp16(vtcm_activation, vtcm_act_fp32, N_rows, K, K);
+                    PIPE_DBG("PIPE act_convert: done");
+                }
+
+                // Compute number of M chunks
+                const size_t n_M_chunks = (M_chunk_n_cols > 0) ? ((M + M_chunk_n_cols - 1) / M_chunk_n_cols) : 0;
+                if (n_M_chunks == 0) continue;
+
+                // Prologue: DMA push W[0]
+                const size_t M_cols_0 = ((size_t)M - 0 < M_chunk_n_cols) ? (size_t)M : M_chunk_n_cols;
+                PIPE_DBG("PIPE wt_dma_push[0]: dst=%p src=%p stride=%zu nrows=%zu",
+                                      vtcm_weight_raw[0], src0->data, src0_row_stride, M_cols_0);
+                dma_queue_push(dma,
+                    dma_make_ptr(vtcm_weight_raw[0], (const char *)src0->data + 0 * src0_row_stride),
+                    src0_row_stride,  // dst stride = src stride (tile-aligned)
+                    src0_row_stride,  // src stride
+                    src0_row_stride,  // row size
+                    M_cols_0);
+                if (n_M_chunks > 1) {
+                    const size_t M_cols_1 = ((size_t)M - M_chunk_n_cols < M_chunk_n_cols) ? ((size_t)M - M_chunk_n_cols) : M_chunk_n_cols;
+                    PIPE_DBG("PIPE wt_dma_push[1]: dst=%p src=%p stride=%zu nrows=%zu",
+                                          vtcm_weight_raw[1], (const char *)src0->data + M_chunk_n_cols * src0_row_stride,
+                                          src0_row_stride, M_cols_1);
+                    dma_queue_push(dma,
+                        dma_make_ptr(vtcm_weight_raw[1], (const char *)src0->data + M_chunk_n_cols * src0_row_stride),
+                        src0_row_stride, src0_row_stride, src0_row_stride,
+                        M_cols_1);
+                }
+
+                // Pop W[0] + multi-thread dequant -> submit C[0]
+                PIPE_DBG("PIPE wt_dma_pop[0]: begin");
+                dma_queue_pop(dma);
+                {
+                    const size_t M_col_tiles_0 = (M_cols_0 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+                    weight_dequant_mt(vtcm_weight_fp16[0],
+                                      (const char *)vtcm_weight_raw[0],
+                                      NULL, NULL,
+                                      (int)M_cols_0, K, src0_row_stride,
+                                      weight_dequant_fn, n_threads, src0_needs_fp32_buf);
+
+                    // Ensure HVX writes are visible to HMX
+                    if (M_col_tiles_0 > 0) {
+                        (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[0] + (M_col_tiles_0 * n_dot_tiles - 1) * HMX_FP16_TILE_N_ELMS);
+                    }
+                    if (N_row_tiles > 0) {
+                        (void) *(volatile HVX_Vector *)(vtcm_activation + (N_row_tiles * n_dot_tiles - 1) * HMX_FP16_TILE_N_ELMS);
+                    }
+
+                    // DEBUG: print first elements of weight_fp16 and activation
+                    PIPE_DBG("DEBUG prologue: M_cols_0=%zu K=%d n_dot_tiles=%zu M_col_tiles_0=%zu N_row_tiles=%zu",
+                         M_cols_0, K, n_dot_tiles, M_col_tiles_0, N_row_tiles);
+                    PIPE_DBG("DEBUG wt_fp16[0]: %f %f %f %f | %f %f %f %f",
+                         (float)vtcm_weight_fp16[0][0], (float)vtcm_weight_fp16[0][1],
+                         (float)vtcm_weight_fp16[0][2], (float)vtcm_weight_fp16[0][3],
+                         (float)vtcm_weight_fp16[0][4], (float)vtcm_weight_fp16[0][5],
+                         (float)vtcm_weight_fp16[0][6], (float)vtcm_weight_fp16[0][7]);
+                    PIPE_DBG("DEBUG act[0]: %f %f %f %f | %f %f %f %f",
+                         (float)vtcm_activation[0], (float)vtcm_activation[1],
+                         (float)vtcm_activation[2], (float)vtcm_activation[3],
+                         (float)vtcm_activation[4], (float)vtcm_activation[5],
+                         (float)vtcm_activation[6], (float)vtcm_activation[7]);
+                    // DEBUG: print first elements of raw weight in VTCM
+#if 0
+                    {
+                        const __fp16 *wraw = (const __fp16 *)vtcm_weight_raw[0];
+                        PIPE_DBG("DEBUG wt_raw[0]: %f %f %f %f | %f %f %f %f",
+                             (float)wraw[0], (float)wraw[1], (float)wraw[2], (float)wraw[3],
+                             (float)wraw[4], (float)wraw[5], (float)wraw[6], (float)wraw[7]);
+                    }
+#endif
+                }
+
+                hmx_matmul_job_t job_slots[2];
+                PIPE_DBG("PIPE before job_init[0]");
+                hmx_matmul_job_init(&job_slots[0], vtcm_output[0], vtcm_activation,
+                                    vtcm_weight_fp16[0], vtcm_scales,
+                                    N_row_tiles,
+                                    (M_cols_0 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS,
+                                    n_dot_tiles);
+                PIPE_DBG("PIPE before hmx_push[0]");
+                if (!hmx_queue_push(hmx_q, hmx_queue_make_desc(hmx_matmul_worker_fn, &job_slots[0]))) {
+                    GGMLHEXAGON_LOG_INFO("hmx_queue_push failed in prologue, falling back to sync");
+                    dma_queue_flush(dma);
+                    dma_queue_delete(dma);
+                    return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+                }
+
+                // Main loop
+                for (size_t i = 0; i < n_M_chunks; ++i) {
+                    const size_t mc     = i * M_chunk_n_cols;
+                    const size_t mc_p1  = mc + M_chunk_n_cols;
+                    const size_t mc_p2  = mc + 2 * M_chunk_n_cols;
+                    const size_t M_cols     = ((size_t)M - mc < M_chunk_n_cols) ? ((size_t)M - mc) : M_chunk_n_cols;
+                    const size_t M_cols_p1  = (mc_p1 < (size_t)M) ? (((size_t)M - mc_p1 < M_chunk_n_cols) ? ((size_t)M - mc_p1) : M_chunk_n_cols) : 0;
+                    const size_t M_cols_p2  = (mc_p2 < (size_t)M) ? (((size_t)M - mc_p2 < M_chunk_n_cols) ? ((size_t)M - mc_p2) : M_chunk_n_cols) : 0;
+
+                    PIPE_DBG("PIPE iter i=%zu M_cols=%zu M_cols_p1=%zu M_cols_p2=%zu",
+                                         i, M_cols, M_cols_p1, M_cols_p2);
+
+                    // 1. Pop W[i+1] + multi-thread dequant (if i+1 < n_M_chunks)
+                    if (i + 1 < n_M_chunks) {
+                        PIPE_DBG("PIPE wt_dma_pop[%zu]: begin", i + 1);
+                        dma_queue_pop(dma);
+                        PIPE_DBG("PIPE wt_dma_pop[%zu]: done", i + 1);
+                        weight_dequant_mt(vtcm_weight_fp16[(i + 1) % 2],
+                                          (const char *)vtcm_weight_raw[(i + 1) % 2],
+                                          NULL, NULL,
+                                          (int)M_cols_p1, K, src0_row_stride,
+                                          weight_dequant_fn, n_threads, src0_needs_fp32_buf);
+                        PIPE_DBG("PIPE wt_dequant[%zu]: done", i + 1);
+                        // Visibility fence
+                        const size_t n_wt_tiles_p1 = ((M_cols_p1 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS) * n_dot_tiles;
+                        if (n_wt_tiles_p1 > 0) {
+                            (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[(i + 1) % 2] + (n_wt_tiles_p1 - 1) * HMX_FP16_TILE_N_ELMS);
+                        }
+                    }
+
+                    // 2. DMA push W[i+2] (if i+2 < n_M_chunks)
+                    if (i + 2 < n_M_chunks) {
+                        PIPE_DBG("PIPE wt_dma_push[%zu]: begin", i + 2);
+                        dma_queue_push(dma,
+                            dma_make_ptr(vtcm_weight_raw[(i + 2) % 2], (const char *)src0->data + mc_p2 * src0_row_stride),
+                            src0_row_stride, src0_row_stride, src0_row_stride,
+                            M_cols_p2);
+                        PIPE_DBG("PIPE wt_dma_push[%zu]: done", i + 2);
+                    }
+
+                    // 3. Submit C[i+1] to hmx_queue (if i+1 < n_M_chunks)
+                    if (i + 1 < n_M_chunks) {
+                        PIPE_DBG("PIPE hmx_push[%zu]: begin", i + 1);
+                        hmx_matmul_job_init(&job_slots[(i + 1) % 2], vtcm_output[(i + 1) % 2],
+                                            vtcm_activation, vtcm_weight_fp16[(i + 1) % 2], vtcm_scales,
+                                            N_row_tiles,
+                                            (M_cols_p1 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS,
+                                            n_dot_tiles);
+                        if (!hmx_queue_push(hmx_q, hmx_queue_make_desc(hmx_matmul_worker_fn, &job_slots[(i + 1) % 2]))) {
+                            GGMLHEXAGON_LOG_INFO("hmx_queue_push failed in loop, falling back to sync");
+                            hmx_queue_suspend(hmx_q);
+                            dma_queue_flush(dma);
+                            dma_queue_delete(dma);
+                            return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
+                        }
+                        PIPE_DBG("PIPE hmx_push[%zu]: done", i + 1);
+                    }
+
+                    // 4. Wait C[i] + multi-thread output writeback
+                    hmx_queue_pop(hmx_q);
+
+                    // DEBUG: print output tile[0] first 8 fp16 elements after HMX compute
+                    if (i == 0) {
+                        PIPE_DBG("DEBUG out_tile[0]: %f %f %f %f | %f %f %f %f",
+                             (float)vtcm_output[0][0], (float)vtcm_output[0][1],
+                             (float)vtcm_output[0][2], (float)vtcm_output[0][3],
+                             (float)vtcm_output[0][4], (float)vtcm_output[0][5],
+                             (float)vtcm_output[0][6], (float)vtcm_output[0][7]);
+                    }
+
+                    float *output_chunk = (float *)(dst_batch + mc * dst->nb[0] + nr * dst->nb[1]);
+                    int dst_row_stride = (int)(dst->nb[1] / sizeof(float));
+                    output_writeback_mt(output_chunk, vtcm_output[i % 2],
+                                        (int)N_rows, (int)M_cols, dst_row_stride, n_threads);
+
+                    // DEBUG: print output_chunk first 8 fp32 elements after writeback
+                    if (i == 0) {
+                        PIPE_DBG("DEBUG out_chunk[0]: %f %f %f %f | %f %f %f %f",
+                             output_chunk[0], output_chunk[1],
+                             output_chunk[2], output_chunk[3],
+                             output_chunk[4], output_chunk[5],
+                             output_chunk[6], output_chunk[7]);
+                    }
+                }
+
+                // Chunk completion marker: confirms the entire N-chunk (all M-chunks) finished.
+                // If this log stops appearing, the hang is WITHIN the M-chunk loop above.
+                PIPE_DBG("PIPE nr=%zu: chunk done (n_M_chunks=%zu)", nr, n_M_chunks);
+            }
+        }
+    }
+
+    PIPE_DBG("HMX pipeline cleanup: before suspend iw=%u ir=%u ip=%u seqn=%u locked=%d",
+                         hmx_q->idx_write, hmx_q->idx_read, hmx_q->idx_pop,
+                         hmx_q->seqn, hmx_q->hmx_locked);
+    hmx_queue_suspend(hmx_q);
+    PIPE_DBG("HMX pipeline cleanup: after suspend iw=%u ir=%u ip=%u seqn=%u locked=%d",
+                         hmx_q->idx_write, hmx_q->idx_read, hmx_q->idx_pop,
+                         hmx_q->seqn, hmx_q->hmx_locked);
+    dma_queue_flush(dma);
+    dma_queue_delete(dma);
+
+    PIPE_DBG("HMX pipeline end");
     return 0;
 }
 
@@ -3401,7 +4104,7 @@ static int ggmlop_dsp_gemv(remote_handle64 h, const struct dsptensor *src0, cons
     // x4x2 -> FP16 dequant requires VTCM; fallback to HMX if unavailable.
     if (is_x4x2 && !use_vtcm) {
         GGMLHEXAGON_LOG_INFO("GEMV: x4x2 fallback to HMX (no VTCM for double-buffer)");
-        return ggmlop_dsp_mulmat_hmx(h, src0, src1, dst);
+        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
     }
 
     GGMLHEXAGON_LOG_INFO("GEMV: nth=%u nr0=%d vtcm=%zu", nth, nr0, use_vtcm ? vtcm_per_thread : 0);
@@ -3450,8 +4153,8 @@ struct mulmat_dispatch_entry {
 };
 
 static const struct mulmat_dispatch_entry mulmat_dispatch_table[] = {
-    { 30, ggmlop_dsp_mulmat_hmx,              "HMX x4x2 mode", 1 },
-    { 32, ggmlop_dsp_mulmat_hmx,              "HMX mode",      1 },
+    { 30, ggmlop_dsp_mulmat_hmx_sync,              "HMX sync mode", 1 },
+    { 32, ggmlop_dsp_mulmat_hmx,                   "HMX pipeline mode", 1 },
     { 31, ggmlop_dsp_mulmat_sgemm,            "sgemm mode",    0 },
     { 33, ggmlop_dsp_mulmat_multithread_vtcm, "MT_VTCM mode",  0 },
 };
@@ -3491,7 +4194,7 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const st
     // issues with x4x2 dequantization. N=1 cases fall through to HMX which is
     // verified. Re-enable after debugging dequantize_x4x2_row_to_f16_hvx.
 #if 0
-    if (fn == ggmlop_dsp_mulmat_hmx) {
+    if (fn == ggmlop_dsp_mulmat_hmx_sync) {
         const int32_t N = src1->ne[1];
         if (N == 1) {
             fn = ggmlop_dsp_gemv;

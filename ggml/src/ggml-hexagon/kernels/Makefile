@@ -22,20 +22,14 @@ CFLAGS+=-DGGMLDSP_VERSION="0.99.3"
 LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB_SECURE_FLAG=2 -Wl,--no-threads -fpic -shared -Wl,-Bsymbolic -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=realloc -Wl,--wrap=memalign -lc -Wl,-soname=${TARGET}
 
 #SRCS = $(wildcard *.c)
-SRCS = ggml-dsp.c skel.c entry.c add.c mul.c div.c sub.c mulmat.c sgemm.cpp test-hmx.c rmsnorm.c rope.c softmax.c silu.c scale.c cpy.c getrows.c concat.c repeat.c diagmask.c flash_attn.c ../htp/hex-dma.c
+SRCS = ggml-dsp.c skel.c entry.c add.c mul.c div.c sub.c mulmat.c sgemm.cpp test-hmx.c rmsnorm.c rope.c softmax.c silu.c scale.c cpy.c getrows.c concat.c repeat.c diagmask.c flash_attn.c hmx-queue.c ../htp/hex-dma.c
 OBJS = $(patsubst %.c, %.o, $(patsubst %.cpp, %.o, $(SRCS)))
 OBJS += dot.o
 OBJS += worker_pool.o
 
-BIN_DIR ?= ../../../../out/ggmlhexagon-android/bin
-
 ALL:$(OBJS)
 		${HEXAGON_CC} ${LDFLAGS} -o ${TARGET} -Wl,--start-group ${OBJS} -Wl,--end-group
 		@ls -l ${TARGET}
-		mkdir -p ${BIN_DIR}
-		/bin/cp -fv ${TARGET} ${BIN_DIR}/
-		/bin/cp -fv ${TARGET} ${BIN_DIR}/libggmldsp-skel${HTP_ARCH_VERSION}.so
-		/bin/rm -f *.so
 
 %.o:%.c
 		@echo "${HEXAGON_CC} ${CFLAGS} ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<"
