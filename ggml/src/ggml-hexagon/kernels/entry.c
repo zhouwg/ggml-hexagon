@@ -470,7 +470,7 @@ AEEResult hap_probe_dsp(remote_handle64 h) {
                  "\nMaximum Bus Bandwidth supported: %u Bytes/second(%u MiB/s)"
                  "\nClient Class:                    %x"
                  "\nCore clock frequency of the DSP: %u"
-                 "\nDCVS status:                     %d",
+                 "\nDCVS status:                     %d\n\n",
                   max_mips, max_bus_bw, max_bus_bw >> 20, client_class, clk_freq_hz, dcvs_enabled);
 
     return AEE_SUCCESS;
@@ -483,18 +483,18 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
     if (thread_counts <= g_thread_counts) {
         g_thread_counts = thread_counts;
     }
-    GGMLHEXAGON_LOG_INFO("real thread_counts %d", g_thread_counts);
 
     g_mulmat_algotype = mulmat_algo;
-    GGMLHEXAGON_LOG_INFO("mulmat_algotype %d", g_mulmat_algotype);
     GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=HVX multithread,31=sgemm,32=HMX,33=VTCM multithread)", g_mulmat_algotype);
-
     g_offload_cgraph_type = offload_cgraph_type;
-    GGMLHEXAGON_LOG_INFO("offload_cgraph_type %d", offload_cgraph_type);
-
     GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
     g_dump_diag_info      = diag_info;
-    GGMLHEXAGON_LOG_INFO("diag_info %d", g_dump_diag_info);
+
+    printf("\n");
+    printf("real thread_counts:             %d\n", g_thread_counts);
+    printf("mulmat_algotype:                %d\n", g_mulmat_algotype);
+    printf("offload_cgraph_type:            %d\n", offload_cgraph_type);
+    printf("dump_diag_info:                 %d\n\n", g_dump_diag_info);
 
     // diag_info is now used for dump_diag_info (log control), so force HVX on
     ggml_type_traits_dsp_init(1);
@@ -531,7 +531,7 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     hap_probe_dsp(handle);
 
-    set_power_boost(handle, 1);  // re-assert max corners after initialization
+    //set_power_boost(handle, 1);  //not needed
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return AEE_SUCCESS;
