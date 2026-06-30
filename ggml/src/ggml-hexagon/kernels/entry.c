@@ -1000,6 +1000,33 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         return AEE_EFAILED;
     }
 
+    /* Pass 1: invalidate all src tensor data before executing any op.
+     * Replaces per-op dcinva+syncht with one batched syncht.
+     * dcinva (invalidate-only) avoids writing stale dirty lines back to DRAM
+     * when ION regions are reused across batches. */
+    for (uint32_t i = 0; i < hdr->n_ops; i++) {
+        const hex_op_desc * op = &ops[i];
+        ggmlop_dsp_cache_inval_range_nosync(
+            (void *)(base + tens[op->src0_idx].data_offset),
+            tens[op->src0_idx].data_len);
+        if (op->src1_idx >= 0) {
+            ggmlop_dsp_cache_inval_range_nosync(
+                (void *)(base + tens[op->src1_idx].data_offset),
+                tens[op->src1_idx].data_len);
+        }
+        if (op->src2_idx >= 0) {
+            ggmlop_dsp_cache_inval_range_nosync(
+                (void *)(base + tens[op->src2_idx].data_offset),
+                tens[op->src2_idx].data_len);
+        }
+        if (op->src3_idx >= 0) {
+            ggmlop_dsp_cache_inval_range_nosync(
+                (void *)(base + tens[op->src3_idx].data_offset),
+                tens[op->src3_idx].data_len);
+        }
+    }
+    __asm__ __volatile__("syncht\n");
+
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
@@ -1086,18 +1113,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         dst_dt.data     = (void *)(base + td->data_offset);
         dst_dt.data_len = td->data_len;
 
-        /* Cache maintenance for non-coherent ION memory:
-         * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Use dcinva (invalidate-only): ION region reuse means the same
-         *   address may hold dirty lines from a previous op's dst; clean+inval
-         *   would write that stale data back to DRAM, corrupting fresh src.
-         * - Weights are read-only but still need inval after AP repack/flush
-         * - Batch all src inval into one syncht to reduce pipeline stalls */
-        ggmlop_dsp_cache_inval_range_nosync(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src1_dt_buf.data, src1_dt_buf.data_len);
-        if (src2_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src2_dt_buf.data, src2_dt_buf.data_len);
-        if (src3_dt_ptr) ggmlop_dsp_cache_inval_range_nosync(src3_dt_buf.data, src3_dt_buf.data_len);
-        __asm__ __volatile__("syncht\n");
+        /* src cache invalidation is done in Pass 1 above (batched syncht) */
 
         int op_ret = 0;
         switch (op->opcode) {
@@ -1151,13 +1167,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         }
     }
 
-    __asm__ __volatile__("" ::: "memory");
-    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx < hdr->n_tensors) {
-        uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx].data_offset;
-        if (batch_size > last_off + 4)
-            (void) *(volatile const int *)(base + last_off);
-    }
-    __asm__ __volatile__("" ::: "memory");
+    /* Last op's cache_flush_range already issued syncht, ensuring all dst
+     * writebacks complete before AP reads from DRAM. */
 
     /* Lazy VTCM release: if the release callback flagged us during the batch,
      * release now so other sessions (QNN/another GGML session) can use VTCM.
