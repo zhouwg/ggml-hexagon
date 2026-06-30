@@ -614,10 +614,9 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
   https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
 
 ## Why jz's ggml-hexagon backend is still meaningful?
-- JZ's ggml-hexagon backend unified QNN-CPU、QNN-GPU、QNN-NPU、cDSP (aka HTP) and the default ggml CPU backend in the same codebase ggml-hexagon.cpp, making it easier to compare the performance of the four backends. The implementation of the prebuilt libggmldsp-skel.so is complicated&dirty(I ported a fully ggml-dsp to Qualcomm's NPU side and supports fully quantized&none-quantized mulmat op, theoretically supports all ggml ops), so the open-source code of libggmldsp-skel.so can be found in this branch.
+- The implementation of the prebuilt libggmldsp-skel.so is complicated&dirty(I ported a fully ggml-dsp to Qualcomm's NPU side and supports fully quantized&none-quantized mulmat op, theoretically supports all ggml ops), so the open-source code of libggmldsp-skel.so can be found in JZ's ggml-hexagon.
 - [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
-- Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a concise&efficient solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native/pure FastRPC mechanism</b>, this concise solution will also reduce FastRPC overhead observably. Now we know [how to use Qualcomm's HMX(Hexagon Matrix eXtension) instructions in ggml correctly](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/ggml/src/ggml-hexagon/kernels/test-hmx.c), we can find that the performance of PP(Prompt Processing) in Qualcomm's official ggml-hexagon backend is faster than the performance of PP in JZ's ggml-hexagonbackend at the moment, but I have confidence that the performance of PP&TP in JZ's ggml-hexagon will be faster in the future, AI experts and domain tech experts' help/effort based on branch self-build-jz is greatly welcomed.
-- I learnt/got too much from open source community and many/sincerely thanks to all contributors of the great open source community, especially all original authors and all contributors of the great Linux & Android & FFmpeg & llama.cpp and other excellent projects. Hope this ggml-hexagon project is a little useful for open source community.
+- Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a concise&efficient solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native/pure FastRPC mechanism</b>, this concise solution will also reduce FastRPC overhead observably. Now we know [how to use Qualcomm's HMX(Hexagon Matrix eXtension) instructions in ggml correctly](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/ggml/src/ggml-hexagon/kernels/test-hmx.c), we can find that the performance of PP(Prompt Processing) in Qualcomm's official ggml-hexagon backend is <b>much faster</b> than the performance of PP in JZ's ggml-hexagonbackend <b>at the moment</b>, but I have confidence that the performance of PP&TG in JZ's ggml-hexagon will be faster in the future, AI experts and domain tech experts' help/effort based on branch self-build-jz is greatly welcomed.
 
 
 
@@ -627,13 +626,15 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 $ git checkout self-build-jz
 $ ./scripts/build-run-android.sh build
 $ ./scripts/build-run-android.sh run_testops
-$ ./scripts/build-run-android.sh run_llamabench 3
+$ ./scripts/build-run-android.sh run_llamabench
+$ ./scripts/build-run-android.sh run_llamacli
 
 ```
-the following screenshot is created on 2026-06-02 in branch self-build-jz and <b>can be reproduced</b> in branch self-build-jz-backup-20260607-before-merge-master.the following screenshot can't be reproduced in branch self-build-jz because branch self-build-jz is under active development.
 
-<img width="1879" height="285" alt="Screenshot from 2026-06-02 22-07-53" src="https://github.com/user-attachments/assets/a65ba531-b740-4348-af51-ab91b7cef1a2" />
 
+the following screenshot was created on 2026-06-29 in local branch self-build-jz and <b>can't be reproduced</b> in (remote) branch self-build-jz because local branch self-build-jz is under active development.
+
+<img width="1912" height="869" alt="Screenshot from 2026-06-29 22-49-31" src="https://github.com/user-attachments/assets/4a9cfb8f-20d6-455c-a9a4-99647c820868" />
 
 ## How to build the official ggml-hexagon backend for Snapdragon-based Android device
 
@@ -644,7 +645,10 @@ $ git checkout self-build
 $ ./scripts/build-run-android.sh build
 $ ./scripts/build-run-android.sh run_testops
 $ ./scripts/build-run-android.sh run_llamabench
+$ ./scripts/build-run-android.sh run_llamacli
 
 ```
 
-<img width="1879" height="593" alt="Screenshot from 2026-06-02 22-25-57" src="https://github.com/user-attachments/assets/3c6550c1-3d3a-448a-912b-dd399d7c2808" />
+the following screenshot was created on 2026-06-29 and <b>can be reproduced</b> in branch self-build. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
+
+<img width="1688" height="595" alt="Screenshot from 2026-06-29 17-12-12" src="https://github.com/user-attachments/assets/52b54fa7-9b46-47da-b6c2-41e81940c4f5" />
