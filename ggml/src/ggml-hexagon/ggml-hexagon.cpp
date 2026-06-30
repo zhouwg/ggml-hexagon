@@ -3508,6 +3508,10 @@ static bool ggmlhexagon_supported_flash_attn(const struct ggml_tensor * dst) {
     if (msk && msk->type != GGML_TYPE_F16) {
         return false;
     }
+    // Sinks (dst->src[4]) are not yet implemented in the JZ FA kernel.
+    if (dst->src[4] != NULL) {
+        return false;
+    }
     // n_head must fit the per-op slopes scratch in the JZ kernel.
     if (q->ne[2] > 512) {
         return false;
@@ -3515,24 +3519,32 @@ static bool ggmlhexagon_supported_flash_attn(const struct ggml_tensor * dst) {
     return true;
 }
 
-// Check if an op is allowed by the enabled_ops config filter
-// Returns true if the op is in the enabled list, or if the list is empty (all ops allowed)
-// Shape/meta ops are always allowed since they are zero-copy metadata operations
-static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
-    if (g_hexagon_appcfg.enabled_ops.empty()) {
-        return true;
-    }
-    // Always allow shape/meta ops (zero-copy, no backend execution needed)
+// True for metadata-only ops that never execute on cDSP.
+// Tests iterate every tensor in the graph and call supports_op on each;
+// view/reshape/permute parents must be reported as supported.
+static bool ggmlhexagon_is_metadata_op(enum ggml_op op) {
     switch (op) {
         case GGML_OP_NONE:
-        case GGML_OP_RESHAPE:
         case GGML_OP_VIEW:
+        case GGML_OP_RESHAPE:
         case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE:
         case GGML_OP_REPEAT:
+        //case GGML_OP_CONT:
             return true;
         default:
-            break;
+            return false;
+    }
+}
+
+// Check if an op is allowed by the enabled_ops config filter
+// Returns true if the op is in the enabled list, or if the list is empty (all ops allowed)
+static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
+    if (ggmlhexagon_is_metadata_op(op)) {
+        return true;
+    }
+    if (g_hexagon_appcfg.enabled_ops.empty()) {
+        return true;
     }
     const char * op_name = ggml_op_name(op);
     // Check if op_name appears as a whole word in the comma-separated list
@@ -3578,18 +3590,19 @@ static bool ggmlhexagon_supports_op_none(ggml_backend_dev_t dev, const struct gg
 }
 
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+    if (ggmlhexagon_is_metadata_op(op_tensor->op)) {
+        return true;
+    }
+
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
-    }
-    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
-    if (op_tensor->op == GGML_OP_NONE) {
-        return true;
     }
 
     if (!ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op_tensor)].supported) {
         return false;
     }
 
+    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
     const ggml_tensor * src0 = op_tensor->src[0];
     const ggml_tensor * src1 = op_tensor->src[1];
     const int src0_rank      = ggml_n_dims(src0);
@@ -3674,6 +3687,10 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 // This allows the scheduler to form larger subgraphs with more ops per batch,
 // reducing FastRPC call overhead (the dominant cost).
 static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
+    if (ggmlhexagon_is_metadata_op(op_tensor->op)) {
+        return true;
+    }
+
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
         return false;
     }

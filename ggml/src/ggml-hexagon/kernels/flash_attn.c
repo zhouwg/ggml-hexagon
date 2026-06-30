@@ -285,12 +285,14 @@ struct fa_thread_ctx {
     uint8_t * spad_q;     // one Q row (fp16, padded)
     uint8_t * spad_k;     // FA_BLOCK_SIZE K rows (fp16, padded)
     uint8_t * spad_v;     // FA_BLOCK_SIZE V rows (fp16, padded)
+    uint8_t * spad_m;     // FA_BLOCK_SIZE mask lanes (fp16, padded)
     float   * spad_a;     // DV fp32 output accumulator
     HVX_Vector * spad_s;  // FA_BLOCK_SIZE / VLEN_FP32 scratch for QK scores
     dma_queue * dma;
     size_t size_q_padded;
     size_t size_k_padded;
     size_t size_v_padded;
+    size_t size_m_padded;
     // Scalar-path scratch (DDR). Each worker has its own slice; assigned
     // by the driver to avoid concurrent reads/writes of out[d] across
     // workers computing different rows.
@@ -442,29 +444,19 @@ static void fa_row_hvx(struct fa_thread_ctx * c, uint32_t iq1, uint32_t iq2, uin
     const uint32_t iv3 = (t->neq3 && t->v->ne[3]) ? iq3 / (t->neq3 / t->v->ne[3]) : 0;
 
     // 1. Fetch Q row into VTCM and normalize to fp16.
+    //    Do not stage through ggmlop_get_work_data: that global is not
+    //    thread-safe and concurrent worker calls can free the buffer out
+    //    from under the others. Q.data lives in ION which the DMA engine
+    //    can read directly.
     const uint8_t * q_row_ptr = (const uint8_t *) t->q->data + iq1 * t->nbq1 + iq2 * t->nbq2 + iq3 * t->nbq3;
     if (t->is_q_fp32) {
-        // Read fp32 Q row into a temp scratch, then convert to fp16 in VTCM.
-        // ggmlop_get_work_data returns a DDR-backed aligned buffer; convert
-        // to fp16 in place and DMA to VTCM.
-        float * q32 = (float *) ggmlop_get_work_data((size_t) DK * sizeof(float));
-        if (!q32) {
-            fa_row_scalar(t, iq1, iq2, iq3);
-            return;
-        }
-        memcpy(q32, q_row_ptr, (size_t) DK * sizeof(float));
         dma_queue_push_ddr_to_vtcm(c->dma,
-                                   dma_make_ptr(c->spad_q, q32),
+                                   dma_make_ptr(c->spad_q, (void *) q_row_ptr),
                                    c->size_q_padded,
                                    (size_t) DK * sizeof(float),
                                    1);
         dma_queue_pop(c->dma);
-        // Convert fp32 -> fp16 in place inside VTCM.
-        const uint32_t nvec_q = DK / VLEN_FP32;
-        for (uint32_t i = 0; i < nvec_q; ++i) {
-            HVX_VectorPair f32p = hvx_vec_f16_to_f32(*(HVX_Vector *) (c->spad_q + i * VLEN_FP16));
-            *(HVX_Vector *) (c->spad_q + i * VLEN_FP16) = Q6_Vh_vdeal_Vh(hvx_vec_f32_to_f16(Q6_V_lo_W(f32p), Q6_V_hi_W(f32p)));
-        }
+        hvx_copy_f16_f32_aa(c->spad_q, c->spad_q, DK);
     } else {
         dma_queue_push_ddr_to_vtcm(c->dma,
                                    dma_make_ptr(c->spad_q, q_row_ptr),
@@ -520,6 +512,32 @@ static void fa_row_hvx(struct fa_thread_ctx * c, uint32_t iq1, uint32_t iq2, uin
                                    block_size);
         dma_queue_pop(c->dma);
 
+        // Zero-pad the unused tail rows of K and V blocks. The HVX inner loop
+        // always processes FA_BLOCK_SIZE lanes (via 32-lane HVX vectors); if
+        // block_size is not a multiple of 32, the last HVX vector would read
+        // uninitialized scratch for the invalid lanes, contaminating the dot
+        // product and the final output. For full blocks this is a no-op.
+        if (block_size < FA_BLOCK_SIZE) {
+            const uint32_t tail_rows = FA_BLOCK_SIZE - block_size;
+            const size_t tail_k_bytes = (size_t) tail_rows * c->size_k_padded;
+            const size_t tail_v_bytes = (size_t) tail_rows * c->size_v_padded;
+            memset(c->spad_k + (size_t) block_size * c->size_k_padded, 0, tail_k_bytes);
+            memset(c->spad_v + (size_t) block_size * c->size_v_padded, 0, tail_v_bytes);
+        }
+
+        // Pre-DMA mask block into VTCM (cache mode: HVX can then read it
+        // safely regardless of source alignment). Mask is contiguous in K
+        // (mask->nb[0] == sizeof(__fp16)) so a single 1D DMA suffices.
+        if (t->mask) {
+            const uint8_t * m_src = (const uint8_t *) (mp_base + ic_start);
+            dma_queue_push_ddr_to_vtcm(c->dma,
+                                       dma_make_ptr(c->spad_m, m_src),
+                                       c->size_m_padded,
+                                       block_size * sizeof(__fp16),
+                                       1);
+            dma_queue_pop(c->dma);
+        }
+
         // 3a. Compute QK scores for each 32-lane sub-block within this K block.
         HVX_Vector sb_scores[FA_BLOCK_SIZE / VLEN_FP32];
         HVX_Vector v_max = hvx_vec_splat_f32(-INFINITY);
@@ -534,15 +552,25 @@ static void fa_row_hvx(struct fa_thread_ctx * c, uint32_t iq1, uint32_t iq2, uin
                 scores = FA_OP_MUL_F32(hvx_vec_tanh_f32(scores), logit_cap);
             }
             if (t->mask) {
-                const __fp16 * mp = mp_base + ic_start + ic;
+                const __fp16 * mp = (const __fp16 *) c->spad_m + ic;
                 HVX_Vector m_vals_f16 = *(const HVX_UVector *) mp;
+                // Mask out any lanes past the end of this K block (the VTCM
+                // padding area is uninitialized). Invalid lanes are also
+                // forced to -INFINITY below for the score itself.
+                uint32_t valid_lanes_m = block_size - ic;
+                if (valid_lanes_m < VLEN_FP32) {
+                    HVX_VectorPred mp_pred = Q6_Q_vsetq_R(valid_lanes_m * 2); // fp16 lane = 2 bytes
+                    m_vals_f16 = Q6_V_vmux_QVV(mp_pred, m_vals_f16, Q6_V_vzero());
+                }
                 // Clamp -INFINITY (0xFC00) to -65504.0f to avoid NaN in VhfVhf mpy on v79.
                 HVX_Vector vinf = Q6_Vh_vsplat_R(0xFC00);
                 HVX_Vector vmin = Q6_Vh_vsplat_R(0xFBFF);
                 HVX_VectorPred is_inf = Q6_Q_vcmp_eq_VhVh(m_vals_f16, vinf);
                 m_vals_f16 = Q6_V_vmux_QVV(is_inf, vmin, m_vals_f16);
                 // Add raw mask (no slope scaling). ALiBi is applied separately below.
-                HVX_VectorPair m_vals_f32_pair = hvx_vec_f16_to_f32(Q6_Vh_vshuff_Vh(m_vals_f16));
+                // hvx_vec_f16_to_f32 already performs the Q6_Vh_vshuff_Vh internally,
+                // so its Q6_V_lo_W(p) holds fp32 lane 0..31 (matching scores).
+                HVX_VectorPair m_vals_f32_pair = hvx_vec_f16_to_f32(m_vals_f16);
                 HVX_Vector add_val_lo = Q6_V_lo_W(m_vals_f32_pair);
                 scores = FA_OP_ADD_F32(scores, add_val_lo);
             }
@@ -801,18 +829,30 @@ int ggmlop_dsp_flash_attn(remote_handle64 h,
 
     const uint32_t DK = k->ne[0];
     const uint32_t DV = v->ne[0];
-    const size_t size_q_padded = hex_round_up(DK * sizeof(__fp16), 128);
+    const size_t q_elem_bytes = (q->type == GGML_TYPE_F32) ? sizeof(float) : sizeof(__fp16);
+    const size_t size_q_padded = hex_round_up((size_t) DK * q_elem_bytes, 128);
     const size_t size_k_padded = hex_round_up(DK * sizeof(__fp16), 128);
     const size_t size_v_padded = hex_round_up(DV * sizeof(__fp16), 128);
     const size_t size_a_padded = hex_round_up(DV * sizeof(float), 128);
+    // Mask scratch is one block's worth of fp16 lanes (FA_BLOCK_SIZE = 64).
+    const size_t size_m_padded = hex_round_up(FA_BLOCK_SIZE * sizeof(__fp16), 128);
     const size_t per_thread = size_q_padded
                             + FA_BLOCK_SIZE * size_k_padded
                             + FA_BLOCK_SIZE * size_v_padded
+                            + size_m_padded
                             + size_a_padded;
 
     // Decide HVX vs scalar based on VTCM availability and per-thread budget.
-    int use_hvx = 0;  // TEMP: force scalar to verify baseline correctness
-    (void) vtcm_base; (void) pool_size; (void) per_thread;
+    // In cache mode, VTCM must first be acquired; ggmlop_ensure_vtcm_available
+    // does that. If it returns != 0, fall back to scalar.
+    int use_hvx = 0;
+    if (vtcm_base != NULL && pool_size >= per_thread * nth) {
+        if (ggmlop_ensure_vtcm_available() == 0) {
+            use_hvx = 1;
+        } else {
+            GGMLHEXAGON_LOG_INFO("flash_attn: VTCM ensure failed, falling back to scalar");
+        }
+    }
     if (!use_hvx) {
         // Fall back to scalar. Per-worker ctx is unused.
         static struct fa_thread_ctx ctxs[MAX_NUM_WORKERS];
@@ -884,11 +924,13 @@ int ggmlop_dsp_flash_attn(remote_handle64 h,
         ctxs[i].spad_q = base;
         ctxs[i].spad_k = base + size_q_padded;
         ctxs[i].spad_v = ctxs[i].spad_k + FA_BLOCK_SIZE * size_k_padded;
-        ctxs[i].spad_a = (float *) (ctxs[i].spad_v + FA_BLOCK_SIZE * size_v_padded);
+        ctxs[i].spad_m = ctxs[i].spad_v + FA_BLOCK_SIZE * size_v_padded;
+        ctxs[i].spad_a = (float *) (ctxs[i].spad_m + size_m_padded);
         ctxs[i].spad_s = NULL;  // unused in current path
         ctxs[i].size_q_padded = size_q_padded;
         ctxs[i].size_k_padded = size_k_padded;
         ctxs[i].size_v_padded = size_v_padded;
+        ctxs[i].size_m_padded = size_m_padded;
         if (dma_queues[i] == NULL) {
             dma_queues[i] = dma_queue_create(8);
         }
