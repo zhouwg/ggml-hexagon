@@ -2933,6 +2933,7 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
                          M, N, K, vtcm_size, M_chunk_n_cols, N_chunk_n_rows, total_vtcm_needed, act_area_size, weight_area_size, reusable_buf_size, weight_fp32_buf_size, scales_size);
 
     GGMLHEXAGON_LOG_INFO("begin real vtcm + hmx");
+    int64_t t_sync_begin = ggml_time_us();
     uint8_t *vtcm_ptr = (uint8_t *)vtcm_base;
     __fp16 *vtcm_activation = (__fp16 *) vtcm_ptr;  // activation tiles (interleaved format)
     vtcm_ptr += act_area_size;
@@ -3161,6 +3162,13 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
         HAP_compute_res_hmx_unlock(compute_res_ctx_id);
     }
     GGMLHEXAGON_LOG_INFO("end real vtcm + hmx");
+    {
+        int32_t M_sync = src0->ne[1];
+        int32_t N_sync = src1->ne[1];
+        int32_t K_sync = src0->ne[0];
+        FARF(ALWAYS, "SYNC timing(us): M=%d N=%d K=%d | total=%lld",
+             M_sync, N_sync, K_sync, (long long)(ggml_time_us() - t_sync_begin));
+    }
 
     return 0;
 }
@@ -3265,6 +3273,15 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
     PIPE_DBG("HMX pipeline matmul: M=%d, N=%d, K=%d, vtcm_size=%zu", M, N, K, vtcm_size);
 
+    // Lightweight timing instrumentation: accumulate per-stage us, output 1 line at exit
+    int64_t t_pipe_begin = ggml_time_us();
+    int64_t t_pipe_vtcm  = 0;
+    int64_t acc_dma_pop = 0, acc_dequant = 0, acc_dccleana = 0;
+    int64_t acc_hmx_pop = 0, acc_dcinva = 0, acc_writeback = 0;
+    int64_t acc_dma_push = 0;
+    size_t  n_M_chunks_total = 0;
+    int64_t _t0;
+
     // Step 2: VTCM double-buffer budget sweep
     // Layout: weight_raw[2] + weight_fp16[2] + act(single) + output[2] + act_fp32(single) + scales
     const bool src0_needs_fp32_buf = (src0->type == GGML_TYPE_F32);
@@ -3327,6 +3344,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     PIPE_DBG("HMX pipeline VTCM: M_chunk=%zu, N_chunk=%zu, total=%zu (w_raw=%zu x2, w_fp16=%zu x2, act=%zu, out=%zu x2, act_fp32=%zu, scales=%zu)",
                           M_chunk_n_cols, N_chunk_n_rows, total_vtcm_needed,
                           weight_raw_size, weight_fp16_size, act_area_size, output_area_size, act_fp32_buf_size, scales_size);
+    t_pipe_vtcm = ggml_time_us();
 
     uint8_t *vtcm_ptr = (uint8_t *)vtcm_base;
     // Double-buffered weight raw (DMA targets)
@@ -3356,6 +3374,8 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     volatile HVX_Vector *pv_scales = (volatile HVX_Vector *) vtcm_scales;
     pv_scales[0] = v_scale;
     pv_scales[1] = Q6_V_vzero();
+    // Flush HVX-written scales to VTCM backing store for HMX visibility
+    ggmlop_dsp_cache_clean_range(vtcm_scales, scales_size);
 
     const size_t n_dot_tiles = K / HMX_FP16_TILE_N_COLS;
     const size_t src0_row_stride = src0->nb[1];
@@ -3424,15 +3444,21 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     transfer_activation_chunk_fp32_to_fp16(vtcm_activation, vtcm_act_fp32, N_rows, K, K);
                     PIPE_DBG("PIPE act_convert: done");
                 }
+                // Flush HVX-written activation to VTCM backing store for HMX visibility
+                _t0 = ggml_time_us();
+                ggmlop_dsp_cache_clean_range(vtcm_activation, act_area_size);
+                acc_dccleana += ggml_time_us() - _t0;
 
                 // Compute number of M chunks
                 const size_t n_M_chunks = (M_chunk_n_cols > 0) ? ((M + M_chunk_n_cols - 1) / M_chunk_n_cols) : 0;
+                n_M_chunks_total += n_M_chunks;
                 if (n_M_chunks == 0) continue;
 
                 // Prologue: DMA push W[0]
                 const size_t M_cols_0 = ((size_t)M - 0 < M_chunk_n_cols) ? (size_t)M : M_chunk_n_cols;
                 PIPE_DBG("PIPE wt_dma_push[0]: dst=%p src=%p stride=%zu nrows=%zu",
                                       vtcm_weight_raw[0], src0->data, src0_row_stride, M_cols_0);
+                _t0 = ggml_time_us();
                 dma_queue_push(dma,
                     dma_make_ptr(vtcm_weight_raw[0], (const char *)src0->data + 0 * src0_row_stride),
                     src0_row_stride,  // dst stride = src stride (tile-aligned)
@@ -3449,25 +3475,30 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                         src0_row_stride, src0_row_stride, src0_row_stride,
                         M_cols_1);
                 }
+                acc_dma_push += ggml_time_us() - _t0;
 
                 // Pop W[0] + multi-thread dequant -> submit C[0]
                 PIPE_DBG("PIPE wt_dma_pop[0]: begin");
+                _t0 = ggml_time_us();
                 dma_queue_pop(dma);
+                acc_dma_pop += ggml_time_us() - _t0;
                 {
                     const size_t M_col_tiles_0 = (M_cols_0 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+                    _t0 = ggml_time_us();
                     weight_dequant_mt(vtcm_weight_fp16[0],
                                       (const char *)vtcm_weight_raw[0],
                                       NULL, NULL,
                                       (int)M_cols_0, K, src0_row_stride,
                                       weight_dequant_fn, n_threads, src0_needs_fp32_buf);
+                    acc_dequant += ggml_time_us() - _t0;
 
-                    // Ensure HVX writes are visible to HMX
+                    // Drain HVX store pipeline, then flush to VTCM backing store for HMX
                     if (M_col_tiles_0 > 0) {
                         (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[0] + (M_col_tiles_0 * n_dot_tiles - 1) * HMX_FP16_TILE_N_ELMS);
                     }
-                    if (N_row_tiles > 0) {
-                        (void) *(volatile HVX_Vector *)(vtcm_activation + (N_row_tiles * n_dot_tiles - 1) * HMX_FP16_TILE_N_ELMS);
-                    }
+                    _t0 = ggml_time_us();
+                    ggmlop_dsp_cache_clean_range(vtcm_weight_fp16[0], weight_fp16_size);
+                    acc_dccleana += ggml_time_us() - _t0;
 
                     // DEBUG: print first elements of weight_fp16 and activation
                     PIPE_DBG("DEBUG prologue: M_cols_0=%zu K=%d n_dot_tiles=%zu M_col_tiles_0=%zu N_row_tiles=%zu",
@@ -3523,28 +3554,37 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     // 1. Pop W[i+1] + multi-thread dequant (if i+1 < n_M_chunks)
                     if (i + 1 < n_M_chunks) {
                         PIPE_DBG("PIPE wt_dma_pop[%zu]: begin", i + 1);
+                        _t0 = ggml_time_us();
                         dma_queue_pop(dma);
+                        acc_dma_pop += ggml_time_us() - _t0;
                         PIPE_DBG("PIPE wt_dma_pop[%zu]: done", i + 1);
+                        _t0 = ggml_time_us();
                         weight_dequant_mt(vtcm_weight_fp16[(i + 1) % 2],
                                           (const char *)vtcm_weight_raw[(i + 1) % 2],
                                           NULL, NULL,
                                           (int)M_cols_p1, K, src0_row_stride,
                                           weight_dequant_fn, n_threads, src0_needs_fp32_buf);
+                        acc_dequant += ggml_time_us() - _t0;
                         PIPE_DBG("PIPE wt_dequant[%zu]: done", i + 1);
-                        // Visibility fence
+                        // Drain HVX store pipeline, then flush to VTCM backing store for HMX
                         const size_t n_wt_tiles_p1 = ((M_cols_p1 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS) * n_dot_tiles;
                         if (n_wt_tiles_p1 > 0) {
                             (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[(i + 1) % 2] + (n_wt_tiles_p1 - 1) * HMX_FP16_TILE_N_ELMS);
                         }
+                        _t0 = ggml_time_us();
+                        ggmlop_dsp_cache_clean_range(vtcm_weight_fp16[(i + 1) % 2], weight_fp16_size);
+                        acc_dccleana += ggml_time_us() - _t0;
                     }
 
                     // 2. DMA push W[i+2] (if i+2 < n_M_chunks)
                     if (i + 2 < n_M_chunks) {
                         PIPE_DBG("PIPE wt_dma_push[%zu]: begin", i + 2);
+                        _t0 = ggml_time_us();
                         dma_queue_push(dma,
                             dma_make_ptr(vtcm_weight_raw[(i + 2) % 2], (const char *)src0->data + mc_p2 * src0_row_stride),
                             src0_row_stride, src0_row_stride, src0_row_stride,
                             M_cols_p2);
+                        acc_dma_push += ggml_time_us() - _t0;
                         PIPE_DBG("PIPE wt_dma_push[%zu]: done", i + 2);
                     }
 
@@ -3567,7 +3607,13 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     }
 
                     // 4. Wait C[i] + multi-thread output writeback
+                    _t0 = ggml_time_us();
                     hmx_queue_pop(hmx_q);
+                    acc_hmx_pop += ggml_time_us() - _t0;
+                    // Invalidate stale L1 lines so HVX reads fresh HMX output from backing store
+                    _t0 = ggml_time_us();
+                    ggmlop_dsp_cache_inval_range(vtcm_output[i % 2], output_area_size);
+                    acc_dcinva += ggml_time_us() - _t0;
 
                     // DEBUG: print output tile[0] first 8 fp16 elements after HMX compute
                     if (i == 0) {
@@ -3580,8 +3626,10 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
 
                     float *output_chunk = (float *)(dst_batch + mc * dst->nb[0] + nr * dst->nb[1]);
                     int dst_row_stride = (int)(dst->nb[1] / sizeof(float));
+                    _t0 = ggml_time_us();
                     output_writeback_mt(output_chunk, vtcm_output[i % 2],
                                         (int)N_rows, (int)M_cols, dst_row_stride, n_threads);
+                    acc_writeback += ggml_time_us() - _t0;
 
                     // DEBUG: print output_chunk first 8 fp32 elements after writeback
                     if (i == 0) {
@@ -3610,6 +3658,17 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     dma_queue_flush(dma);
     dma_queue_delete(dma);
 
+    // Timing summary (1 FARF line, bypasses ggml_log_always dump_diag gate)
+    {
+        int64_t t_total = ggml_time_us() - t_pipe_begin;
+        int64_t t_vtcm  = t_pipe_vtcm - t_pipe_begin;
+        FARF(ALWAYS, "PIPE timing(us): M=%d N=%d K=%d nMc=%zu | total=%lld vtcm=%lld dma_pop=%lld dequant=%lld dccleana=%lld hmx_pop=%lld dcinva=%lld wb=%lld dma_push=%lld",
+             M, N, K, n_M_chunks_total,
+             (long long)t_total, (long long)t_vtcm,
+             (long long)acc_dma_pop, (long long)acc_dequant, (long long)acc_dccleana,
+             (long long)acc_hmx_pop, (long long)acc_dcinva, (long long)acc_writeback,
+             (long long)acc_dma_push);
+    }
     PIPE_DBG("HMX pipeline end");
     return 0;
 }

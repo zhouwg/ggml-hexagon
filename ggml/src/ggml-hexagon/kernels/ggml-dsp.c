@@ -7561,9 +7561,38 @@ void ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size) {
     char * p = (char *)addr;
     char * end = p + size;
     p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    /* dcinva does not trigger page faults on Hexagon. Touch one byte per
+     * page to fault it in before invalidating. Without this, Pass 1 (which
+     * runs before any op accesses the tensor data) crashes with TLBMISS on
+     * pages that haven't been faulted in by prior op execution. */
+    uintptr_t last_page = 0;
     for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        uintptr_t cur_page = (uintptr_t)p & ~0xFFFULL;
+        if (cur_page != last_page) {
+            (void) *(volatile char *)p;
+            last_page = cur_page;
+        }
         Q6_dcinva_A(p);
     }
+}
+
+/*
+ * Clean (writeback) DSP cache for a range of cacheable VTCM memory.
+ * Uses Q6_dccleana_A (clean only, NO invalidate). Writes back dirty L1/L2
+ * lines to the VTCM backing store so that other threads or hardware
+ * accelerators (HMX) with their own cache paths can see the data.
+ * Needed in the HMX pipeline where the caller thread writes via HVX and
+ * a dedicated HMX worker thread reads via its own L1.
+ */
+void ggmlop_dsp_cache_clean_range(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
+    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+        Q6_dccleana_A(p);
+    }
+    __asm__ __volatile__("syncht\n");
 }
 
 static inline HVX_Vector hvx_vec_reduce_max_f32(HVX_Vector in) {
