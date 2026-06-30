@@ -842,16 +842,11 @@ int ggmlop_dsp_flash_attn(remote_handle64 h,
                             + size_m_padded
                             + size_a_padded;
 
-    // Decide HVX vs scalar based on VTCM availability and per-thread budget.
-    // In cache mode, VTCM must first be acquired; ggmlop_ensure_vtcm_available
-    // does that. If it returns != 0, fall back to scalar.
+    // Decide HVX vs scalar based on VTCM pool availability and per-thread budget.
+    // VTCM is acquired at batch entry (per-batch, not per-op).
     int use_hvx = 0;
     if (vtcm_base != NULL && pool_size >= per_thread * nth) {
-        if (ggmlop_ensure_vtcm_available() == 0) {
-            use_hvx = 1;
-        } else {
-            GGMLHEXAGON_LOG_INFO("flash_attn: VTCM ensure failed, falling back to scalar");
-        }
+        use_hvx = 1;
     }
     if (!use_hvx) {
         // Fall back to scalar. Per-worker ctx is unused.

@@ -660,14 +660,7 @@ static int ggmlop_dsp_mulmat_multithread_vtcm(remote_handle64 h, const struct ds
     if (n_threads < 1) n_threads = 1;
     if (n_threads > 8) n_threads = 8;
 
-    // In cache mode, VTCM must be acquired before each use
-    int vtcm_err = ggmlop_ensure_vtcm_available();
-    if (vtcm_err != 0) {
-        GGMLHEXAGON_LOG_INFO("%s: VTCM ensure failed (%d), falling back to multithread-without-vtcm",
-                             __func__, vtcm_err);
-        return ggmlop_dsp_mulmat_multithread(h, src0, src1, dst);
-    }
-
+    // VTCM is acquired at batch entry (per-batch, not per-op)
     // Use pre-allocated VTCM pool instead of HAP_request_VTCM
     // (VTCM pool is allocated at init time via HAP_compute_res_acquire)
     size_t pool_size = 0;
@@ -2793,16 +2786,7 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
-    // Ensure VTCM resource is available (for cache mode)
-    int vtcm_err = ggmlop_ensure_vtcm_available();
-    if (vtcm_err != 0) {
-        if (hmx_locked) {
-            HAP_compute_res_hmx_unlock(compute_res_ctx_id);
-        }
-        GGMLHEXAGON_LOG_INFO("VTCM ensure failed (%d), falling back to VTCM multithread mode\n", vtcm_err);
-        return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
-    }
-
+    // VTCM is acquired at batch entry (per-batch, not per-op)
     dst->ne[0] = src0->ne[1];
     dst->ne[1] = src1->ne[1];
     dst->ne[2] = src1->ne[2];
@@ -3261,13 +3245,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
         return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
     }
 
-    // Ensure VTCM resource is available (cache mode)
-    int vtcm_err = ggmlop_ensure_vtcm_available();
-    if (vtcm_err != 0) {
-        GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
-        return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
-    }
-
+    // VTCM is acquired at batch entry (per-batch, not per-op)
     size_t vtcm_size = 0;
     void * vtcm_base = ggmlop_get_vtcm_pool(&vtcm_size);
     if (vtcm_base == NULL || (uintptr_t)vtcm_base % HMX_FP16_TILE_SIZE != 0) {
@@ -3812,18 +3790,16 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
     const size_t B_data_size = ne11 * row_size;
 
     if (type != GGML_TYPE_F32) {
-        int vtcm_err = ggmlop_ensure_vtcm_available();
-        if (vtcm_err == 0) {
-            size_t vtcm_pool_size = 0;
-            void * vtcm_base = ggmlop_get_vtcm_pool(&vtcm_pool_size);
-            if (vtcm_base != NULL && A_data_size + B_data_size <= vtcm_pool_size) {
-                // VTCM buffering disabled: causes 5-6x slowdown due to
-                // sgemm's tiled access pattern not benefiting from VTCM
-                // (unlike vec_dot which is sequential and benefits greatly)
-                // use_vtcm = true;
-                GGMLHEXAGON_LOG_INFO("sgemm: VTCM available but disabled (A=%zu B=%zu), using DDR",
-                                     A_data_size, B_data_size);
-            }
+        // VTCM is acquired at batch entry (per-batch, not per-op)
+        size_t vtcm_pool_size = 0;
+        void * vtcm_base = ggmlop_get_vtcm_pool(&vtcm_pool_size);
+        if (vtcm_base != NULL && A_data_size + B_data_size <= vtcm_pool_size) {
+            // VTCM buffering disabled: causes 5-6x slowdown due to
+            // sgemm's tiled access pattern not benefiting from VTCM
+            // (unlike vec_dot which is sequential and benefits greatly)
+            // use_vtcm = true;
+            GGMLHEXAGON_LOG_INFO("sgemm: VTCM available but disabled (A=%zu B=%zu), using DDR",
+                                 A_data_size, B_data_size);
         }
         if (!use_vtcm) {
             GGMLHEXAGON_LOG_INFO("sgemm: VTCM unavailable or too small (A=%zu B=%zu), using DDR",
@@ -4076,13 +4052,12 @@ static int ggmlop_dsp_gemv(remote_handle64 h, const struct dsptensor *src0, cons
     if (nth < 1) nth = 1;
     if (nth > MAX_NUM_WORKERS) nth = MAX_NUM_WORKERS;
 
+    // VTCM is acquired at batch entry (per-batch, not per-op)
     int use_vtcm = 0;
     void *vtcm_base = NULL;
     size_t pool = 0, vtcm_per_thread = 0;
-    if (!ggmlop_ensure_vtcm_available()) {
-        vtcm_base = ggmlop_get_vtcm_pool(&pool);
-        if (vtcm_base && pool >= nth * (64 * 1024)) use_vtcm = 1;
-    }
+    vtcm_base = ggmlop_get_vtcm_pool(&pool);
+    if (vtcm_base && pool >= nth * (64 * 1024)) use_vtcm = 1;
     if (use_vtcm) {
         vtcm_per_thread = 64 * 1024;
         while (vtcm_per_thread * 2 * nth <= pool) vtcm_per_thread *= 2;

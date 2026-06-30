@@ -123,8 +123,10 @@ static int power_on_hvx_hmx(void) {
 
 
 static int vtcm_release_callback(unsigned int rctx, void * state) {
+    // Async notification only: flag that another session wants VTCM.
+    // Do NOT clear g_vtcm_valid here - the current batch keeps running
+    // and releases VTCM at the batch boundary (matches Qualcomm htp/main.c).
     g_vtcm_needs_release = 1;
-    g_vtcm_valid = 0;
     return 0;
 }
 
@@ -607,8 +609,11 @@ void * ggmlop_cache_mempool_alloc(size_t size) {
 }
 
 
-// Ensure VTCM resource is available (for cache mode)
-// Must be called before using VTCM in each operation
+// Acquire VTCM for the current batch/op (cache mode).
+// Called once at batch entry (ggmlop_dsp_execute_batch_ion) or at per-op entry
+// (ggmlop_dsp_execute_task). Per-op mulmat/flash_attn code no longer calls this.
+// If already valid, returns 0 immediately (cheap check).
+// If needs_release was flagged by the release callback, release first, then re-acquire.
 int ggmlop_ensure_vtcm_available(void) {
     if (g_compute_res_ctx_id == 0) {
         // compute_res acquire failed at init. VTCM is available only if the
@@ -617,29 +622,41 @@ int ggmlop_ensure_vtcm_available(void) {
         return (g_vtcm_base != NULL) ? 0 : -1;
     }
 
-    // In cache mode, VTCM needs to be acquired before each use
-    if (!g_vtcm_valid || g_vtcm_needs_release) {
-        // VTCM needs to be acquired
-        if (g_vtcm_needs_release) {
-            GGMLHEXAGON_LOG_INFO("VTCM needs re-acquire (cache mode)");
-            g_vtcm_needs_release = 0;
-            // Release cached VTCM first
-            HAP_compute_res_release_cached(g_compute_res_ctx_id);
-        } else {
-            GGMLHEXAGON_LOG_INFO("VTCM first acquire (cache mode)");
-        }
-
-        // Acquire VTCM with timeout
-        int err = HAP_compute_res_acquire_cached(g_compute_res_ctx_id, 1000000);
-        if (err != 0) {
-            GGMLHEXAGON_LOG_ERROR("Failed to acquire VTCM: 0x%08x", err);
-            return -1;
-        }
-        g_vtcm_valid = 1;
-        GGMLHEXAGON_LOG_INFO("VTCM acquired successfully");
+    // Already valid - batch is running, keep using VTCM until batch boundary.
+    // The release callback only sets needs_release; the actual release happens
+    // in ggmlop_dsp_execute_batch_ion after the batch loop (lazy release).
+    if (g_vtcm_valid) {
+        return 0;
     }
 
+    // First acquire or re-acquire after a lazy release at the previous batch boundary
+    if (g_vtcm_needs_release) {
+        GGMLHEXAGON_LOG_INFO("VTCM re-acquire (cache mode, batch boundary)");
+        g_vtcm_needs_release = 0;
+        HAP_compute_res_release_cached(g_compute_res_ctx_id);
+    } else {
+        GGMLHEXAGON_LOG_INFO("VTCM first acquire (cache mode)");
+    }
+
+    int err = HAP_compute_res_acquire_cached(g_compute_res_ctx_id, 1000000);
+    if (err != 0) {
+        GGMLHEXAGON_LOG_ERROR("Failed to acquire VTCM: 0x%08x", err);
+        return -1;
+    }
+    g_vtcm_valid = 1;
+    GGMLHEXAGON_LOG_INFO("VTCM acquired successfully");
     return 0;
+}
+
+// Release VTCM if the release callback flagged it (lazy release at batch boundary).
+// Called after ggmlop_dsp_execute_batch_ion finishes its op loop.
+static void ggmlop_vtcm_lazy_release(void) {
+    if (g_compute_res_ctx_id != 0 && g_vtcm_needs_release) {
+        g_vtcm_needs_release = 0;
+        g_vtcm_valid = 0;
+        HAP_compute_res_release_cached(g_compute_res_ctx_id);
+        GGMLHEXAGON_LOG_INFO("VTCM released (lazy, batch boundary)");
+    }
 }
 
 int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) {
@@ -673,6 +690,13 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             GGMLHEXAGON_LOG_ERROR("GGML_OP_NONE: no src0 data");
         }
         return AEE_SUCCESS;
+    }
+
+    /* Per-op path: acquire VTCM once here (cheap if already valid).
+     * mulmat/flash_attn no longer call ensure internally. */
+    if (ggmlop_ensure_vtcm_available() != 0) {
+        GGMLHEXAGON_LOG_ERROR("VTCM acquire failed for op %d", ggml_op);
+        return AEE_EFAILED;
     }
 
     switch (ggml_op) {
@@ -965,6 +989,14 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     const hex_op_desc * ops = (const hex_op_desc *)((const char *)hdr + hdr->ops_offset);
     const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
 
+    /* Per-batch VTCM acquire (matches Qualcomm htp/main.c opbatch pattern):
+     * acquire once here, all ops in the batch share it, release at batch
+     * boundary. Per-op mulmat/flash_attn no longer call ensure themselves. */
+    if (ggmlop_ensure_vtcm_available() != 0) {
+        GGMLHEXAGON_LOG_ERROR("VTCM acquire failed at batch entry, aborting batch");
+        return AEE_EFAILED;
+    }
+
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
@@ -1123,6 +1155,11 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             (void) *(volatile const int *)(base + last_off);
     }
     __asm__ __volatile__("" ::: "memory");
+
+    /* Lazy VTCM release: if the release callback flagged us during the batch,
+     * release now so other sessions (QNN/another GGML session) can use VTCM.
+     * If not flagged, keep it cached for the next batch (avoids re-acquire). */
+    ggmlop_vtcm_lazy_release();
 
     return AEE_SUCCESS;
 }
