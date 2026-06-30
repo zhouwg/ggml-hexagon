@@ -493,13 +493,12 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
     GGMLHEXAGON_LOG_INFO("offload_cgraph_type %d", offload_cgraph_type);
 
     GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
-    //g_dump_diag_info      = diag_info;
+    g_dump_diag_info      = diag_info;
     GGMLHEXAGON_LOG_INFO("diag_info %d", g_dump_diag_info);
 
-    //ggml_type_traits_dsp_init(1);
-    //re-use the IDL's input param
-    ggml_type_traits_dsp_init(diag_info);
-    GGMLHEXAGON_LOG_INFO("ggml_dsp_use_hvx %d", diag_info);
+    // diag_info is now used for dump_diag_info (log control), so force HVX on
+    ggml_type_traits_dsp_init(1);
+    GGMLHEXAGON_LOG_INFO("ggml_dsp_use_hvx %d", 1);
 
     if (g_thread_counts >= 1) {
         AEEResult result = worker_pool_reinit_with_threads(g_thread_counts);
@@ -556,6 +555,10 @@ unsigned int ggmlop_get_compute_res_ctx_id(void) {
 
 int ggmlop_is_hmx_available(void) {
     return g_hmx_available;
+}
+
+int ggmlop_is_dumpdiag_enabled(void) {
+    return g_dump_diag_info;
 }
 
 struct hmx_queue * ggmlop_get_hmx_queue(void) {

@@ -11,6 +11,9 @@
 // to wait for completion. While the HMX worker is running one tile, the
 // producer can prepare the next tile (DMA + dequant) on the HVX worker pool,
 // achieving DMA/HVX/HMX pipeline overlap.
+//
+// Note: GGMLHEXAGON_LOG_INFO/ERROR macros (from ggml-dsp.h) are used for
+// logging. Include ggml-dsp.h before this header in each .c file.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -73,7 +76,7 @@ static inline bool hmx_queue_push(struct hmx_queue * q, struct hmx_queue_desc d)
     unsigned int iw = q->idx_write;
 
     if (((iw + 1) & q->idx_mask) == ir) {
-        FARF(ALWAYS, "hmx-queue: push FAIL (queue full, iw=%u ir=%u)", iw, ir);
+        GGMLHEXAGON_LOG_INFO("hmx-queue: push FAIL (queue full, iw=%u ir=%u)", iw, ir);
         return false;
     }
 
@@ -124,7 +127,7 @@ static inline struct hmx_queue_desc hmx_queue_pop(struct hmx_queue * q) {
     unsigned int wait_cnt = 0;
     while (!atomic_load(&d->done)) {
         if ((++wait_cnt % 1000000) == 0) {
-            FARF(ALWAYS, "hmx-queue: pop STUCK ip=%u func=%p (waited %u iterations)",
+            GGMLHEXAGON_LOG_INFO("hmx-queue: pop STUCK ip=%u func=%p (waited %u iterations)",
                  ip, d->func, wait_cnt);
         }
         hex_pause();

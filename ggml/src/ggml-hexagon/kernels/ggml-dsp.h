@@ -2108,6 +2108,7 @@ GGML_API void           ggmlop_dsp_cache_flush_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_inval_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
+GGML_API int            ggmlop_is_dumpdiag_enabled(void);  // Returns 1 if dump_diag_info is enabled (controls log output)
 
 // Async HMX queue: dedicated worker thread holding the HMX hardware lock.
 // Returns NULL if HMX queue is not initialized (caller should fall back to

@@ -12,6 +12,7 @@
 
 #include <HAP_compute_res.h>
 
+#include "ggml-dsp.h"
 #include "hmx-queue.h"
 
 #define QURT_LOWEST_PRIO (254)
@@ -19,9 +20,9 @@
 static inline void hmx_lock(struct hmx_queue *q)
 {
     if (!q->hmx_locked) {
-        FARF(ALWAYS, "hmx-queue: hmx_lock BEFORE (rctx=%u)", q->hap_rctx);
+        GGMLHEXAGON_LOG_INFO("hmx-queue: hmx_lock BEFORE (rctx=%u)", q->hap_rctx);
         HAP_compute_res_hmx_lock(q->hap_rctx);
-        FARF(ALWAYS, "hmx-queue: hmx_lock AFTER");
+        GGMLHEXAGON_LOG_INFO("hmx-queue: hmx_lock AFTER");
         q->hmx_locked = true;
     }
 }
@@ -29,9 +30,9 @@ static inline void hmx_lock(struct hmx_queue *q)
 static inline void hmx_unlock(struct hmx_queue *q)
 {
     if (q->hmx_locked) {
-        FARF(ALWAYS, "hmx-queue: hmx_unlock BEFORE (rctx=%u)", q->hap_rctx);
+        GGMLHEXAGON_LOG_INFO("hmx-queue: hmx_unlock BEFORE (rctx=%u)", q->hap_rctx);
         HAP_compute_res_hmx_unlock(q->hap_rctx);
-        FARF(ALWAYS, "hmx-queue: hmx_unlock AFTER");
+        GGMLHEXAGON_LOG_INFO("hmx-queue: hmx_unlock AFTER");
         q->hmx_locked = false;
     }
 }
@@ -45,8 +46,8 @@ static inline void hmx_queue_process(struct hmx_queue *q, bool* killed) {
             enum hmx_queue_signal sig = (enum hmx_queue_signal) (unsigned int) d->func;
             switch (sig) {
                 case HMX_QUEUE_NOOP:    /* noop */;     break;
-                case HMX_QUEUE_KILL:    *killed = true; FARF(ALWAYS, "hmx-queue: KILL signal"); break;
-                case HMX_QUEUE_SUSPEND: FARF(ALWAYS, "hmx-queue: SUSPEND -> hmx_unlock"); hmx_unlock(q);  break;
+                case HMX_QUEUE_KILL:    *killed = true; GGMLHEXAGON_LOG_INFO("hmx-queue: KILL signal"); break;
+                case HMX_QUEUE_SUSPEND: GGMLHEXAGON_LOG_INFO("hmx-queue: SUSPEND -> hmx_unlock"); hmx_unlock(q);  break;
                 default:
                     hmx_lock(q);
                     d->func(d->data);
@@ -64,7 +65,7 @@ static inline void hmx_queue_process(struct hmx_queue *q, bool* killed) {
 static void hmx_queue_thread(void * arg) {
     struct hmx_queue * q = (struct hmx_queue *) arg;
 
-    FARF(ALWAYS, "hmx-queue: thread started");
+    GGMLHEXAGON_LOG_INFO("hmx-queue: thread started");
 
     bool killed = false;
 
@@ -83,7 +84,7 @@ static void hmx_queue_thread(void * arg) {
         hmx_queue_process(q, &killed);
     }
 
-    FARF(ALWAYS, "hmx-queue: thread stopped");
+    GGMLHEXAGON_LOG_INFO("hmx-queue: thread stopped");
 }
 
 struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
@@ -91,7 +92,7 @@ struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
 
     struct hmx_queue * q = (struct hmx_queue *) memalign(32, sizeof(struct hmx_queue));
     if (q == NULL) {
-        FARF(ERROR, "%s: failed to allocate hmx queue\n", __FUNCTION__);
+        GGMLHEXAGON_LOG_ERROR("%s: failed to allocate hmx queue\n", __FUNCTION__);
         return NULL;
     }
     memset(q, 0, sizeof(struct hmx_queue));
@@ -101,7 +102,7 @@ struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
 
     q->desc = (struct hmx_queue_desc *) memalign(64, capacity * sizeof(struct hmx_queue_desc));
     if (!q->desc) {
-        FARF(ERROR, "hmx-queue: failed to allocate HMX queue descriptors\n");
+        GGMLHEXAGON_LOG_ERROR("hmx-queue: failed to allocate HMX queue descriptors\n");
         free(q);
         return NULL;
     }
@@ -110,7 +111,7 @@ struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
     const size_t stack_size = HMX_QUEUE_THREAD_STACK_SIZE;
     q->stack = (unsigned char *) memalign(64, stack_size);
     if (!q->stack) {
-        FARF(ERROR, "hmx-queue: thread stack allocation failed (%zu bytes)", stack_size);
+        GGMLHEXAGON_LOG_ERROR("hmx-queue: thread stack allocation failed (%zu bytes)", stack_size);
         free(q->desc);
         free(q);
         return NULL;
@@ -135,14 +136,14 @@ struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
 
     int err = qurt_thread_create(&q->thread, &attr, hmx_queue_thread, q);
     if (err) {
-        FARF(ERROR, "hmx-worker: thread create failed (%d)", err);
+        GGMLHEXAGON_LOG_ERROR("hmx-worker: thread create failed (%d)", err);
         free(q->stack);
         free(q->desc);
         free(q);
         return NULL;
     }
 
-    FARF(HIGH, "hmx-queue: capacity %u\n", capacity);
+    GGMLHEXAGON_LOG_INFO("hmx-queue: capacity %u\n", capacity);
 
     return q;
 }
