@@ -617,7 +617,7 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - The implementation of the prebuilt libggmldsp-skel.so is complicated&dirty(I ported a fully ggml-dsp to Qualcomm's NPU side and supports fully quantized&none-quantized mulmat op, theoretically supports all ggml ops), so the open-source code of libggmldsp-skel.so can be found in JZ's ggml-hexagon.
 - [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
 - Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a concise&efficient solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native/pure FastRPC mechanism</b>, this concise solution will also reduce FastRPC overhead observably. Now we know [how to use Qualcomm's HMX(Hexagon Matrix eXtension) instructions in ggml correctly](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/ggml/src/ggml-hexagon/kernels/test-hmx.c), we can find that the performance of PP(Prompt Processing) in Qualcomm's official ggml-hexagon backend is <b>much faster</b> than the performance of PP in JZ's ggml-hexagonbackend <b>at the moment</b>, but I have confidence that the performance of PP&TG in JZ's ggml-hexagon will be faster in the future, AI experts and domain tech experts' help/effort based on branch self-build-jz is greatly welcomed.
-
+- AI large model company can use the self-build-jz branch for real testing instead of just running benchmarks if any AI large model company thinks their AI model is really good.
 
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
@@ -632,7 +632,7 @@ $ ./scripts/build-run-android.sh run_llamacli
 ```
 
 
-the following screenshot was created on 2026-06-29 in local branch self-build-jz and <b>can't be reproduced</b> in (remote) branch self-build-jz because local branch self-build-jz is under active development.
+the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build) and <b>can't be reproduced</b> in (remote) branch self-build-jz because local branch self-build-jz is under active development.
 
 <img width="1912" height="869" alt="Screenshot from 2026-06-29 22-49-31" src="https://github.com/user-attachments/assets/4a9cfb8f-20d6-455c-a9a4-99647c820868" />
 
@@ -649,6 +649,11 @@ $ ./scripts/build-run-android.sh run_llamacli
 
 ```
 
-the following screenshot was created on 2026-06-29 and <b>can be reproduced</b> in branch self-build. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
+the following screenshot <b>can be reproduced</b> in branch self-build.
+
+<img width="1727" height="599" alt="Screenshot from 2026-06-30 12-45-57" src="https://github.com/user-attachments/assets/93ab11e3-5b1c-4af1-8636-af5513ab9c7b" />
+
+
+the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build_qcom)and <b>can't be reproduced</b> in (remote) branch self-build-jz. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
 
 <img width="1688" height="595" alt="Screenshot from 2026-06-29 17-12-12" src="https://github.com/user-attachments/assets/52b54fa7-9b46-47da-b6c2-41e81940c4f5" />
