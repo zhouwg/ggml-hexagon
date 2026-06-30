@@ -194,15 +194,7 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     // Allocate VTCM for scratch pads
     g_compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
     if (g_compute_res_ctx_id == 0) {
-        GGMLHEXAGON_LOG_INFO("HAP_compute_res_acquire failed, falling back to HAP_request_VTCM\n");
-        /* Fallback to legacy VTCM allocation */
-        g_vtcm_base = HAP_request_VTCM(DEFAULT_VTCM_SIZE, 0);
-        if (g_vtcm_base != NULL) {
-            g_vtcm_size = DEFAULT_VTCM_SIZE;
-            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via HAP_request_VTCM: %zu bytes at %p\n", g_vtcm_size, g_vtcm_base);
-        } else {
-            GGMLHEXAGON_LOG_INFO("failed to allocate VTCM pool, will allocate on demand\n");
-        }
+        GGMLHEXAGON_LOG_ERROR("HAP_compute_res_acquire failed, no VTCM available\n");
     } else {
         /* Using VTCM acquired via HAP_compute_res */
         void * vtcm_ptr = NULL;
@@ -303,11 +295,6 @@ int ggmlop_dsp_close(remote_handle64 handle) {
         g_vtcm_base = NULL;
         g_vtcm_size = 0;
         GGMLHEXAGON_LOG_INFO("released compute resources");
-    } else if (g_vtcm_base != NULL) {
-        HAP_release_VTCM(g_vtcm_base);
-        g_vtcm_base = NULL;
-        g_vtcm_size = 0;
-        GGMLHEXAGON_LOG_INFO("released VTCM pool via HAP_request_VTCM");
     }
 
     return 0;

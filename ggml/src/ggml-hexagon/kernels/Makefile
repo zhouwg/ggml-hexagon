@@ -1,15 +1,15 @@
 #following vars already defined in CMakeLists.txt
 #HTP_ARCH_VERSION=v79
 #DEBUG_FLAG=-DNDEBUG -Wall
-#HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/6.2.0.1
 
 HEXAGON_COMPUTE=compute${HTP_ARCH_VERSION}
-HEXAGON_CC=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06/Tools/bin/hexagon-clang
-HEXAGON_CXX=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06/Tools/bin/hexagon-clang
+HEXAGON_CC=${HEXAGON_TOOLS_PATH}/Tools/bin/hexagon-clang
+HEXAGON_CXX=${HEXAGON_TOOLS_PATH}/Tools/bin/hexagon-clang
 
 TARGET=libggmldsp-skel.so
 
 $(info HEXAGON_SDK_PATH:${HEXAGON_SDK_PATH})
+$(info HEXAGON_TOOLS_PATH:${HEXAGON_TOOLS_PATH})
 $(info HTP_ARCH_VERSION:${HTP_ARCH_VERSION})
 $(info DEBUG_FLAG:${DEBUG_FLAG})
 $(info HEXAGON_COMPUTE:${HEXAGON_COMPUTE})

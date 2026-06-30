@@ -66,7 +66,6 @@
 
 #include "rpcmem.h"
 #include "remote.h"
-#include "os_defines.h"
 #include "AEEStdErr.h"
 #include "htp-drv.h"
 #include "HAP_power.h"
@@ -129,6 +128,10 @@ struct ggml_backend_hexagon_context;
 #if !defined (_WINDOWS)
 #pragma weak remote_system_request
 #pragma weak remote_session_control
+#pragma weak remote_handle_control
+#pragma weak remote_handle64_control
+#pragma weak fastrpc_mmap
+#pragma weak fastrpc_munmap
 #endif
 
 #ifndef ggmlop_URI

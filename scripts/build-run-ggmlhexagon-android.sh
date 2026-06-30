@@ -10,9 +10,7 @@
 
 # 3. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 4. performance comparison of Hexagon-cDSP/ggml with JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
-
-# 5. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 4. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
 # Jeff Zhou - zhouwg2000@gmail.com
 # GitHub:   - https://github.com/zhouwg/ggml-hexagon
@@ -61,20 +59,10 @@ OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
 
 #fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
 #fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
-#only for purpose of test/development
-#HEXAGON_SDK_VERSION=6.2.0.1
-#HEXAGON SDK 6.3.0.0 is required for htp v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
-#HEXAGON_SDK_VERSION=6.3.0.0
-#HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
-
-#the official Qualcomm Hexagon SDK tech docs can be found at:
-#https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
-#customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
-#this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
-#actually used in this project
-HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/6.2.0.1
-
-HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
+HEXAGON_SDK_VERSION=6.6.0.0
+HEXAGON_TOOLS_VERSION=19.0.07
+HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}
+HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}
 
 #supported htp arch version:
 #v68 --- Snapdragon 888
@@ -206,27 +194,27 @@ function check_android_phone()
 function check_and_download_hexagon_sdk()
 {
     is_hexagon_llvm_exist=1
-    if [ ! -f ${TOOLCHAIN_PATH}/Hexagon_SDK/6.2.0.1/tools/HEXAGON_Tools/8.8.06/NOTICE.txt ]; then
+    if [ ! -f ${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}/NOTICE.txt ]; then
         echo -e "${TEXT_RED}minimal-hexagon-sdk not exist...${TEXT_RESET}\n"
         is_hexagon_llvm_exist=0
     fi
 
     if [ ${is_hexagon_llvm_exist} -eq 0 ]; then
-        if [ -f ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz ]; then
-            echo -e "minimal-hexagon-sdk-6.2.0.1.xz already exist\n"
+        if [ -f ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz ]; then
+            echo -e "hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz already exist\n"
         else
-            echo -e "begin downloading minimal-hexagon-sdk-6.2.0.1.xz \n"
-            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz https://github.com/zhouwg/toolchain/raw/refs/heads/master/minimal-hexagon-sdk-6.2.0.1.xz
+            echo -e "begin downloading hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz \n"
+            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz
             if [ $? -ne 0 ]; then
-                printf "failed to download minimal-hexagon-sdk-6.2.0.1.xz\n"
+                printf "failed to download hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz\n"
                 exit 1
             fi
         fi
 
-        echo -e "begin decompressing minimal-hexagon-sdk-6.2.0.1.xz \n"
-        xzcat ${TOOLCHAIN_PATH}/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz | tar -C ${TOOLCHAIN_PATH}/Hexagon_SDK/ -xf -
+        echo -e "begin decompressing hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz \n"
+        xzcat ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz | tar -C ${TOOLCHAIN_PATH}/Hexagon_SDK/ -xf -
         if [ $? -ne 0 ]; then
-            printf "failed to decompress minimal-hexagon-sdk-6.2.0.1.xz\n"
+            printf "failed to decompress hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz\n"
             exit 1
         fi
         printf "install minimal-hexagon-sdk successfully\n\n"
@@ -356,7 +344,7 @@ function build_arm64
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #upload the new libggmldsp-skel.so on device side
@@ -375,7 +363,7 @@ function build_arm64_debug
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #upload the new libggmldsp-skel.so on device side
@@ -688,10 +676,10 @@ function run_llamacli()
 {
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} -mg ${hexagon_backend} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} -mg ${hexagon_backend} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -702,11 +690,11 @@ function run_llamabench()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench  -mg ${hexagon_backend} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
+               && ${REMOTE_PATH}/llama-bench  -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -mg ${hexagon_backend} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
 }
 
 
@@ -714,10 +702,10 @@ function run_threadsafety()
 {
     prepare_run_on_phone test-thread-safety
 
-    echo "${REMOTE_PATH}/test-thread-safety -np 2 -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
+    echo "${REMOTE_PATH}/test-thread-safety -np 2 -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/test-thread-safety -np 1 -mg ${hexagon_backend} -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
+               && ${REMOTE_PATH}/test-thread-safety -np 1 -m ${GGUF_MODEL_NAME} -p \"hello,world\" -n 256 -ngl 99 "
 
 }
 
@@ -878,13 +866,11 @@ function show_usage()
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli                 <main_gpu_index>"
-    echo "  $0 run_llamabench               <main_gpu_index>"
-    echo "  $0 run_threadsafety             <main_gpu_index>"
-    echo "  $0 run_perfop     MUL_MAT       <main_gpu_index> (verify performance of MUL_MAT)"
-    echo "  $0 run_testop     MUL_MAT       <main_gpu_index> (verify accuracy    of MUL_MAT)"
-    echo "  $0 run_perfop     MUL_MAT       0   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify performance of MUL_MAT on cDSP)"
-    echo "  $0 run_testop     MUL_MAT       0   mulmat_algotype(0,1,2,3,4,5,6,31,32,33)   (verify accuracy    of MUL_MAT on cDSP)"
+    echo "  $0 run_llamacli                 "
+    echo "  $0 run_llamabench               "
+    echo "  $0 run_threadsafety             "
+    echo "  $0 run_perfop     MUL_MAT       (verify performance of MUL_MAT)"
+    echo "  $0 run_testop     MUL_MAT       (verify accuracy    of MUL_MAT)"
 
     echo -e "\n\n\n"
 }
@@ -930,11 +916,9 @@ elif [ $# == 1 ]; then
         run_test-ops
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        hexagon_backend=0
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
-        hexagon_backend=0
         run_llamabench
         exit 0
     else
@@ -947,28 +931,23 @@ elif [ $# == 2 ]; then
 
     if [ "$1" == "run_testop" ]; then
         opname=$2
-        mulmat_algotype=30
-        hexagon_backend=0
+        mulmat_algotype=32
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
         opname=$2
-        mulmat_algotype=30
-        hexagon_backend=0
+        mulmat_algotype=32
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        hexagon_backend=$2
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
-        mulmat_algotype=30
-        hexagon_backend=$2
+        mulmat_algotype=32
         run_llamabench
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
-        mulmat_algotype=30
-        hexagon_backend=$2
+        mulmat_algotype=32
         run_threadsafety
         exit 0
     else
@@ -976,34 +955,15 @@ elif [ $# == 2 ]; then
         exit 1
     fi
 elif [ $# == 3 ]; then
-    if [ "$1" == "run_testop" ]; then
-        opname=MUL_MAT
-        mulmat_algotype=32
-        hexagon_backend=$3
-        run_test-op
-        exit 0
-    elif [ "$1" == "run_perfop" ]; then
-        opname=MUL_MAT
-        mulmat_algotype=32
-        hexagon_backend=$3
-        run_perf-op
-        exit 0
-    else
-        show_usage
-        exit 1
-    fi
-elif [ $# == 4 ]; then
     if [ "$1" == "run_perfop" ]; then
-        opname=MUL_MAT
-        hexagon_backend=0
-        mulmat_algotype=$4
+        opname=$2
+        mulmat_algotype=$3
         check_mulmat_algotype
         run_perf-op
         exit 0
     elif [ "$1" == "run_testop" ]; then
-        opname=MUL_MAT
-        hexagon_backend=0
-        mulmat_algotype=$4
+        opname=$2
+        mulmat_algotype=$3
         check_mulmat_algotype
         run_test-op
         exit 0

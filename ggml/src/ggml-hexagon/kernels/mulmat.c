@@ -3166,8 +3166,10 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
         int32_t M_sync = src0->ne[1];
         int32_t N_sync = src1->ne[1];
         int32_t K_sync = src0->ne[0];
+#if 0
         FARF(ALWAYS, "SYNC timing(us): M=%d N=%d K=%d | total=%lld",
              M_sync, N_sync, K_sync, (long long)(ggml_time_us() - t_sync_begin));
+#endif
     }
 
     return 0;

@@ -95,20 +95,23 @@ typedef struct hex_batch_hdr {
 #define HEX_TENSOR_ALIGN    128
 #define HEX_OP_ALIGN        128
 
+int ggmlop_dsp_add(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
 int ggmlop_dsp_sub(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_mul(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_div(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_rmsnorm(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_rope(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
-int gggmlop_dsp_softmax(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
-int gggmlop_dsp_silu(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_scale(remote_handle64 _h, const dsptensor* src0, dsptensor* dst) ;
-int gggmlop_dsp_cpy(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_getrows(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_concat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_repeat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int gggmlop_dsp_diag_mask_inf(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_mul(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_div(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_mulmat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_rmsnorm(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_rope(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
+int ggmlop_dsp_softmax(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
+int ggmlop_dsp_silu(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_scale(remote_handle64 _h, const dsptensor* src0, dsptensor* dst) ;
+int ggmlop_dsp_cpy(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_getrows(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_concat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_repeat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
+int ggmlop_dsp_diag_mask_inf(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
 int ggmlop_dsp_flash_attn(remote_handle64 h, const dsptensor * q, const dsptensor * k, const dsptensor * v, const dsptensor * mask, dsptensor * dst);
+int ggmlop_dsp_test_hmx(remote_handle64 h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst);
 
 #ifdef  __cplusplus
 }
