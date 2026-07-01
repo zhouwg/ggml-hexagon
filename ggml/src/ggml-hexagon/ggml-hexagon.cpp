@@ -4,7 +4,7 @@
  * Qualcomm Hexagon SDK and reference tech guides could be found at:
  * https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools
  *
- * this single-source-file or self-contained implementation of ggml-hexagon backend has 4 sections:
+ * this single-source-file or self-contained implementation of ggml-hexagon backend has 5 sections:
  * section-1  forward/prototype declaration, global vars, macros, data structures
  * section-2  internal troubleshooting function/class
  * section-3  general helper function
@@ -134,9 +134,6 @@ struct ggml_backend_hexagon_context;
 #pragma weak fastrpc_munmap
 #endif
 
-#ifndef ggmlop_URI
-#define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"
-#endif
 // =================================================================================================
 //  section-1: data type, data structure, global vars
 // =================================================================================================
@@ -149,17 +146,14 @@ using pfn_rpc_mem_to_fd                         = int (*)(void *);
 typedef int  (* notify_callback_fn)(void * context, int domain, int session, remote_rpc_status_flags_t status);
 typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor * src0, const dsptensor * src1, dsptensor * dst);
 
-// Forward declaration for test function
-static int  test_hmx_ap(ggml_backend_hexagon_context * ctx);
-static int  ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
-
-// Forward declarations of buffer-type interface functions
-static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
-static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
-           ggml_backend_buffer_type_t buft, size_t size);
-static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
-static size_t ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
-static bool ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
+// Forward declaration
+static int                   test_hmx_ap(ggml_backend_hexagon_context * ctx);
+static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
+static size_t                ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
+static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
+static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
+static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
+static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size);
 
 struct ggmlhexagon_task {
     int32 op_type;
@@ -168,7 +162,7 @@ struct ggmlhexagon_task {
     ggml_tensor * dst;
 };
 
-enum hexagon_dsp_type {
+enum qcom_dsp_type {
     HEXAGON_ADSP    = 0,
     HEXAGON_MDSP    = 1,
     HEXAGON_SDSP    = 2,
@@ -198,28 +192,6 @@ enum qcom_chipset_soc_model {
     SM8850 = 73,  // v81, SD 8 Elite Gen 5
 };
 
-//borrowed from Android source code, might not be accurate
-enum ion_heap_ids {
-    INVALID_HEAP_ID             = -1,
-    ION_CP_MM_HEAP_ID           = 8,
-    ION_SECURE_HEAP_ID          = 9,
-    ION_SECURE_DISPLAY_HEAP_ID  = 10,
-    ION_CP_MFC_HEAP_ID          = 12,
-    ION_SPSS_HEAP_ID            = 13,
-    ION_CP_WB_HEAP_ID           = 16,
-    ION_CAMERA_HEAP_ID          = 20,
-    ION_SYSTEM_CONTIG_HEAP_ID   = 21,
-    ION_ADSP_HEAP_ID            = 22,
-    ION_PIL1_HEAP_ID            = 23,
-    ION_SF_HEAP_ID              = 24,
-    ION_SYSTEM_HEAP_ID          = 25,
-    ION_PIL2_HEAP_ID            = 26,
-    ION_QSECOM_HEAP_ID          = 27,
-    ION_AUDIO_HEAP_ID           = 28,
-    ION_MM_FIRMWARE_HEAP_ID     = 29,
-    ION_HEAP_ID_RESERVED        = 31
-};
-
 struct qcom_socinfo {
     uint32_t soc_model;
     size_t htp_arch;
@@ -245,11 +217,6 @@ struct ggml_backend_hexagon_context {
     struct ggml_backend * backend;
     struct qcom_socinfo           socinfo;
 
-    //quantize data -> fp32
-    std::unique_ptr<char[]> work_data;
-    std::vector<std::future<void>> tasks;
-    size_t work_size;
-    size_t desired_size;
     int n_threads;
 
     //Hexagon resource management for the general approach through Hexagaon cDSP
@@ -302,7 +269,7 @@ struct hexagon_appcfg_t {
     int profiler_counts;        // threshold of counts in profiler
     int thread_counts;          // thread_counts on cDSP side
     int mulmat_algotype;        // algorithm type of mulmat on cDSP side
-    int mulmat_min_n;            // minimum N (batch size) to offload quantized MUL_MAT to DSP
+    int mulmat_min_n;           // minimum N (batch size) to offload quantized MUL_MAT to DSP
     int offload_cgraph_type;    // offload type on AP side
     int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on cDSP side
     int ggml_dsp_use_hvx;       // enable/disable HVX-optimized quantize_row & vec_dot on cDSP side
@@ -337,29 +304,8 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .version                = {"0.99.3"},
 };
 
-// Track tensors repacked in set_tensor to skip Phase 4.5 and mulmat_min_n check
-static std::unordered_set<const void *> g_set_tensor_repacked;
-
-static bool ggmlhexagon_use_ion_mempool() {
-    return true;
-}
-
 //supported Snapdragon devices with Hexagon DSP
 static struct qcom_socinfo g_hexagon_soc_info_table[] = {
-        /* Qualcomm SnapDragon 7 Gen 1 */
-        {
-                .soc_model         = SM7450,
-                .htp_arch          = V69,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 7 Gen 1"},
-
-        /* Qualcomm SnapDragon 888 */
-        {
-                .soc_model         = SM8350,
-                .htp_arch          = V68,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 888 "},
-
         /* Qualcomm SnapDragon 8 Gen 1 */
         {
                 .soc_model         = SM8450,
@@ -407,6 +353,9 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
 // the constructor can perform DSP initialization (ala qcom's ggml_hexagon_session).
 // g_hexagon_mgr holds owning pointers for legacy by-index lookups (e.g. devname).
 static struct ggml_backend_hexagon_context * g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICES] = { nullptr };
+
+// Track tensors repacked in set_tensor to skip Phase 4.5 and mulmat_min_n check
+static std::unordered_set<const void *> g_set_tensor_repacked;
 
 static domain hexagon_supported_domains[] = {
         {ADSP_DOMAIN_ID, ADSP_DOMAIN},
@@ -686,6 +635,10 @@ static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend
     }
 #endif
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+}
+
+static bool ggmlhexagon_use_ion_mempool() {
+    return true;
 }
 
 static void ggmlhexagon_get_processname(char * p_name) {
@@ -2342,10 +2295,6 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
 
     GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
     ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
-    // NOTE: Do NOT use RPCMEM_TRY_MAP_STATIC here!
-    // It pre-registers the ION fd with FastRPC kernel driver,
-    // which causes implicit fd_mmap_create on every invoke.
-    // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
     if (2 == g_hexagon_appcfg.offload_cgraph_type) {
         ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
     } else {
@@ -2379,18 +2328,10 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                                  ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
         }
 
-        // NOTE: Do NOT call remote_register_buf() here!
-        // It registers the ION fd with FastRPC kernel driver, which causes
-        // implicit fd_mmap_create on every subsequent invoke.
-        // This conflicts with DSP-side HAP_mmap2(fd) (AEE_EALREADY).
-        // Strategy: let DSP map via HAP_mmap2 exclusively
-        // remote_register_buf(ctx->rpc_mempool, ctx->rpc_mempool_len, ctx->rpc_mempool_handle);
-
         // Register ION pool on DSP side via pure-scalar IDL call.
         // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
         // implicit fd_mmap_create when dsptensor.data pointers are passed.
         // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
-        // same as QCOM's htp_iface_mmap() in htp/main.c.
         uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
         uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
         uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
@@ -2626,18 +2567,12 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
         //make llama-bench happy
         GGMLHEXAGON_LOG_VERBOSE("vtcm_count %d", vtcm_count);
         GGMLHEXAGON_LOG_VERBOSE("vtcm_page %d", vtcm_page);
-        //TODO:here hmx infos in AP side will confuse AI Agent
-        //GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d", hmx_depth);
-        //GGMLHEXAGON_LOG_VERBOSE("hmx_spatial %d", hmx_spatial);
         GGMLHEXAGON_LOG_VERBOSE("hvx_support_128b %d", hvx_support_128b);
         GGMLHEXAGON_LOG_VERBOSE("unsigned pd supported %d", ggmlhexagon_get_unsignedpd_support());
         GGMLHEXAGON_LOG_VERBOSE("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
     } else {
         GGMLHEXAGON_LOG_INFO("vtcm_count %d", vtcm_count);
         GGMLHEXAGON_LOG_INFO("vtcm_page %d", vtcm_page);
-        //TODO:here hmx infos in AP side will confuse AI Agent
-        //GGMLHEXAGON_LOG_INFO("hmx_depth %d", hmx_depth);
-        //GGMLHEXAGON_LOG_INFO("hmx_spatial %d", hmx_spatial);
         GGMLHEXAGON_LOG_INFO("hvx_support_128b %d", hvx_support_128b);
         GGMLHEXAGON_LOG_INFO("unsigned pd supported %d", ggmlhexagon_get_unsignedpd_support());
         GGMLHEXAGON_LOG_INFO("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
@@ -2877,11 +2812,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
     : device(dev_id),
       backend(nullptr),
       socinfo{},
-      work_data(nullptr),
-      tasks{},
-      work_size(0),
-      desired_size(0),
-      n_threads(8),
+      n_threads(6),
       rpc_mempool_capacity(0),
       rpc_mempool_len(0),
       rpc_mempool_usage(0),
@@ -4284,7 +4215,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         GGMLHEXAGON_LOG_WARN("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
         return nullptr;
     } else {
-        //GGMLHEXAGON_LOG_DEBUG("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
+        GGMLHEXAGON_LOG_DEBUG("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
     }
     // Report allocation result and current mempool state
     if (buffer_ctx->is_ion_buffer) {
@@ -4306,12 +4237,9 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
     return ggml_backend_buffer_init(buft, ggml_backend_hexagon_buffer_interface, buffer_ctx, size);
 }
 
-/**
- * @param buft   pointer to the buffer type context
- * @return       alignment requirement in bytes
- */
 static size_t ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft) {
     GGML_UNUSED(buft);
+    //Alignment requirement in bytes
     return 128;
 }
 
@@ -4389,7 +4317,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
 
 // MODE 1: FastRPC-based op-batch (support has been removed)
 
-// Mode 2: ION-based op-batch — packs all ops into ION shared memory,
+// MODE 2: ION-based op-batch — packs all ops into ION shared memory,
 //         passes only (offset, size) via FastRPC as doorbell.
 //         Avoids FastRPC scatter-gather limits entirely.
 static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t backend, struct ggml_cgraph * cgraph) {

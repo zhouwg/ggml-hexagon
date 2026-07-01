@@ -88,13 +88,13 @@ HTP_ARCH_VERSIONS="v79"
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 
 #610 MB, download manually
-#GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
+GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
 
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
-#GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
+GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-#GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="You are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
@@ -445,8 +445,8 @@ function build_arm64_qcom
     echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
     echo "./scripts/build-run-android.sh run_testop MUL_MAT"
     echo "./scripts/build-run-android.sh run_testops"
-    echo "./scripts/build-run-android.sh run_llamacli 0"
-    echo "./scripts/build-run-android.sh run_llamabench 0"
+    echo "./scripts/build-run-android.sh run_llamacli"
+    echo "./scripts/build-run-android.sh run_llamabench"
 }
 
 
@@ -568,13 +568,13 @@ function check_prebuilt_models()
     fi
 
     #1.12 GiB
-    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
+    #check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
     #check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
 
     #2.9 GiB
-    #check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
+    check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
 
     set -e
 }
