@@ -1100,42 +1100,24 @@ void core_dot_chunk_fp16(__fp16 *restrict output, const __fp16 *restrict activat
 // - n_rows: chunk rows (N dimension)
 // - n_cols: chunk cols (M dimension)
 // - col_stride: M (dst row count)
+
+// Forward declarations: range versions defined below
+static void transfer_output_chunk_fp16_to_fp32_range_hvx(
+    float *restrict dst, const __fp16 *restrict src,
+    int n_rows, int n_cols, int col_stride,
+    int start_row, int end_row);
+static void transfer_output_chunk_fp16_to_fp32_range(
+    float *restrict dst, const __fp16 *restrict src,
+    int n_rows, int n_cols, int col_stride,
+    int start_row, int end_row);
+
+// algotype=30 has no pipeline delay between HMX compute and writeback.
+// syncht does not drain the HMX pipeline (verified: still produces garbled output).
+// Scalar reads provide the necessary delay for HMX stores to reach VTCM.
+// algotype=32 calls the HVX version directly (has double-buffering delay).
 void transfer_output_chunk_fp16_to_fp32(float *restrict dst, const __fp16 *restrict src,
                                                 int n_rows, int n_cols, int col_stride) {
-    // HMX output uses interleaved format (same layout as activation):
-    // output_tile[r, j] is at tile[(r/2)*64 + j*2 + (r%2)]
-    // We read output_tile[r, j] and write to dst[r * col_stride + (c + j)]
-
-    const int n_row_tiles = (n_rows + HMX_FP16_TILE_N_ROWS - 1) / HMX_FP16_TILE_N_ROWS;
-    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
-
-    // Process all rows in pairs (interleaved format stores row pairs)
-    for (int r = 0; r < n_rows; r += 2) {
-        int r0 = r / HMX_FP16_TILE_N_ROWS;  // chunk-relative N tile index
-        int intra_tile_row = r % HMX_FP16_TILE_N_ROWS;  // intra-tile row index (0-31)
-        int row_pair = intra_tile_row / 2;  // row pair index (0-15)
-        // For row r (even): offset = row_pair * 64
-        // For row r+1 (odd): offset = row_pair * 64 + 32
-
-        for (int c = 0; c < n_cols; c += HMX_FP16_TILE_N_COLS) {
-            int c0 = c / HMX_FP16_TILE_N_COLS;  // chunk-relative M tile index
-            int tile_idx = r0 * n_col_tiles + c0;  // chunk-relative tile index
-            const __fp16 *tile = src + tile_idx * HMX_FP16_TILE_N_ELMS;
-
-            // Interleaved format: tile[(row_pair)*64 + j*2 + row_offset]
-            // - row r (even): row_offset = 0 -> tile[row_pair * 64 + j*2]
-            // - row r+1 (odd): row_offset = 1 -> tile[row_pair * 64 + j*2 + 1]
-            int j_max = (c + HMX_FP16_TILE_N_COLS <= n_cols) ? HMX_FP16_TILE_N_COLS : (n_cols - c);
-            for (int j = 0; j < j_max; ++j) {
-                dst[(c + j) + r * col_stride] = (float)tile[row_pair * 64 + j * 2];
-            }
-            if (r + 1 < n_rows) {
-                for (int j = 0; j < j_max; ++j) {
-                    dst[(c + j) + (r + 1) * col_stride] = (float)tile[row_pair * 64 + j * 2 + 1];
-                }
-            }
-        }
-    }
+    transfer_output_chunk_fp16_to_fp32_range(dst, src, n_rows, n_cols, col_stride, 0, n_rows);
 }
 
 // Helper: convert float to __fp16 via ggml_fp16_t bit pattern
@@ -2032,6 +2014,68 @@ static void convert_activation_bf16_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst,
 // Parallel data conversion helpers for VTCM+HMX
 // ============================================================
 
+// HVX helpers for output writeback (from htp/hvx-base.h)
+static inline HVX_Vector hvx_vec_splat_f16_hmx(_Float16 v) {
+    union { __fp16 f; uint16_t i; } u = { .f = v };
+    return Q6_Vh_vsplat_R(u.i);
+}
+
+static inline void hvx_vec_store_u_hmx(void * restrict dst, uint32_t n, HVX_Vector v) {
+    v = Q6_V_vlalign_VVR(v, v, (size_t) dst);
+    uint32_t left_off  = (size_t) dst & 127;
+    uint32_t right_off = left_off + n;
+    HVX_VectorPred ql_not = Q6_Q_vsetq_R((size_t) dst);
+    HVX_VectorPred qr     = Q6_Q_vsetq2_R(right_off);
+    if (right_off > 128) {
+        Q6_vmem_QRIV(qr, (HVX_Vector *) dst + 1, v);
+        qr = Q6_Q_vcmp_eq_VbVb(v, v);
+    }
+    ql_not = Q6_Q_or_QQn(ql_not, qr);
+    Q6_vmem_QnRIV(ql_not, (HVX_Vector *) dst, v);
+}
+
+// HVX-based output writeback: reads HMX output tiles from VTCM via HVX loads
+// (coherent with HMX, eliminates racy dcinva) and stores fp32 to dst in DDR.
+// Same interface as the scalar version below.
+static void transfer_output_chunk_fp16_to_fp32_range_hvx(
+    float *restrict dst, const __fp16 *restrict src,
+    int n_rows, int n_cols, int col_stride,
+    int start_row, int end_row) {
+
+    const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
+    const HVX_Vector one = hvx_vec_splat_f16_hmx(1.0f);
+
+    for (int r = start_row; r < end_row; r += 2) {
+        const int r0 = r / HMX_FP16_TILE_N_ROWS;
+        const int row_pair = (r % HMX_FP16_TILE_N_ROWS) / 2;
+        const bool has_pair = (r + 1 < end_row) && (r + 1 < n_rows);
+
+        float *row0_dst = dst + (size_t)r * col_stride;
+
+        for (int c = 0; c < n_cols; c += HMX_FP16_TILE_N_COLS) {
+            const int c0 = c / HMX_FP16_TILE_N_COLS;
+            const int tile_idx = r0 * n_col_tiles + c0;
+            const __fp16 *tile = src + (size_t)tile_idx * HMX_FP16_TILE_N_ELMS;
+
+            // HVX load: 64 interleaved fp16 (row r and row r+1 alternating)
+            HVX_Vector v = ((const HVX_Vector *)tile)[row_pair];
+
+            // fp16 -> fp32 with de-interleave: lo = row r, hi = row r+1
+            HVX_VectorPair vp = Q6_Wqf32_vmpy_VhfVhf(v, one);
+            HVX_Vector lo_fp32 = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(vp));
+
+            int valid = (c + HMX_FP16_TILE_N_COLS <= n_cols) ? HMX_FP16_TILE_N_COLS : (n_cols - c);
+            hvx_vec_store_u_hmx(row0_dst + c, valid * sizeof(float), lo_fp32);
+
+            if (has_pair) {
+                HVX_Vector hi_fp32 = Q6_Vsf_equals_Vqf32(Q6_V_hi_W(vp));
+                float *row1_dst = dst + (size_t)(r + 1) * col_stride;
+                hvx_vec_store_u_hmx(row1_dst + c, valid * sizeof(float), hi_fp32);
+            }
+        }
+    }
+}
+
 // Range-aware output writeback: only processes rows [start_row, end_row)
 static void transfer_output_chunk_fp16_to_fp32_range(float *restrict dst, const __fp16 *restrict src,
                                                       int n_rows, int n_cols, int col_stride,
@@ -2174,7 +2218,7 @@ typedef struct {
 
 static void output_wb_worker(void *data) {
     output_wb_task_t *t = (output_wb_task_t *)data;
-    transfer_output_chunk_fp16_to_fp32_range(
+    transfer_output_chunk_fp16_to_fp32_range_hvx(
         t->dst, t->src, t->n_rows, t->n_cols, t->col_stride,
         t->start_row, t->end_row);
     if (t->synctoken) worker_pool_synctoken_jobdone(t->synctoken);
@@ -2693,8 +2737,8 @@ typedef struct {
 
 static void output_writeback_mt_worker(void * data) {
     output_writeback_mt_td_t * td = (output_writeback_mt_td_t *) data;
-    transfer_output_chunk_fp16_to_fp32_range(td->dst, td->vtcm_src, td->n_rows, td->n_cols,
-                                             td->dst_row_stride, td->r_start, td->r_end);
+    transfer_output_chunk_fp16_to_fp32_range_hvx(td->dst, td->vtcm_src, td->n_rows, td->n_cols,
+                                                  td->dst_row_stride, td->r_start, td->r_end);
     worker_pool_synctoken_jobdone(td->synctoken);
 }
 
@@ -2707,19 +2751,19 @@ static void output_writeback_mt(float *           dst,
                                 int               dst_row_stride,
                                 int               n_threads) {
     if (n_threads <= 1 || n_rows <= HMX_FP16_TILE_N_ROWS) {
-        transfer_output_chunk_fp16_to_fp32_range(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
+        transfer_output_chunk_fp16_to_fp32_range_hvx(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
         return;
     }
 
     // Split rows into n_threads sub-ranges, each sub-range aligned to 2 rows
-    // (transfer_output_chunk_fp16_to_fp32_range iterates r+=2).
+    // (transfer_output_chunk_fp16_to_fp32_range_hvx iterates r+=2).
     int rows_per_thread = (n_rows + n_threads - 1) / n_threads;
     rows_per_thread = (rows_per_thread + 1) & ~1;  // align up to 2
     if (rows_per_thread < 2) rows_per_thread = 2;
 
     int actual_n = (n_rows + rows_per_thread - 1) / rows_per_thread;
     if (actual_n <= 1) {
-        transfer_output_chunk_fp16_to_fp32_range(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
+        transfer_output_chunk_fp16_to_fp32_range_hvx(dst, vtcm_src, n_rows, n_cols, dst_row_stride, 0, n_rows);
         return;
     }
 
@@ -2751,8 +2795,8 @@ static void output_writeback_mt(float *           dst,
     }
 
     // Main thread: t==0
-    transfer_output_chunk_fp16_to_fp32_range(td[0].dst, td[0].vtcm_src, td[0].n_rows, td[0].n_cols,
-                                             td[0].dst_row_stride, td[0].r_start, td[0].r_end);
+    transfer_output_chunk_fp16_to_fp32_range_hvx(td[0].dst, td[0].vtcm_src, td[0].n_rows, td[0].n_cols,
+                                                  td[0].dst_row_stride, td[0].r_start, td[0].r_end);
 
     worker_pool_synctoken_wait(&token);
 }
@@ -3278,8 +3322,8 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     // Lightweight timing instrumentation: accumulate per-stage us, output 1 line at exit
     int64_t t_pipe_begin = ggml_time_us();
     int64_t t_pipe_vtcm  = 0;
-    int64_t acc_dma_pop = 0, acc_dequant = 0, acc_dccleana = 0;
-    int64_t acc_hmx_pop = 0, acc_dcinva = 0, acc_writeback = 0;
+    int64_t acc_dma_pop = 0, acc_dequant = 0;
+    int64_t acc_hmx_pop = 0, acc_writeback = 0;
     int64_t acc_dma_push = 0;
     size_t  n_M_chunks_total = 0;
     int64_t _t0;
@@ -3376,8 +3420,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     volatile HVX_Vector *pv_scales = (volatile HVX_Vector *) vtcm_scales;
     pv_scales[0] = v_scale;
     pv_scales[1] = Q6_V_vzero();
-    // Flush HVX-written scales to VTCM backing store for HMX visibility
-    ggmlop_dsp_cache_clean_range(vtcm_scales, scales_size);
 
     const size_t n_dot_tiles = K / HMX_FP16_TILE_N_COLS;
     const size_t src0_row_stride = src0->nb[1];
@@ -3446,10 +3488,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     transfer_activation_chunk_fp32_to_fp16(vtcm_activation, vtcm_act_fp32, N_rows, K, K);
                     PIPE_DBG("PIPE act_convert: done");
                 }
-                // Flush HVX-written activation to VTCM backing store for HMX visibility
-                _t0 = ggml_time_us();
-                ggmlop_dsp_cache_clean_range(vtcm_activation, act_area_size);
-                acc_dccleana += ggml_time_us() - _t0;
 
                 // Compute number of M chunks
                 const size_t n_M_chunks = (M_chunk_n_cols > 0) ? ((M + M_chunk_n_cols - 1) / M_chunk_n_cols) : 0;
@@ -3493,14 +3531,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                                       (int)M_cols_0, K, src0_row_stride,
                                       weight_dequant_fn, n_threads, src0_needs_fp32_buf);
                     acc_dequant += ggml_time_us() - _t0;
-
-                    // Drain HVX store pipeline, then flush to VTCM backing store for HMX
-                    if (M_col_tiles_0 > 0) {
-                        (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[0] + (M_col_tiles_0 * n_dot_tiles - 1) * HMX_FP16_TILE_N_ELMS);
-                    }
-                    _t0 = ggml_time_us();
-                    ggmlop_dsp_cache_clean_range(vtcm_weight_fp16[0], weight_fp16_size);
-                    acc_dccleana += ggml_time_us() - _t0;
 
                     // DEBUG: print first elements of weight_fp16 and activation
                     PIPE_DBG("DEBUG prologue: M_cols_0=%zu K=%d n_dot_tiles=%zu M_col_tiles_0=%zu N_row_tiles=%zu",
@@ -3568,14 +3598,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                                           weight_dequant_fn, n_threads, src0_needs_fp32_buf);
                         acc_dequant += ggml_time_us() - _t0;
                         PIPE_DBG("PIPE wt_dequant[%zu]: done", i + 1);
-                        // Drain HVX store pipeline, then flush to VTCM backing store for HMX
-                        const size_t n_wt_tiles_p1 = ((M_cols_p1 + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS) * n_dot_tiles;
-                        if (n_wt_tiles_p1 > 0) {
-                            (void) *(volatile HVX_Vector *)(vtcm_weight_fp16[(i + 1) % 2] + (n_wt_tiles_p1 - 1) * HMX_FP16_TILE_N_ELMS);
-                        }
-                        _t0 = ggml_time_us();
-                        ggmlop_dsp_cache_clean_range(vtcm_weight_fp16[(i + 1) % 2], weight_fp16_size);
-                        acc_dccleana += ggml_time_us() - _t0;
                     }
 
                     // 2. DMA push W[i+2] (if i+2 < n_M_chunks)
@@ -3612,10 +3634,6 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
                     _t0 = ggml_time_us();
                     hmx_queue_pop(hmx_q);
                     acc_hmx_pop += ggml_time_us() - _t0;
-                    // Invalidate stale L1 lines so HVX reads fresh HMX output from backing store
-                    _t0 = ggml_time_us();
-                    ggmlop_dsp_cache_inval_range(vtcm_output[i % 2], output_area_size);
-                    acc_dcinva += ggml_time_us() - _t0;
 
                     // DEBUG: print output tile[0] first 8 fp16 elements after HMX compute
                     if (i == 0) {
@@ -3664,11 +3682,11 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
     {
         int64_t t_total = ggml_time_us() - t_pipe_begin;
         int64_t t_vtcm  = t_pipe_vtcm - t_pipe_begin;
-        FARF(ALWAYS, "PIPE timing(us): M=%d N=%d K=%d nMc=%zu | total=%lld vtcm=%lld dma_pop=%lld dequant=%lld dccleana=%lld hmx_pop=%lld dcinva=%lld wb=%lld dma_push=%lld",
+        FARF(ALWAYS, "PIPE timing(us): M=%d N=%d K=%d nMc=%zu | total=%lld vtcm=%lld dma_pop=%lld dequant=%lld hmx_pop=%lld wb=%lld dma_push=%lld",
              M, N, K, n_M_chunks_total,
              (long long)t_total, (long long)t_vtcm,
-             (long long)acc_dma_pop, (long long)acc_dequant, (long long)acc_dccleana,
-             (long long)acc_hmx_pop, (long long)acc_dcinva, (long long)acc_writeback,
+             (long long)acc_dma_pop, (long long)acc_dequant,
+             (long long)acc_hmx_pop, (long long)acc_writeback,
              (long long)acc_dma_push);
     }
     PIPE_DBG("HMX pipeline end");
