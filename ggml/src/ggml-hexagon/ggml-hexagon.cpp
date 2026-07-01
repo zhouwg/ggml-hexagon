@@ -2682,20 +2682,13 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
     int htp_arch                    = 0;
     int domain_id                   = HEXAGON_CDSP;
-    const char * domain_type        = "NSP";
 
     int unsignedpd_flag             = 1;
     bool is_unsignedpd_enabled      = false;
-    int use_logical_id              = 0;
-    int core_id                     = -1;
-    fastrpc_domain * domains_info   = NULL;
-    int num_domains                 = -1;
 
     domain * my_domain              = NULL;
-    char * uri                      = NULL;
-
+    const char * uri                = NULL;
     char * ggmlop_domain_uri        = NULL;
-    int    ggmlop_domain_uri_len    = 0;
 
     if (nullptr == ctx)
         return 1;
@@ -2706,59 +2699,18 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     }
     ctx->ggmlop_handle = 0;
 
-    if (-1 == domain_id) {
-        if (nullptr != domain_type) {
-            if ((strcmp(domain_type, "NSP") != 0 && strcmp(domain_type, "HPASS") != 0)) {
-                GGMLHEXAGON_LOG_WARN("invalid domain_type %s. possible values are NSP or HPASS", domain_type);
-                goto bail;
-            } else {
-                hexagon_error = ggmlhexagon_get_domains_info(domain_type, &num_domains, &domains_info);
-                if (hexagon_error == AEE_EUNSUPPORTED) {
-                    GGMLHEXAGON_LOG_DEBUG("API is not supported on this target so cannot get domains info from the device. falling back to legacy approach of using default domain id");
-                    hexagon_error = ggmlhexagon_get_dsp_support(&domain_id);
-                    if (hexagon_error != AEE_SUCCESS) {
-                        GGMLHEXAGON_LOG_DEBUG("error: 0x%x, defaulting to cDSP domain", hexagon_error);
-                    }
-                } else if (hexagon_error != AEE_SUCCESS) {
-                    GGMLHEXAGON_LOG_DEBUG("error in getting domains information");
-                    goto bail;
-                } else {
-                    if (core_id != -1) {
-                        if (core_id < 0 || core_id >= num_domains) {
-                            GGMLHEXAGON_LOG_DEBUG("invalid core_id = %d for %s. core_id should be between 0 to %d", core_id, domain_type, num_domains - 1);
-                            hexagon_error = AEE_EBADPARM;
-                            goto bail;
-                        }
-                    } else {
-                        core_id = 0;
-                    }
-                    use_logical_id = 1;
-                    domain_id = domains_info[core_id].id;
-                }
-            }
-        } else {
-            GGMLHEXAGON_LOG_DEBUG("DSP domain is not provided, retrieving DSP information using Remote APIs");
-            hexagon_error = ggmlhexagon_get_dsp_support(&domain_id);
-            if (hexagon_error != AEE_SUCCESS) {
-                GGMLHEXAGON_LOG_DEBUG("error: 0x%x, defaulting to cDSP domain", hexagon_error);
-            }
-        }
+    if (!ggmlhexagon_is_valid_domain_id(domain_id, 0)) {
+        hexagon_error = AEE_EBADPARM;
+        GGMLHEXAGON_LOG_DEBUG("error 0x%x: invalid domain %d", hexagon_error, domain_id);
+        goto bail;
     }
 
-    if (0 == use_logical_id) {
-        if (!ggmlhexagon_is_valid_domain_id(domain_id, 0)) {
-            hexagon_error = AEE_EBADPARM;
-            GGMLHEXAGON_LOG_DEBUG("error 0x%x: invalid domain %d", hexagon_error, domain_id);
-            goto bail;
-        }
-
-        my_domain = ggmlhexagon_get_domain(domain_id);
-        if (nullptr == my_domain) {
-            GGMLHEXAGON_LOG_DEBUG("unable to get domain struct %d",  domain_id);
-            goto bail;
-        }
-        uri = my_domain->uri;
+    my_domain = ggmlhexagon_get_domain(domain_id);
+    if (nullptr == my_domain) {
+        GGMLHEXAGON_LOG_DEBUG("unable to get domain struct %d",  domain_id);
+        goto bail;
     }
+    uri = my_domain->uri;
     GGMLHEXAGON_LOG_DEBUG("temporary domain uri=%s\n", uri);
 
     // Reserve new FastRPC session (PD) for additional devices (dev_id > 0)
@@ -2834,21 +2786,16 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     }
     ggmlhexagon_set_priority(domain_id, 160);
 
-    // For session_id > 0 (new PD), use FASTRPC_GET_URI to obtain the session-specific URI.
-    // For session_id == 0 (default CDSP PD), keep the legacy ggmlop_URI + domain uri path.
-    ggmlop_domain_uri_len   = strlen(ggmlop_URI) + MAX_DOMAIN_NAMELEN;
-    ggmlop_domain_uri       = (char *)malloc(ggmlop_domain_uri_len);
-    if (NULL == ggmlop_domain_uri) {
-        goto bail;
-    }
-
+    //probe arch and build the versioned dsp skel URI
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
     GGML_ASSERT(htp_arch != 0);
     char ggmldsp_uri[256];
-    memset(ggmldsp_uri, 0, 256);
-    //#define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"
-    snprintf(ggmldsp_uri, sizeof(ggmldsp_uri), "file:///libggmldsp-skel-v%u.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1", htp_arch);
-    snprintf(ggmlop_domain_uri, ggmlop_domain_uri_len, "%s%s", ggmldsp_uri, uri);
+    snprintf(ggmldsp_uri, sizeof(ggmldsp_uri),
+             "file:///libggmldsp-skel-v%u.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1",
+             htp_arch);
+
+    // For session_id > 0 (new PD), use FASTRPC_GET_URI to obtain the session-specific URI.
+    // For session_id == 0 (default CDSP PD), use ggmldsp_uri + domain uri.
     if (ctx->session_id > 0 && remote_session_control) {
         char session_uri[256];
         struct remote_rpc_get_uri u = {};
@@ -2862,13 +2809,22 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
         int err = remote_session_control(FASTRPC_GET_URI, (void *) &u, sizeof(u));
         if (err == AEE_SUCCESS) {
-            free(ggmlop_domain_uri);
             ggmlop_domain_uri = strdup(session_uri);
             GGMLHEXAGON_LOG_INFO("session URI for session_id=%d: %s", ctx->session_id, ggmlop_domain_uri);
         } else {
-            GGMLHEXAGON_LOG_WARN("FASTRPC_GET_URI failed for session_id=%d: error 0x%x, fallback to %s",
-                                 ctx->session_id, err, ggmlop_domain_uri);
+            GGMLHEXAGON_LOG_WARN("FASTRPC_GET_URI failed for session_id=%d: error 0x%x, fallback to %s%s",
+                                 ctx->session_id, err, ggmldsp_uri, uri);
         }
+    }
+
+    if (NULL == ggmlop_domain_uri) {
+        //session_id == 0 or FASTRPC_GET_URI failed
+        size_t uri_len = strlen(ggmldsp_uri) + MAX_DOMAIN_NAMELEN;
+        ggmlop_domain_uri = (char *)malloc(uri_len);
+        if (NULL == ggmlop_domain_uri) {
+            goto bail;
+        }
+        snprintf(ggmlop_domain_uri, uri_len, "%s%s", ggmldsp_uri, uri);
     }
 
     GGMLHEXAGON_LOG_DEBUG("ggmlop domain uri:%s", ggmlop_domain_uri);
