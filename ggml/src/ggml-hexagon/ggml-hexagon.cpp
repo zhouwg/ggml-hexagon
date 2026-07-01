@@ -151,7 +151,7 @@ typedef int  (* ggmlhexagon_op_func_t)(remote_handle64 handle, const dsptensor *
 
 // Forward declaration for test function
 static int  test_hmx_ap(ggml_backend_hexagon_context * ctx);
-static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
+static int  ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 
 // Forward declarations of buffer-type interface functions
 static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
@@ -183,6 +183,7 @@ enum qcom_htp_arch {
     V73 = 73,
     V75 = 75,
     V79 = 79,
+    V81 = 81,
 };
 
 enum qcom_chipset_soc_model {
@@ -194,6 +195,7 @@ enum qcom_chipset_soc_model {
     SM8550 = 43,  // v73, SD 8 Gen 2
     SM8650 = 57,  // v75, SD 8 Gen 3
     SM8750 = 69,  // v79, SD 8 Elite
+    SM8850 = 73,  // v81, SD 8 Elite Gen 5
 };
 
 //borrowed from Android source code, might not be accurate
@@ -332,7 +334,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
 #endif
-        .version                = {"0.99.2"},
+        .version                = {"0.99.3"},
 };
 
 // Track tensors repacked in set_tensor to skip Phase 4.5 and mulmat_min_n check
@@ -392,6 +394,13 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
                 .htp_arch          = V79,
                 .vtcm_size_in_mb   = 8,
                 .soc_desc          = "Qualcomm SnapDragon 8 Elite"},
+
+        /* Qualcomm SnapDragon 8 Gen 5 */
+        {
+                .soc_model         = SM8850,
+                .htp_arch          = V81,
+                .vtcm_size_in_mb   = 8,
+                .soc_desc          = "Qualcomm SnapDragon 8 Elite Gen5"},
 };
 
 // Contexts are dynamically allocated in ggml_backend_hexagon_reg() so that
@@ -1391,12 +1400,14 @@ static const char * ggmlhexagon_get_socmodel_desc(uint32_t soc_model) {
             return "SM8650";
         case SM8750:
             return "SM8750";
+        case SM8850:
+            return "SM8850";
         default:
             return "unknown";
     }
 }
 
-//0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79
+//0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
 static size_t ggmlhexagon_htparch_hex_to_decimal(size_t htp_arch) {
     //naive algorithm
     int a = htp_arch / 16;
@@ -1416,6 +1427,8 @@ static const char * ggmlhexagon_get_htparch_desc(size_t htp_arch) {
             return "QCOM_HTP_V75";
         case V79:
             return "QCOM_HTP_V79";
+        case V81:
+            return "QCOM_HTP_V81";
         default:
             return "unknown";
     }
@@ -1431,7 +1444,7 @@ static struct qcom_socinfo * ggmlhexagon_get_socinfo_from_socmodel(uint32_t soc_
     return nullptr;
 }
 
-static struct qcom_socinfo * ggmlhexagon_get_socinfo_from_socmodel(size_t htp_arch) {
+static struct qcom_socinfo * ggmlhexagon_get_socinfo_from_htparch(size_t htp_arch) {
     size_t items = sizeof(g_hexagon_soc_info_table) / sizeof(g_hexagon_soc_info_table[0]);
     for (size_t idx = 0; idx < items; idx++) {
         if (htp_arch == g_hexagon_soc_info_table[idx].htp_arch) {
@@ -1720,7 +1733,6 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_INFO("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
     GGMLHEXAGON_LOG_INFO("enabled_types:                    %s", g_hexagon_appcfg.enabled_types.c_str());
     GGMLHEXAGON_LOG_INFO("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
-    ggmlhexagon_probe_dspinfo(ctx);
     GGMLHEXAGON_LOG_INFO("running timestamp:%s", timestamp);
 
     if (1 == g_hexagon_appcfg.enable_profiler) {
@@ -2287,14 +2299,23 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     uint8_t * rpc_buffer    = nullptr;
     std::vector<int>        probe_slots;
 
-    if (nullptr == ctx)
+    int htp_arch = 0;
+    htp_arch = ggmlhexagon_probe_dspinfo(ctx);
+    if (0 == htp_arch)
         return 1;
+
+    if (nullptr == ctx)
+        return 2;
     probe_slots.push_back(1024);
     probe_slots.push_back(1536);
     probe_slots.push_back(2000);
     probe_slots.push_back(2048);
     probe_slots.push_back(1024+2048);
-    probe_slots.push_back(1024+2048+900);
+    if (htp_arch > 75) {
+        probe_slots.push_back(1024+2048+900);
+    } else {
+        probe_slots.push_back(1024+2048+200);
+    }
     if (2 != g_hexagon_appcfg.offload_cgraph_type) {
         probe_slots.push_back(4096);
     }
@@ -2553,26 +2574,27 @@ static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
     }
 }
 
-static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
+static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     if (ctx == nullptr) {
-        return;
+        return 0;
     }
     uint32_t dsp_version = 0;
+    int htp_arch         = 0;
     ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
 
     size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
     GGMLHEXAGON_LOG_VERBOSE("system mem size %d MiB", total_mem / SIZE_IN_MB);
 
-    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73 || dsp_version == 0x75 || dsp_version == 0x79) {
+    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73 || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
         if (ggmlhexagon_is_llamabench_running()) {
             GGMLHEXAGON_LOG_VERBOSE("dsp arch version 0x%x", dsp_version);
         } else {
             GGMLHEXAGON_LOG_INFO("dsp arch version 0x%x", dsp_version);
         }
-        //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79
-        size_t htp_arch = ggmlhexagon_htparch_hex_to_decimal(dsp_version);
+        //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
+        htp_arch = ggmlhexagon_htparch_hex_to_decimal(dsp_version);
         GGMLHEXAGON_LOG_DEBUG("dsp arch version %d", htp_arch);
-        struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_socmodel(htp_arch);
+        struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_htparch(htp_arch);
         if (nullptr != socinfo) {
             //got fully description of SoC
             if (ggmlhexagon_is_llamabench_running()) {
@@ -2621,6 +2643,7 @@ static void ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_INFO("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
     }
     GGMLHEXAGON_LOG_INFO("device %d caps: has_vtcm=%d has_hvx=%d", ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx);
+    return htp_arch;
 }
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
@@ -2640,6 +2663,9 @@ static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
 
     ggmlhexagon_deinit_rpcmempool(ctx);
 
+    //probe before domain_id is invalidated so AP-side domain queries still work
+    ggmlhexagon_probe_dspinfo(ctx);
+
     ctx->domain_id             = -1;
     if (ggmlhexagon_is_llamabench_running()) {
         GGMLHEXAGON_LOG_VERBOSE("leave %s", __func__);
@@ -2654,6 +2680,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
     int hexagon_error               = AEE_SUCCESS;
 
+    int htp_arch                    = 0;
     int domain_id                   = HEXAGON_CDSP;
     const char * domain_type        = "NSP";
 
@@ -2814,16 +2841,22 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     if (NULL == ggmlop_domain_uri) {
         goto bail;
     }
-    snprintf(ggmlop_domain_uri, ggmlop_domain_uri_len, "%s%s", ggmlop_URI, uri);
 
+    htp_arch = ggmlhexagon_probe_dspinfo(ctx);
+    GGML_ASSERT(htp_arch != 0);
+    char ggmldsp_uri[256];
+    memset(ggmldsp_uri, 0, 256);
+    //#define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"
+    snprintf(ggmldsp_uri, sizeof(ggmldsp_uri), "file:///libggmldsp-skel-v%u.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1", htp_arch);
+    snprintf(ggmlop_domain_uri, ggmlop_domain_uri_len, "%s%s", ggmldsp_uri, uri);
     if (ctx->session_id > 0 && remote_session_control) {
         char session_uri[256];
         struct remote_rpc_get_uri u = {};
         u.session_id      = ctx->session_id;
         u.domain_name     = const_cast<char *>(CDSP_DOMAIN_NAME);
         u.domain_name_len = strlen(CDSP_DOMAIN_NAME);
-        u.module_uri      = const_cast<char *>(ggmlop_URI);
-        u.module_uri_len  = strlen(ggmlop_URI);
+        u.module_uri      = const_cast<char *>(ggmldsp_uri);
+        u.module_uri_len  = strlen(ggmldsp_uri);
         u.uri             = session_uri;
         u.uri_len         = sizeof(session_uri);
 
@@ -2846,7 +2879,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         } else {
             GGMLHEXAGON_LOG_INFO("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
         }
-        ggmlhexagon_probe_dspinfo(ctx);
+
         ggmlop_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.offload_cgraph_type, g_hexagon_appcfg.mulmat_algotype, g_hexagon_appcfg.thread_counts);
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         int result = ggmlhexagon_init_rpcmempool(ctx);

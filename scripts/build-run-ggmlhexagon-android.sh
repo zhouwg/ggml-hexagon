@@ -65,9 +65,6 @@ HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}
 
 #supported htp arch version:
-#v68 --- Snapdragon 888
-#v69 --- Snapdragon 8 Gen1
-#v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
 #v79 --- Snapdragon 8 Elite(aka 8 Gen4)
 #v81 --- Snapdragon 8 Elite Gen5(aka 8 Gen5)
@@ -80,6 +77,9 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSI
 #modify the following two lines to adapt to test phone
 HTP_ARCH_VERSION=v79
 HTP_ARCH_VERSION_a=V79
+#all DSP skel versions to build and deploy (AP-side lib built once with HTP_ARCH_VERSION, extra DSP skels built via make)
+#HTP_ARCH_VERSIONS="v75 v79 v81"
+HTP_ARCH_VERSIONS="v79"
 
 ######## part-2: prompt and LLM models ########
 
@@ -94,7 +94,7 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+#GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="You are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
@@ -336,6 +336,28 @@ function build_idl()
 }
 
 
+#build extra DSP skels for versions other than the default HTP_ARCH_VERSION
+#$1 = "debug" for debug build, anything else for release build
+function build_extra_dsp_skels()
+{
+    local dsp_debug_flag
+    if [ "$1" == "debug" ]; then
+        dsp_debug_flag="-DDEBUG -Wall"
+    else
+        dsp_debug_flag="-DNDEBUG -Wall"
+    fi
+
+    for extra_ver in ${HTP_ARCH_VERSIONS}; do
+        if [ "${extra_ver}" != "${HTP_ARCH_VERSION}" ]; then
+            printf "\n========== build extra DSP skel: libggmldsp-skel-${extra_ver}.so ==========\n"
+            make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ clean
+            make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
+            /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
+        fi
+    done
+}
+
+
 function build_arm64
 {
     update_local_build_dir 1
@@ -347,6 +369,8 @@ function build_arm64
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
+    #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
+    build_extra_dsp_skels
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
     show_pwd
@@ -366,6 +390,8 @@ function build_arm64_debug
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
+    #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
+    build_extra_dsp_skels debug
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
     show_pwd
@@ -500,24 +526,12 @@ esac
 function prepare_ggmldsp()
 {
     adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
-    echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so"
-case "$HTP_ARCH_VERSION" in
-    v75)
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-
-    v79)
-        echo "v79"
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-
-    *)
-        show_usage
-        exit 1
-    ;;
-esac
+    for ver in ${HTP_ARCH_VERSIONS}; do
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ]; then
+            echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${REMOTE_PATH}/libggmldsp-skel-${ver}.so"
+            adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${REMOTE_PATH}/libggmldsp-skel-${ver}.so
+        fi
+    done
 }
 
 
@@ -557,10 +571,10 @@ function check_prebuilt_models()
     check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
-    check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+    #check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
 
     #2.9 GiB
-    check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
+    #check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
 
     set -e
 }
@@ -611,6 +625,8 @@ function is_so_file_changed() {
 
 function update_ggml_libs()
 {
+    update_local_build_dir 1
+
     #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-base.so                 ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so                  ${REMOTE_PATH}/
@@ -859,6 +875,7 @@ function show_usage()
     echo "Usage:"
     echo "  $0 help"
     echo "  $0 print_oplist"
+    echo "  $0 update_ggml_libs"
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
     echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
@@ -899,6 +916,9 @@ elif [ $# == 1 ]; then
         exit 1
     elif [ "$1" == "print_oplist" ]; then
         print_oplist
+        exit 1
+    elif [ "$1" == "update_ggml_libs" ]; then
+        update_ggml_libs
         exit 1
     elif [ "$1" == "build" ]; then
         build_ggml_hexagon

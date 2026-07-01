@@ -237,6 +237,52 @@ extern "C" {
 /* Cache line size for Hexagon DSP L2 cache */
 #define DSP_CACHE_LINE_SIZE             128
 
+/*
+ * fp32 vector arithmetic compatibility wrappers.
+ *
+ * Q6_Vsf_v(add|sub|mpy)_VsfVsf are v79+ only. On v75 the qf32 accumulator
+ * path must be used instead: Q6_Vqf32_v*_VsfVsf produces a qf32 result that
+ * is converted back to sf via Q6_Vsf_equals_Vqf32.
+ *
+ * Q6_Vsf_v(max|min)_VsfVsf are also v79+ only and have no qf32 equivalent,
+ * so on v75 we fall back to integer sign-bit comparison of the IEEE-754
+ * representations (this is valid for non-NaN operands under -ffast-math,
+ * which the kernel build already uses via -Ofast).
+ */
+#if __HVX_ARCH__ < 79
+#define HVX_VADD_F32(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vadd_VsfVsf((a), (b)))
+#define HVX_VSUB_F32(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vsub_VsfVsf((a), (b)))
+#define HVX_VMUL_F32(a, b) Q6_Vsf_equals_Vqf32(Q6_Vqf32_vmpy_VsfVsf((a), (b)))
+
+static inline HVX_Vector hvx_vmax_f32(HVX_Vector a, HVX_Vector b) {
+    const HVX_Vector sign_mask = Q6_V_vsplat_R(0x80000000);
+    HVX_Vector a_sign = Q6_V_vand_VV(a, sign_mask);
+    HVX_Vector b_sign = Q6_V_vand_VV(b, sign_mask);
+    HVX_VectorPred same_sign = Q6_Q_vcmp_eq_VwVw(a_sign, b_sign);
+    HVX_VectorPred a_gt_b    = Q6_Q_vcmp_gt_VwVw(a, b);
+    HVX_VectorPred a_pos     = Q6_Q_vcmp_eq_VwVw(a_sign, Q6_V_vzero());
+    HVX_VectorPred a_is_max  = Q6_Q_or_QQ(
+                                   Q6_Q_and_QQ(same_sign, a_gt_b),
+                                   Q6_Q_and_QQ(Q6_Q_not_Q(same_sign), a_pos));
+    return Q6_V_vmux_QVV(a_is_max, a, b);
+}
+#define HVX_VMAX_F32(a, b) hvx_vmax_f32((a), (b))
+
+static inline HVX_Vector hvx_vmin_f32(HVX_Vector a, HVX_Vector b) {
+    const HVX_Vector sign_mask = Q6_V_vsplat_R(0x80000000);
+    HVX_Vector neg_a = Q6_V_vxor_VV(a, sign_mask);
+    HVX_Vector neg_b = Q6_V_vxor_VV(b, sign_mask);
+    return Q6_V_vxor_VV(hvx_vmax_f32(neg_a, neg_b), sign_mask);
+}
+#define HVX_VMIN_F32(a, b) hvx_vmin_f32((a), (b))
+#else
+#define HVX_VADD_F32(a, b) Q6_Vsf_vadd_VsfVsf((a), (b))
+#define HVX_VSUB_F32(a, b) Q6_Vsf_vsub_VsfVsf((a), (b))
+#define HVX_VMUL_F32(a, b) Q6_Vsf_vmpy_VsfVsf((a), (b))
+#define HVX_VMAX_F32(a, b) Q6_Vsf_vmax_VsfVsf((a), (b))
+#define HVX_VMIN_F32(a, b) Q6_Vsf_vmin_VsfVsf((a), (b))
+#endif
+
 // ggml-core
 typedef double                          ggml_float;
 typedef uint16_t                        ggml_half;

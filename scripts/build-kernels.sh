@@ -8,12 +8,14 @@ LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
 REMOTE_PATH=/data/local/tmp
 
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
-HTP_ARCH_VERSION=v79
+#build all supported DSP skel versions: v75, v79, v81
+#v75 uses qf32 accumulator fallbacks (HVX_V*_F32 macros) for __HVX_ARCH__ < 79
+#HTP_ARCH_VERSIONS="v75 v79 v81"
+HTP_ARCH_VERSIONS="v79"
 HEXAGON_SDK_VERSION=6.6.0.0
 HEXAGON_TOOLS_VERSION=19.0.07
 HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}
-TARGET=${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
 DEBUG_FLAG="-DNDEBUG -Wall"
 #DEBUG_FLAG=-g
 
@@ -64,19 +66,21 @@ cd ${PROJECT_ROOT_PATH}
 #echo "${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl"
 #${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
 
-cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=v79 HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG=${DEBUG_FLAG}
-/bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${TARGET}
-/bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
-if [  -f ${TARGET} ]; then
-    is_so_file_changed ${TARGET}
-    if [ $? -eq 0 ]; then
-        printf "${TARGET} not changed\n\n"
-    else
-        printf "${TARGET} has changed or first check\n\n"
-        echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so"
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel${HTP_ARCH_VERSION}.so
-        adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
+for HTP_ARCH_VERSION in ${HTP_ARCH_VERSIONS}; do
+    TARGET=${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${HTP_ARCH_VERSION}.so
+    printf "\n========== build libggmldsp-skel-${HTP_ARCH_VERSION}.so ==========\n"
+    cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=${HTP_ARCH_VERSION} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG=${DEBUG_FLAG}
+    /bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${TARGET}
+    if [  -f ${TARGET} ]; then
+        is_so_file_changed ${TARGET}
+        if [ $? -eq 0 ]; then
+            printf "${TARGET} not changed\n\n"
+        else
+            printf "${TARGET} has changed or first check\n\n"
+            echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel-${HTP_ARCH_VERSION}.so"
+            adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel-${HTP_ARCH_VERSION}.so
+        fi
     fi
-fi
+done
 
 cd ${PROJECT_ROOT_PATH}

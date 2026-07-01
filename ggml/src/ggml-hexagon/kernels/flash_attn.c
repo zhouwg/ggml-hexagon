@@ -600,7 +600,7 @@ static void fa_row_hvx(struct fa_thread_ctx * c, uint32_t iq1, uint32_t iq2, uin
         }
 
         // 3b. Online softmax: M_new, alpha=exp(M_old - M_new), rescale VKQ32.
-        HVX_Vector M_new_vec = Q6_Vsf_vmax_VsfVsf(v_max, M_vec);
+        HVX_Vector M_new_vec = HVX_VMAX_F32(v_max, M_vec);
         HVX_Vector diff_vec = FA_OP_SUB_F32(M_vec, M_new_vec);
         HVX_Vector ms_vec = hvx_vec_exp_f32(diff_vec);
         M_vec = M_new_vec;

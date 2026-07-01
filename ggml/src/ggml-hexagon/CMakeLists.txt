@@ -23,29 +23,27 @@ else()
     message("Release mode:${DEBUG_FLAG}")
 endif()
 
-#v68 --- Snapdragon 888
-#v69 --- Snapdragon 8 Gen1
-#v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
 #v79 --- Snapdragon 8 Elite
+#v81 --- Snapdragon 8 Elite Gen5
 if(NOT DEFINED HTP_ARCH_VERSION)
-    message(FATAL_ERROR "HTP_ARCH_VERSION not defined, valid htp arch: v68,v69,v73,v75,v79")
+    message(FATAL_ERROR "HTP_ARCH_VERSION not defined, valid htp arch: v75,v79,v81")
 endif()
 
 #check whether user's specified htp arch is valid
 set(CHECK_HTP_ARCH "WRONG")
-foreach (feat v68 v69 v73 v75 v79)
+foreach (feat v75 v79 v81)
     if (${feat} STREQUAL ${HTP_ARCH_VERSION})
         set(CHECK_HTP_ARCH "GOOD")
     endif()
 endforeach()
 if (${CHECK_HTP_ARCH} STREQUAL "WRONG")
-    message(FATAL_ERROR "ggml-hexagon backend only support htp arch v68,v69,v73,v75,v79")
+    message(FATAL_ERROR "ggml-hexagon backend only support htp arch v75,v79,v81")
 endif()
 
 #check optimization flags
 set(OPT_FLAG " ")
-if (${HTP_ARCH_VERSION} STREQUAL "v75" OR ${HTP_ARCH_VERSION} STREQUAL "v79")
+if (${HTP_ARCH_VERSION} STREQUAL "v75" OR ${HTP_ARCH_VERSION} STREQUAL "v79" OR ${HTP_ARCH_VERSION} STREQUAL "v81")
     #works fine on Snapdragon 8Gen3&8Elite with 1.5x - 3x performance gains with the default ggml backend
     set(OPT_FLAG " -O3 -march=armv8.7-a+dotprod+fp16+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -ffp-model=fast -fno-finite-math-only")
 endif()
@@ -110,7 +108,7 @@ function(ggml_hexagon_build_kernel KNAME)
         COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} HTP_ARCH_VERSION=${HTP_ARCH_VERSION} DEBUG_FLAG=${DEBUG_FLAG} BIN_DIR=${CMAKE_BINARY_DIR}/bin
         COMMAND echo "current working path:`pwd`\n"
         COMMAND /bin/cp ${CMAKE_CURRENT_LIST_DIR}/kernels/libggmldsp-skel.so ${CMAKE_BINARY_DIR}/bin/
-        COMMAND /bin/cp ${CMAKE_CURRENT_LIST_DIR}/kernels/libggmldsp-skel.so ${CMAKE_BINARY_DIR}/bin/libggmldsp-skel${HTP_ARCH_VERSION}.so
+        COMMAND /bin/cp ${CMAKE_CURRENT_LIST_DIR}/kernels/libggmldsp-skel.so ${CMAKE_BINARY_DIR}/bin/libggmldsp-skel-${HTP_ARCH_VERSION}.so
         COMMAND ls -l  ${CMAKE_BINARY_DIR}/bin/libggmldsp*.so
         COMMENT "build hexagon-kernel"
     )
