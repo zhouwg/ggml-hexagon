@@ -21,6 +21,8 @@ REMOTE_PATH=/data/local/tmp
 LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
+TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
 ANDROID_PLATFORM=android-34
@@ -41,25 +43,12 @@ OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
 
 #fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
 #fully Hexagon SDK must be obtained with Qualcomm Developer Account and follow PKLA&ECA.
-#only for purpose of test/development
-#HEXAGON_SDK_VERSION=6.2.0.1
-#HEXAGON SDK 6.3.0.0 is required for htp v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
-#HEXAGON_SDK_VERSION=6.3.0.0
-#HEXAGON_SDK_PATH=/opt/qcom/Hexagon_SDK/${HEXAGON_SDK_VERSION}
-
-#the official Qualcomm Hexagon SDK tech docs can be found at:
-#https://docs.qualcomm.com/bundle/publicresource/topics/80-77512-1/hexagon-dsp-sdk-collection-landing-page.html?product=1601111740010422
-#customized/tailored Hexagon SDK for simplify workflow and can be downloaded via this script
-#this highly tailored minimal-hexagon-sdk should comply with Qualcomm's IPR policy.
-#actually used in this project
-HEXAGON_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1
-
-HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06
-HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
+HEXAGON_SDK_VERSION=6.6.0.0
+HEXAGON_TOOLS_VERSION=19.0.07
+HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}
+HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}
 
 #supported htp arch version:
-#v68 --- Snapdragon 888
-#v69 --- Snapdragon 8 Gen1
 #v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
 #v79 --- Snapdragon 8 Elite(aka 8 Gen4)
@@ -69,6 +58,7 @@ HEXAGON_PRESET_PATH=${PROJECT_ROOT_PATH}/docs/backend/snapdragon
 #1. sometimes the same dsp codes can got the best performance on Snapdragon 8Elite based phone.
 #2. DSP clock rate on 8Gen3 is slower than DSP clock rate on 8Elite.
 #3. 8Elite support for LP-DDR5x memory, up to 5300 MHz; 8Gen3 support for LP-DDR5x memory, up to 4800 MHz.
+#4. 8Elite Gen 5 is better.
 
 #modify the following two lines to adapt to test phone
 HTP_ARCH_VERSION=v79
@@ -181,27 +171,27 @@ function check_android_phone()
 function check_and_download_hexagon_sdk()
 {
     is_hexagon_llvm_exist=1
-    if [ ! -f ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/6.2.0.1/tools/HEXAGON_Tools/8.8.06/NOTICE.txt ]; then
+    if [ ! -f ${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}/NOTICE.txt ]; then
         echo -e "${TEXT_RED}minimal-hexagon-sdk not exist...${TEXT_RESET}\n"
         is_hexagon_llvm_exist=0
     fi
 
     if [ ${is_hexagon_llvm_exist} -eq 0 ]; then
-        if [ -f ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz ]; then
-            echo -e "minimal-hexagon-sdk-6.2.0.1.xz already exist\n"
+        if [ -f ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz ]; then
+            echo -e "hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz already exist\n"
         else
-            echo -e "begin downloading minimal-hexagon-sdk-6.2.0.1.xz \n"
-            wget --no-config --quiet --show-progress -O ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz https://github.com/zhouwg/toolchain/raw/refs/heads/master/minimal-hexagon-sdk-6.2.0.1.xz
+            echo -e "begin downloading hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz \n"
+            wget --no-config --quiet --show-progress -O ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz https://github.com/snapdragon-toolchain/hexagon-sdk/releases/download/v6.6.0.0/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz
             if [ $? -ne 0 ]; then
-                printf "failed to download minimal-hexagon-sdk-6.2.0.1.xz\n"
+                printf "failed to download hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz\n"
                 exit 1
             fi
         fi
 
-        echo -e "begin decompressing minimal-hexagon-sdk-6.2.0.1.xz \n"
-        xzcat ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/minimal-hexagon-sdk-6.2.0.1.xz | tar -C ${PROJECT_ROOT_PATH}/prebuilts/Hexagon_SDK/ -xf -
+        echo -e "begin decompressing hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz \n"
+        xzcat ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz | tar -C ${TOOLCHAIN_PATH}/Hexagon_SDK/ -xf -
         if [ $? -ne 0 ]; then
-            printf "failed to decompress minimal-hexagon-sdk-6.2.0.1.xz\n"
+            printf "failed to decompress hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz\n"
             exit 1
         fi
         printf "install minimal-hexagon-sdk successfully\n\n"
@@ -315,7 +305,8 @@ function check_and_download_ndk()
 
 function build_arm64
 {
-    /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/docs/backend/snapdragon/CMakeUserPresets.json .
+
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cmake --build ${LOCAL_BUILD_DIR}
     show_pwd
@@ -325,7 +316,7 @@ function build_arm64
 
 function build_arm64_debug
 {
-    /bin/cp -fv ${HEXAGON_PRESET_PATH}/CMakeUserPresets.json .
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/docs/backend/snapdragon/CMakeUserPresets.json .
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cmake --build ${LOCAL_BUILD_DIR}
@@ -388,32 +379,6 @@ esac
 }
 
 
-#for jz's ggml-hexagon backend
-function prepare_ggmldsp()
-{
-    adb push ./scripts/ggml-hexagon-for-binary-lib.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
-    echo "adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so"
-case "$HTP_ARCH_VERSION" in
-    v69)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v73)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v75)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    v79)
-        adb push ${PROJECT_ROOT_PATH}/prebuilts/ggml-dsp/${GGMLDSP_RELEASE_DATE}/libggmldsp-skel${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggmldsp-skel.so
-    ;;
-    *)
-        show_usage
-        exit 1
-    ;;
-esac
-}
-
-
 function check_and_download_model()
 {
     set +e
@@ -447,10 +412,10 @@ function check_prebuilt_models()
     fi
 
     #1.12 GiB
-    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
+    #check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
-    check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+    #check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
 
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
@@ -479,7 +444,7 @@ function is_so_file_changed() {
     local current_md5
     current_md5=$(md5sum "$so_file" | awk '{print $1}')
 
-    # FIRST RUN: no MD5 file → save it, return CHANGED
+    # FIRST RUN: no MD5 file --> save it, return CHANGED
     if [ ! -f "$md5_file" ]; then
         echo "$current_md5" > "$md5_file"
         echo "Initialized MD5 for $so_file"
@@ -495,7 +460,7 @@ function is_so_file_changed() {
         # NO CHANGE
         return 0
     else
-        # CHANGED → update MD5
+        # CHANGED --> update MD5
         echo "$current_md5" > "$md5_file"
         return 1
     fi
