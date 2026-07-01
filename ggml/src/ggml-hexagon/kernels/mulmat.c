@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../htp/hex-dma.h"    // for Qualcomm's official DMA async transfers
+#include "../htp/hvx-base.h"   // for hvx_vec_splat_f16, hvx_vec_is_nan_f16, hvx_vec_f32_to_f16, etc.
 
 #define HMX_FP16_TILE_N_ROWS 32
 #define HMX_FP16_TILE_N_COLS 32
@@ -53,31 +54,6 @@ static inline HVX_Vector hvx_vec_repl_f16(HVX_Vector v) {
 }
 
 // hmx_ceil_div, hex_align_up, hex_align_down are provided by hex-common.h (via hex-dma.h)
-
-static inline HVX_Vector hvx_vec_f32_to_f16_shuff(HVX_Vector v0, HVX_Vector v1) {
-#if __HVX_ARCH__ >= 81
-    HVX_Vector q0 = Q6_Vqf32_equals_Vsf(v0);
-    HVX_Vector q1 = Q6_Vqf32_equals_Vsf(v1);
-#else
-    const HVX_Vector zero = Q6_V_vzero();
-    HVX_Vector q0 = Q6_Vqf32_vadd_VsfVsf(v0, zero);
-    HVX_Vector q1 = Q6_Vqf32_vadd_VsfVsf(v1, zero);
-#endif
-    return Q6_Vhf_equals_Wqf32(Q6_W_vcombine_VV(q1, q0));
-}
-
-static inline HVX_Vector hvx_vec_f32_to_f16(HVX_Vector v0, HVX_Vector v1) {
-    HVX_Vector v = Q6_Vh_vdeal_Vh(hvx_vec_f32_to_f16_shuff(v0, v1));
-
-#if __HVX_ARCH__ < 79
-    // replace NaNs with -INF, older arches produce NaNs for (-INF + 0.0)
-    const HVX_Vector neg_inf = hvx_vec_splat_f16(-INFINITY);
-    HVX_VectorPred nan = hvx_vec_is_nan_f16(v);
-    v = Q6_V_vmux_QVV(nan, neg_inf, v);
-#endif
-
-    return v;
-}
 
 static fp16_weight_cache_entry_t * fp16_weight_cache_lookup(void * src0_data) {
     for (int i = 0; i < g_fp16_weight_cache_count; i++) {
@@ -2014,26 +1990,6 @@ static void convert_activation_bf16_to_fp16_tiles_hvx(__fp16 *restrict vtcm_dst,
 // Parallel data conversion helpers for VTCM+HMX
 // ============================================================
 
-// HVX helpers for output writeback (from htp/hvx-base.h)
-static inline HVX_Vector hvx_vec_splat_f16_hmx(_Float16 v) {
-    union { __fp16 f; uint16_t i; } u = { .f = v };
-    return Q6_Vh_vsplat_R(u.i);
-}
-
-static inline void hvx_vec_store_u_hmx(void * restrict dst, uint32_t n, HVX_Vector v) {
-    v = Q6_V_vlalign_VVR(v, v, (size_t) dst);
-    uint32_t left_off  = (size_t) dst & 127;
-    uint32_t right_off = left_off + n;
-    HVX_VectorPred ql_not = Q6_Q_vsetq_R((size_t) dst);
-    HVX_VectorPred qr     = Q6_Q_vsetq2_R(right_off);
-    if (right_off > 128) {
-        Q6_vmem_QRIV(qr, (HVX_Vector *) dst + 1, v);
-        qr = Q6_Q_vcmp_eq_VbVb(v, v);
-    }
-    ql_not = Q6_Q_or_QQn(ql_not, qr);
-    Q6_vmem_QnRIV(ql_not, (HVX_Vector *) dst, v);
-}
-
 // HVX-based output writeback: reads HMX output tiles from VTCM via HVX loads
 // (coherent with HMX, eliminates racy dcinva) and stores fp32 to dst in DDR.
 // Same interface as the scalar version below.
@@ -2043,7 +1999,7 @@ static void transfer_output_chunk_fp16_to_fp32_range_hvx(
     int start_row, int end_row) {
 
     const int n_col_tiles = (n_cols + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS;
-    const HVX_Vector one = hvx_vec_splat_f16_hmx(1.0f);
+    const HVX_Vector one = hvx_vec_splat_f16(1.0f);
 
     for (int r = start_row; r < end_row; r += 2) {
         const int r0 = r / HMX_FP16_TILE_N_ROWS;
@@ -2065,12 +2021,12 @@ static void transfer_output_chunk_fp16_to_fp32_range_hvx(
             HVX_Vector lo_fp32 = Q6_Vsf_equals_Vqf32(Q6_V_lo_W(vp));
 
             int valid = (c + HMX_FP16_TILE_N_COLS <= n_cols) ? HMX_FP16_TILE_N_COLS : (n_cols - c);
-            hvx_vec_store_u_hmx(row0_dst + c, valid * sizeof(float), lo_fp32);
+            hvx_vec_store_u(row0_dst + c, valid * sizeof(float), lo_fp32);
 
             if (has_pair) {
                 HVX_Vector hi_fp32 = Q6_Vsf_equals_Vqf32(Q6_V_hi_W(vp));
                 float *row1_dst = dst + (size_t)(r + 1) * col_stride;
-                hvx_vec_store_u_hmx(row1_dst + c, valid * sizeof(float), hi_fp32);
+                hvx_vec_store_u(row1_dst + c, valid * sizeof(float), hi_fp32);
             }
         }
     }
