@@ -234,8 +234,14 @@ extern "C" {
 #define hvx_vmem(A)                     *((HVX_Vector *)(A))
 #define hvx_vmemu(A)                    *((HVX_UVector *)(A))
 
-/* Cache line size for Hexagon DSP L2 cache */
-#define DSP_CACHE_LINE_SIZE             128
+/* Cache line size for Hexagon DSP D-cache.
+ * dccleaninva/dcinva/dccleana operate on L1 D-cache (also covers L2).
+ * Use 64B stride - matches HEX_L2_LINE_SIZE in hex-utils.h and the ION
+ * probe in entry.c, and aligns with Qualcomm qhl_hvx library which uses
+ * 64B for all architectures (v65/v68/v73/v75/v79).
+ * Smaller stride is always safe; larger stride risks skipping cache lines
+ * if the actual line size is smaller than assumed. */
+#define DSP_CACHE_LINE_SIZE             64
 
 /*
  * fp32 vector arithmetic compatibility wrappers.
@@ -2152,7 +2158,6 @@ GGML_API void *         ggmlop_get_work_data(size_t size);
 GGML_API void *         ggmlop_get_vtcm_pool(size_t * size);
 GGML_API void           ggmlop_dsp_cache_flush_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_inval_range(void * addr, size_t size);
-GGML_API void           ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_clean_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_fp16_cache_reset(void);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
