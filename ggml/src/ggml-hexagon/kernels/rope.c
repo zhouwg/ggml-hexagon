@@ -191,31 +191,19 @@ static void ggml_compute_forward_rope_f32(
     size_t nb01 = src0->nb[1], nb02 = src0->nb[2], nb03 = src0->nb[3];
     size_t nb1  = dst->nb[1],   nb2  = dst->nb[2],   nb3  = dst->nb[3];
 
-    // // diagnostic logging (disabled, keep for future debugging)
-    // GGMLHEXAGON_LOG_WARN("ROPE diag: n_dims=%d mode=%d n_ctx_orig=%d freq_base=%.1f freq_scale=%.6f",
-    //                      n_dims, mode, n_ctx_orig, freq_base, freq_scale);
-    // GGMLHEXAGON_LOG_WARN("ROPE diag: src0 type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p",
-    //                      src0->type, (int)src0->ne[0], (int)src0->ne[1], (int)src0->ne[2], (int)src0->ne[3],
-    //                      (int)src0->nb[0], (int)src0->nb[1], (int)src0->nb[2], (int)src0->nb[3], src0->data);
-    // GGMLHEXAGON_LOG_WARN("ROPE diag: src1 type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p data_len=%d",
-    //                      src1->type, (int)src1->ne[0], (int)src1->ne[1], (int)src1->ne[2], (int)src1->ne[3],
-    //                      (int)src1->nb[0], (int)src1->nb[1], (int)src1->nb[2], (int)src1->nb[3], src1->data, src1->data_len);
-    // GGMLHEXAGON_LOG_WARN("ROPE diag: dst type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p",
-    //                      dst->type, (int)dst->ne[0], (int)dst->ne[1], (int)dst->ne[2], (int)dst->ne[3],
-    //                      (int)dst->nb[0], (int)dst->nb[1], (int)dst->nb[2], (int)dst->nb[3], dst->data);
-    // {
-    //     const int32_t * pos = (const int32_t *)src1->data;
-    //     int n_pos = (int)ne2;
-    //     if (n_pos > 8) n_pos = 8;
-    //     GGMLHEXAGON_LOG_WARN("ROPE diag: pos[0..%d] = [%d, %d, %d, %d, %d, %d, %d, %d]",
-    //                          n_pos,
-    //                          n_pos > 0 ? pos[0] : -1, n_pos > 1 ? pos[1] : -1,
-    //                          n_pos > 2 ? pos[2] : -1, n_pos > 3 ? pos[3] : -1,
-    //                          n_pos > 4 ? pos[4] : -1, n_pos > 5 ? pos[5] : -1,
-    //                          n_pos > 6 ? pos[6] : -1, n_pos > 7 ? pos[7] : -1);
-    //     const float * sf = (const float *)src0->data;
-    //     GGMLHEXAGON_LOG_WARN("ROPE diag: src0 f32=[%.4f, %.4f, %.4f, %.4f]", sf[0], sf[1], sf[2], sf[3]);
-    // }
+    // diagnostic logging for ROPE crash investigation
+    GGMLHEXAGON_LOG_WARN("ROPE diag: n_dims=%d mode=%d n_ctx_orig=%d freq_base=%.1f freq_scale=%.6f ext_factor=%.6f attn_factor=%.6f",
+                         n_dims, mode, n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor);
+    GGMLHEXAGON_LOG_WARN("ROPE diag: src0 type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] data=%p data_len=%d",
+                         src0->type, (int)src0->ne[0], (int)src0->ne[1], (int)src0->ne[2], (int)src0->ne[3],
+                         (int)src0->nb[0], (int)src0->nb[1], (int)src0->nb[2], (int)src0->nb[3], src0->data, src0->data_len);
+    GGMLHEXAGON_LOG_WARN("ROPE diag: src1 type=%d ne=[%d,%d,%d,%d] data=%p data_len=%d",
+                         src1->type, (int)src1->ne[0], (int)src1->ne[1], (int)src1->ne[2], (int)src1->ne[3],
+                         src1->data, src1->data_len);
+    GGMLHEXAGON_LOG_WARN("ROPE diag: dst type=%d ne=[%d,%d,%d,%d] data=%p",
+                         dst->type, (int)dst->ne[0], (int)dst->ne[1], (int)dst->ne[2], (int)dst->ne[3], dst->data);
+    GGMLHEXAGON_LOG_WARN("ROPE diag: src2=%p freq_factors=%p", src2 ? src2 : NULL, src2 ? src2->data : NULL);
+    GGMLHEXAGON_LOG_WARN("ROPE diag: cosf(0)=%.6f sinf(0)=%.6f powf(2,-0.5)=%.6f", cosf(0.0f), sinf(0.0f), powf(2.0f, -0.5f));
 
     GGML_ASSERT(n_dims <= ne0 && n_dims % 2 == 0);
 
@@ -240,6 +228,19 @@ static void ggml_compute_forward_rope_f32(
         GGML_ASSERT(n_dims == ne0 / 2);
     }
 
+    // Print pos[] first values + src0 first 8 floats (input snapshot before in-place rotate)
+    {
+        int pos_n = (int)ne2; if (pos_n > 8) pos_n = 8;
+        char pos_buf[256] = {0}; int pl = 0;
+        for (int i = 0; i < pos_n; i++) pl += snprintf(pos_buf + pl, sizeof(pos_buf) - pl, "%d ", (int)pos[i]);
+        GGMLHEXAGON_LOG_WARN("ROPE diag: pos[0..%d]=[%s]", pos_n - 1, pos_buf);
+        if (src0->type == GGML_TYPE_F32) {
+            const float * sf = (const float *)src0->data;
+            GGMLHEXAGON_LOG_WARN("ROPE diag: src0 in[0..7]=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                             sf[0], sf[1], sf[2], sf[3], sf[4], sf[5], sf[6], sf[7]);
+        }
+    }
+
     // static cache buffer to avoid malloc/free on DSP (heap alloc can cause
     // corruption or cache-coherency issues in frequently-called DSP functions)
     #define ROPE_CACHE_MAX_NE0 4096
@@ -261,6 +262,15 @@ static void ggml_compute_forward_rope_f32(
                     rope_cache_init((float)p, freq_scale, freq_factors,
                                     corr_dims, ne0, ext_factor, attn_factor,
                                     cache, 1.0f /* sin_sign */, theta_scale);
+                    if (i2 == 0) {
+                        GGMLHEXAGON_LOG_WARN("ROPE diag: p=%lld theta_scale=%.6f cache[0..3]=[%.6f, %.6f, %.6f, %.6f]",
+                                             (long long)p, theta_scale, cache[0], cache[1], cache[2], cache[3]);
+                    }
+                    if (i2 == 1 && ne3 == 1 && ne1 > 0) {
+                        GGMLHEXAGON_LOG_WARN("ROPE diag: p=%lld cache[0..7]=[%.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f]",
+                                             (long long)p, cache[0], cache[1], cache[2], cache[3],
+                                             cache[4], cache[5], cache[6], cache[7]);
+                    }
                 } else {
                     // MROPE / VISION / IMROPE: 4 position IDs (t, h, w, e)
                     int64_t p_t = pos[i2];
@@ -300,9 +310,25 @@ static void ggml_compute_forward_rope_f32(
                                 (const uint16_t *)((const uint8_t *)src0->data + src_off),
                                 (uint16_t *)((uint8_t *)dst->data + dst_off));
                         } else {
+                            // Verify rotation at i2=1, i1=0 (position 1, head 0)
+                            if (i2 == 1 && i1 == 0 && i3 == 0) {
+                                const float * sf_pre = (const float *)((const uint8_t *)src0->data + src_off);
+                                int hd = (int)(n_dims / 2);
+                                GGMLHEXAGON_LOG_WARN("ROPE diag: i2=1 pre src[0..3]=[%.4f, %.4f, %.4f, %.4f] src[hd..hd+3]=[%.4f, %.4f, %.4f, %.4f] (hd=%d)",
+                                                     sf_pre[0], sf_pre[1], sf_pre[2], sf_pre[3],
+                                                     sf_pre[hd], sf_pre[hd+1], sf_pre[hd+2], sf_pre[hd+3], hd);
+                            }
                             rotate_pairs_f32(n_dims, n_dims/2, cache,
                                 (const float *)((const uint8_t *)src0->data + src_off),
                                 (float *)((uint8_t *)dst->data + dst_off));
+                            if (i2 == 1 && i1 == 0 && i3 == 0) {
+                                const float * df_post = (const float *)((const uint8_t *)dst->data + dst_off);
+                                int hd = (int)(n_dims / 2);
+                                GGMLHEXAGON_LOG_WARN("ROPE diag: i2=1 post dst[0..3]=[%.4f, %.4f, %.4f, %.4f] dst[hd..hd+3]=[%.4f, %.4f, %.4f, %.4f] (cos=%.4f sin=%.4f)",
+                                                     df_post[0], df_post[1], df_post[2], df_post[3],
+                                                     df_post[hd], df_post[hd+1], df_post[hd+2], df_post[hd+3],
+                                                     cache[0], cache[1]);
+                            }
                         }
                         break;
                     case 24: // GGML_ROPE_TYPE_VISION
@@ -350,6 +376,22 @@ static void ggml_compute_forward_rope_f32(
     //     GGMLHEXAGON_LOG_WARN("ROPE pair1: x0=%.6f x1=%.6f cos=%.6f sin=%.6f -> dst0=%.6f dst1=%.6f",
     //                          sf[1], sf[hd+1], cache[2], cache[3], df[1], df[hd+1]);
     // }
+
+    // Snapshot dst first 8 floats (after rotation) to verify ROPE output.
+    // For in-place ops src0->data == dst->data, so this reflects rotated result.
+    if (src0->type == GGML_TYPE_F32) {
+        const float * df = (const float *)dst->data;
+        GGMLHEXAGON_LOG_WARN("ROPE diag: dst out[0..7]=[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f]",
+                             df[0], df[1], df[2], df[3], df[4], df[5], df[6], df[7]);
+        int hd = (int)(n_dims / 2);
+        if (hd >= 1 && hd <= 4) {
+            GGMLHEXAGON_LOG_WARN("ROPE diag: dst out[hd..hd+3]=[%.4f, %.4f, %.4f, %.4f] (hd=%d)",
+                                 df[hd], df[hd+1], df[hd+2], df[hd+3], hd);
+        } else {
+            GGMLHEXAGON_LOG_WARN("ROPE diag: dst out[128..131]=[%.4f, %.4f, %.4f, %.4f] (hd=128)",
+                                 df[128], df[129], df[130], df[131]);
+        }
+    }
 
     if (cache != s_rope_cache) free(cache);
 

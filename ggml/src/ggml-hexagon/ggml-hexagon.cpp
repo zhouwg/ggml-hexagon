@@ -262,8 +262,7 @@ struct hexagon_op_caps {
 struct hexagon_appcfg_t {
     int enable_perf;            // enable/disable perf of a specified ggml op
     int enable_profiler;        // enable/disable profiler feature
-    int print_tensors_info;     // enable/disable print tensors info in op function
-    int dump_op_info;           // enable/disable dump op info in handle_op
+    int dump_debug_info;        // enable/disable dump debug info for troubleshooting issues on AP side
     int enable_q_mulmat;        // enable/disable offload quantized mulmat
     int profiler_duration;      // threshold of duration in profiler, per seconds
     int profiler_counts;        // threshold of counts in profiler
@@ -285,8 +284,7 @@ struct hexagon_appcfg_t {
 static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .enable_perf            = 1,
         .enable_profiler        = 0,
-        .print_tensors_info     = 0,
-        .dump_op_info           = 0,
+        .dump_debug_info        = 0,
         .enable_q_mulmat        = 1,
         .profiler_duration      = 5,    //seconds
         .profiler_counts        = 100,
@@ -499,9 +497,13 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
 
     GGML_UNUSED(file);
-#if !(defined __ANDROID__) || !(defined ANDROID)
-    GGML_UNUSED(level);
-#endif
+
+    if (0 == g_hexagon_appcfg.dump_debug_info) {
+        if (level != GGML_LOG_LEVEL_CONT) {
+            return;
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(ggmlhexagon_log_internal_mutex);
         va_list args;
@@ -678,12 +680,6 @@ static bool ggmlhexagon_is_llamabench_running() {
 
 static void ggmlhexagon_print_tensors_info(const char * func_name, const ggml_backend_hexagon_context * ctx,
                 const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * dst) {
-    //skip sanity check of params because of performance concern
-    if (0 == g_hexagon_appcfg.dump_op_info) {
-        if (0 == g_hexagon_appcfg.print_tensors_info)
-            return;
-    }
-
     if (nullptr != func_name && nullptr != ctx) {
         GGMLHEXAGON_LOG_VERBOSE("call %s in dev %s\n", func_name, ctx->name);
     }
@@ -712,7 +708,7 @@ static void ggmlhexagon_print_tensors_info(const char * func_name, const ggml_ba
 
 static void ggmlhexagon_dump_op_info(const struct ggml_tensor * tensor) {
     //skip sanity check of params because of performance concern
-    if (0 == g_hexagon_appcfg.dump_op_info)
+    if (0 == g_hexagon_appcfg.dump_debug_info)
         return;
 
     const struct ggml_tensor * src0 = tensor->src[0];
@@ -1553,8 +1549,7 @@ static void ggmlhexagon_load_cfg() {
     std::string version; //version of ggml-hexagon
     hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99");
     hexagoncfg_instance.get_intvalue("general", "enable_perf", g_hexagon_appcfg.enable_perf, 1);
-    hexagoncfg_instance.get_intvalue("general", "print_tensors_info", g_hexagon_appcfg.print_tensors_info, 0);
-    hexagoncfg_instance.get_intvalue("general", "dump_op_info", g_hexagon_appcfg.dump_op_info, 0);
+    hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
     hexagoncfg_instance.get_intvalue("general", "enable_q_mulmat", g_hexagon_appcfg.enable_q_mulmat, 0);
     hexagoncfg_instance.get_intvalue("general", "enable_profiler", g_hexagon_appcfg.enable_profiler, 0);
     hexagoncfg_instance.get_intvalue("general", "profiler_duration", g_hexagon_appcfg.profiler_duration, 5);
@@ -3709,13 +3704,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
                 return false;
             if (!ggml_is_contiguous(src0))
                 return false;
-            // TG (small batch) with small data: offload overhead > compute, prefer CPU.
-            // PP (ne[1] large) always offloads to keep subgraph intact.
-            if (src0->ne[1] <= 16 && ggml_nbytes(src0) < 64 * 1024) {
-                GGMLHEXAGON_LOG_WARN("RMS_NORM filtered to CPU: ne[1]=%ld nbytes=%zu",
-                                     src0->ne[1], ggml_nbytes(src0));
-                return false;
-            }
             return true;
         }
         case GGML_OP_ROPE:
@@ -4351,15 +4339,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
     GGMLHEXAGON_LOG_WARN("cgraph has %d total nodes (gap_from_prev=%lld us)", cgraph->n_nodes, (long long)gap_from_prev);
     for (int i = 0; i < cgraph->n_nodes; i++) {
         ggml_tensor * node = cgraph->nodes[i];
+
+        std::string node_name;
+        ggmlhexagon_get_opkey_from_op(node, node_name);
+        GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
+
         if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
             || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
-
-        std::string node_name;
-        ggmlhexagon_get_opkey_from_op(node, node_name);
-        GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
 
         //TODO: use relaxed batch table to maximize batching
         if (ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(node)].supported) {
@@ -5049,7 +5038,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
                          (long long)t_p4, (long long)t_p6, (long long)t_p65,
                          (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
     GGMLHEXAGON_LOG_WARN("graph supported_nodes   %d", supported_nodes.size());
-    GGMLHEXAGON_LOG_WARN("graph in-graph unsupported_nodes %d (scheduler already filtered the rest to CPU)", unsupported_nodes.size());
     GGMLHEXAGON_LOG_WARN("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
     GGMLHEXAGON_LOG_WARN("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
                          (unsigned long long)ctx->rpc_batch_call_count,
