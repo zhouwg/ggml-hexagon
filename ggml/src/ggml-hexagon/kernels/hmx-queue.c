@@ -46,11 +46,14 @@ static inline void hmx_queue_process(struct hmx_queue *q, bool* killed) {
             enum hmx_queue_signal sig = (enum hmx_queue_signal) (unsigned int) d->func;
             switch (sig) {
                 case HMX_QUEUE_NOOP:    /* noop */;     break;
-                case HMX_QUEUE_KILL:    *killed = true; GGMLHEXAGON_LOG_INFO("hmx-queue: KILL signal"); break;
-                case HMX_QUEUE_SUSPEND: GGMLHEXAGON_LOG_INFO("hmx-queue: SUSPEND -> hmx_unlock"); hmx_unlock(q);  break;
+                case HMX_QUEUE_KILL:    *killed = true; FARF(ALWAYS, "hmx-queue: KILL signal"); break;
+                case HMX_QUEUE_SUSPEND: FARF(ALWAYS, "hmx-queue: SUSPEND -> hmx_unlock"); hmx_unlock(q);  break;
                 default:
+                    q->worker_state = 1; // locking
                     hmx_lock(q);
+                    q->worker_state = 2; // computing
                     d->func(d->data);
+                    q->worker_state = 3; // done
                     break;
             }
 
@@ -65,7 +68,7 @@ static inline void hmx_queue_process(struct hmx_queue *q, bool* killed) {
 static void hmx_queue_thread(void * arg) {
     struct hmx_queue * q = (struct hmx_queue *) arg;
 
-    GGMLHEXAGON_LOG_INFO("hmx-queue: thread started");
+    FARF(ALWAYS, "hmx-queue: thread started");
 
     bool killed = false;
 
@@ -84,7 +87,7 @@ static void hmx_queue_thread(void * arg) {
         hmx_queue_process(q, &killed);
     }
 
-    GGMLHEXAGON_LOG_INFO("hmx-queue: thread stopped");
+    FARF(ALWAYS, "hmx-queue: thread stopped");
 }
 
 struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
@@ -143,7 +146,7 @@ struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx) {
         return NULL;
     }
 
-    GGMLHEXAGON_LOG_INFO("hmx-queue: capacity %u\n", capacity);
+    FARF(ALWAYS, "hmx-queue: capacity %u", capacity);
 
     return q;
 }

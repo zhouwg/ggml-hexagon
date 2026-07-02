@@ -61,6 +61,7 @@ struct hmx_queue {
     void *           stack;
     uint32_t         hap_rctx;
     bool             hmx_locked;
+    volatile unsigned int worker_state; // 0=idle 1=locking 2=computing 3=done
 };
 
 struct hmx_queue * hmx_queue_create(size_t capacity, uint32_t hap_rctx);
@@ -76,7 +77,7 @@ static inline bool hmx_queue_push(struct hmx_queue * q, struct hmx_queue_desc d)
     unsigned int iw = q->idx_write;
 
     if (((iw + 1) & q->idx_mask) == ir) {
-        GGMLHEXAGON_LOG_INFO("hmx-queue: push FAIL (queue full, iw=%u ir=%u)", iw, ir);
+        FARF(ALWAYS, "hmx-queue: push FAIL (queue full, iw=%u ir=%u)", iw, ir);
         return false;
     }
 
@@ -127,8 +128,8 @@ static inline struct hmx_queue_desc hmx_queue_pop(struct hmx_queue * q) {
     unsigned int wait_cnt = 0;
     while (!atomic_load(&d->done)) {
         if ((++wait_cnt % 1000000) == 0) {
-            GGMLHEXAGON_LOG_INFO("hmx-queue: pop STUCK ip=%u func=%p (waited %u iterations)",
-                 ip, d->func, wait_cnt);
+            FARF(ALWAYS, "hmx-queue: pop STUCK ip=%u func=%p worker_state=%u hmx_locked=%d (waited %u iterations)",
+                 ip, d->func, q->worker_state, q->hmx_locked, wait_cnt);
         }
         hex_pause();
     }
