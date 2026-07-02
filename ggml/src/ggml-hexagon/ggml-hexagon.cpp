@@ -394,7 +394,7 @@ static constexpr const hexagon_op_caps ggmlhexagon_k_op_caps[] = {
     {true,  GGML_OP_CONCAT,   2, "ggmlop_dsp_concat",   nullptr},
     {false, GGML_OP_SILU_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_NORM,     0, nullptr, nullptr},
-    {true,  GGML_OP_RMS_NORM, 2, "ggmlop_dsp_rmsnorm", nullptr},
+    {true,  GGML_OP_RMS_NORM, 1, "ggmlop_dsp_rmsnorm", nullptr},
     {false, GGML_OP_RMS_NORM_BACK, 0, nullptr, nullptr},
     {false, GGML_OP_GROUP_NORM, 0, nullptr, nullptr},
     {false, GGML_OP_L2_NORM,  0, nullptr, nullptr},
@@ -3610,10 +3610,25 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
     }
 
     if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
+        // Log once per op type so the user can see what enabled_ops keeps on CPU.
+        // Without this, the "unsupported_nodes=0" log in graph_compute_ion is
+        // misleading: it only reflects ops that survived this scheduler filter.
+        static std::unordered_set<int> logged_filtered;
+        if (logged_filtered.find((int)op_tensor->op) == logged_filtered.end()) {
+            logged_filtered.insert((int)op_tensor->op);
+            GGMLHEXAGON_LOG_INFO("op %s filtered by enabled_ops (kept on CPU)",
+                                 ggml_op_name(op_tensor->op));
+        }
         return false;
     }
 
     if (!ggmlhexagon_k_op_caps[ggmlhexagon_get_op_index(op_tensor)].supported) {
+        static std::unordered_set<int> logged_unsupported;
+        if (logged_unsupported.find((int)op_tensor->op) == logged_unsupported.end()) {
+            logged_unsupported.insert((int)op_tensor->op);
+            GGMLHEXAGON_LOG_INFO("op %s not supported by op_caps (kept on CPU)",
+                                 ggml_op_name(op_tensor->op));
+        }
         return false;
     }
 
@@ -4805,6 +4820,21 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         uint32_t desc_end = batch_offset + total_desc_size;
         if (desc_end > clean_max) clean_max = desc_end;
 
+        // Also flush non-op tensors in cgraph not in tensor_src (e.g., test sentinels).
+        // Without this, Phase 7.5 DC CIVAC can invalidate cache lines containing
+        // unflushed sentinel data, causing sentinel mismatch.
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            ggml_tensor * t = cgraph->nodes[i];
+            if (!t || !t->data) continue;
+            const char * dp = (const char *)t->data;
+            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                uint32_t off = (uint32_t)(dp - ion_base);
+                uint32_t len = (uint32_t)ggml_nbytes(t);
+                if (off < clean_min) clean_min = off;
+                if (off + len > clean_max) clean_max = off + len;
+            }
+        }
+
         if (clean_max > clean_min) {
             cpu_dcache_flush_range(ctx, 0, (char *)ctx->rpc_mempool + clean_min, clean_max - clean_min);
             GGMLHEXAGON_LOG_DEBUG("ion-batch: phase6.5 DC CVAC [0x%x, 0x%x] (%u bytes)",
@@ -4815,6 +4845,32 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
 
         ctx->weights_dirty = false;
+    }
+
+    // AP-side PRE-CALL diagnostic: log first op's src0 first 4 floats after DC CVAC.
+    // Compare with [DSP-DIAG] POST-INVAL to pinpoint cache coherency issues.
+    if (n_ops > 0) {
+        const hex_op_desc & first_op = hex_ops[0];
+        uint32_t s0_idx = first_op.src0_idx;
+        if (s0_idx < n_tensors) {
+            ggml_tensor * s0_t = tensor_src[s0_idx];
+            if (s0_t && s0_t->data) {
+                const char * dp = (const char *)s0_t->data;
+                uint32_t s0_off = 0xFFFFFFFFu;
+                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                    s0_off = (uint32_t)(dp - ion_base);
+                } else {
+                    for (const auto & m : mirrors) {
+                        if ((uint32_t)m.tensor_idx == s0_idx) { s0_off = m.mirror_offset; break; }
+                    }
+                }
+                if (s0_off != 0xFFFFFFFFu) {
+                    const float * fv = (const float *)((const char *)ctx->rpc_mempool + s0_off);
+                    GGMLHEXAGON_LOG_WARN("[AP-PRE] batch first-op src0[tensor%u]: ION_off=0x%x f32=[%.4f, %.4f, %.4f, %.4f]",
+                                         s0_idx, s0_off, fv[0], fv[1], fv[2], fv[3]);
+                }
+            }
+        }
     }
 
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
@@ -4886,8 +4942,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
             if (dst_off == 0xFFFFFFFFu) continue;
 
             uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
-            uint32_t start = dst_off & ~127u;
-            uint32_t end   = (dst_off + dst_len + 127u) & ~127u;
+            uint32_t start = dst_off & ~63u;
+            uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
             if (start < inval_min) inval_min = start;
             if (end > inval_max) inval_max = end;
         }
@@ -4899,6 +4955,22 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
         int ion_fd = ctx->rpc_mempool_handle;
         if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+    }
+
+    // ---- Phase 7.6: Post-CIVAC verification ----
+    // Read dst AFTER DC CIVAC to see what the test framework will actually read.
+    // Compare with [AP-POST] (pre-CIVAC, AP cache) and DSP-DIAG dst to pinpoint issues.
+    if (hexagon_error == AEE_SUCCESS && n_ops > 0) {
+        const hex_op_desc & last_op = hex_ops[n_ops - 1];
+        uint32_t last_dst_idx = last_op.dst_idx;
+        if (last_dst_idx < n_tensors) {
+            ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
+            if (dst_tensor && dst_tensor->data) {
+                const float * ptr_vals = (const float *)dst_tensor->data;
+                GGMLHEXAGON_LOG_WARN("[AP-POST-CIVAC] dst[tensor%u]: PTR_f32=[%.4f, %.4f, %.4f, %.4f]",
+                                     last_dst_idx, ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3]);
+            }
+        }
     }
 
     // Reset bump pointer so next graph_compute reuses the same ION pool region.
@@ -4970,7 +5042,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
                          (long long)t_p4, (long long)t_p6, (long long)t_p65,
                          (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
     GGMLHEXAGON_LOG_WARN("graph supported_nodes   %d", supported_nodes.size());
-    GGMLHEXAGON_LOG_WARN("graph unsupported_nodes %d", unsupported_nodes.size());
+    GGMLHEXAGON_LOG_WARN("graph in-graph unsupported_nodes %d (scheduler already filtered the rest to CPU)", unsupported_nodes.size());
     GGMLHEXAGON_LOG_WARN("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
     GGMLHEXAGON_LOG_WARN("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
                          (unsigned long long)ctx->rpc_batch_call_count,
