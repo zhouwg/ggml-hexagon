@@ -634,6 +634,10 @@ int ggmlop_ensure_vtcm_available(void) {
         return -1;
     }
     g_vtcm_valid = 1;
+    // Lower our priority so other sessions (e.g. QNN) can preempt and receive
+    // release callbacks. Matches Qualcomm htp/main.c vtcm_acquire.
+    HAP_compute_res_update_priority(g_compute_res_ctx_id,
+                                    qurt_thread_get_priority(qurt_thread_get_id()) + 10);
     GGMLHEXAGON_LOG_INFO("VTCM acquired successfully");
     return 0;
 }
@@ -991,6 +995,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
      * Replaces per-op dcinva+syncht with one batched syncht.
      * dcinva (invalidate-only) avoids writing stale dirty lines back to DRAM
      * when ION regions are reused across batches. */
+    FARF(ALWAYS, "ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
         ggmlop_dsp_cache_inval_range_nosync(
@@ -1013,6 +1018,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         }
     }
     __asm__ __volatile__("syncht\n");
+
+    FARF(ALWAYS, "ion-batch: pass1 done, starting pass2");
 
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
@@ -1102,6 +1109,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         /* src cache invalidation is done in Pass 1 above (batched syncht) */
 
+        FARF(ALWAYS, "ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
+
         int op_ret = 0;
         switch (op->opcode) {
             case GGML_OP_SUB:
@@ -1141,6 +1150,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         }
         if (op_ret != 0) return op_ret;
 
+        FARF(ALWAYS, "ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
+
         /* Flush DSP cache after writing dst (so AP can read from DRAM) */
         ggmlop_dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
 
@@ -1153,6 +1164,8 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             }
         }
     }
+
+    FARF(ALWAYS, "ion-batch: all %u ops done", hdr->n_ops);
 
     /* Last op's cache_flush_range already issued syncht, ensuring all dst
      * writebacks complete before AP reads from DRAM. */

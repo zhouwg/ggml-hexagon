@@ -1997,26 +1997,22 @@ bail:
 
 static void ggmlhexagon_set_rpc_latency(remote_handle64 handle, int qos, int latency) {
     int hexagon_error = AEE_SUCCESS;
+    (void)latency;  // unused: aligning with QCOM reference, only enable is set
 
     if (remote_handle_control) {
+        // Align with QCOM reference: only enable QoS mode, let DSP decide latency.
         struct remote_rpc_control_latency data;
-/*
-        qos          |  latency
-        -----------------------
-        RPC_PM_QOS   |  100
-        RPC_POLL_QOS |  1000
-*/
-        data.enable   = qos;
-        data.latency  = latency;
+        memset(&data, 0, sizeof(data));
+        data.enable = qos;
         hexagon_error = remote_handle64_control(handle, DSPRPC_CONTROL_LATENCY, (void*)&data, sizeof(data));
         if (hexagon_error != AEE_SUCCESS) {
             GGMLHEXAGON_LOG_WARN("failed with error 0x%x", hexagon_error);
             goto bail;
         } else {
             if (ggmlhexagon_is_llamabench_running()) {
-                GGMLHEXAGON_LOG_VERBOSE("set rpc qos %d, latency %d\n", qos, latency);
+                GGMLHEXAGON_LOG_VERBOSE("set rpc qos %d (DSP default latency)\n", qos);
             } else {
-                GGMLHEXAGON_LOG_INFO("set rpc qos %d, latency %d\n", qos, latency);
+                GGMLHEXAGON_LOG_INFO("set rpc qos %d (DSP default latency)\n", qos);
             }
         }
     } else {
@@ -2719,7 +2715,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_WARN("error 0x%x: failed to compute on domain %d", hexagon_error, domain_id);
         goto bail;
     }
-    ggmlhexagon_set_priority(domain_id, 160);
+    //ggmlhexagon_set_priority(domain_id, 160);
 
     //probe arch and build the versioned dsp skel URI
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
@@ -4824,6 +4820,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
     t_p65 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     ctx->rpc_batch_call_count++;
+    GGMLHEXAGON_LOG_WARN("batch_call #%llu n_ops=%u", ctx->rpc_batch_call_count, n_ops);
     int hexagon_error = ggmlop_dsp_execute_batch_ion(ctx->ggmlop_handle, batch_offset, total_desc_size);
 
     if (AEE_SUCCESS != hexagon_error) {
