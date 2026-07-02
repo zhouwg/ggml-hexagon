@@ -3709,6 +3709,13 @@ static bool ggmlhexagon_can_handle_op_through_cdsp_ion(ggml_backend_dev_t dev, c
                 return false;
             if (!ggml_is_contiguous(src0))
                 return false;
+            // TG (small batch) with small data: offload overhead > compute, prefer CPU.
+            // PP (ne[1] large) always offloads to keep subgraph intact.
+            if (src0->ne[1] <= 16 && ggml_nbytes(src0) < 64 * 1024) {
+                GGMLHEXAGON_LOG_WARN("RMS_NORM filtered to CPU: ne[1]=%ld nbytes=%zu",
+                                     src0->ne[1], ggml_nbytes(src0));
+                return false;
+            }
             return true;
         }
         case GGML_OP_ROPE:

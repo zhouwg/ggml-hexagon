@@ -79,9 +79,6 @@ static void ggml_compute_forward_rms_norm_f32(
 
     int64_t start_time = ggml_time_us();
 
-    ggml_dump_tensor(src0, 1);
-    ggml_dump_tensor(dst, 1);
-
     float eps;
     memcpy(&eps, dst->op_params, sizeof(float));
     GGML_ASSERT(eps >= 0.0f);
@@ -89,18 +86,10 @@ static void ggml_compute_forward_rms_norm_f32(
     int64_t ne00 = src0->ne[0];
     int64_t nrows = src0->ne[1] * src0->ne[2] * src0->ne[3];
 
-    GGMLHEXAGON_LOG_INFO("RMS_NORM: src0 ne=[%lld,%lld,%lld,%lld] nb=[%d,%d,%d,%d] data=%p data_len=%d",
-                         (long long)src0->ne[0], (long long)src0->ne[1],
-                         (long long)src0->ne[2], (long long)src0->ne[3],
-                         src0->nb[0], src0->nb[1], src0->nb[2], src0->nb[3],
-                         src0->data, src0->data_len);
-    GGMLHEXAGON_LOG_INFO("RMS_NORM: dst  ne=[%lld,%lld,%lld,%lld] nb=[%d,%d,%d,%d] data=%p data_len=%d",
-                         (long long)dst->ne[0], (long long)dst->ne[1],
-                         (long long)dst->ne[2], (long long)dst->ne[3],
-                         dst->nb[0], dst->nb[1], dst->nb[2], dst->nb[3],
-                         dst->data, dst->data_len);
-    GGMLHEXAGON_LOG_INFO("RMS_NORM: eps=%f, contiguous=%d, nrows=%lld",
-                         eps, ggml_is_contiguous(src0), (long long)nrows);
+    GGMLHEXAGON_LOG_DEBUG("RMS_NORM: src0 ne=[%lld,%lld,%lld,%lld] nrows=%lld eps=%f",
+                          (long long)src0->ne[0], (long long)src0->ne[1],
+                          (long long)src0->ne[2], (long long)src0->ne[3],
+                          (long long)nrows, eps);
 
     if (ggmlop_get_thread_counts() > 1 && nrows >= ggmlop_get_thread_counts() * 2) {
         int num_threads = ggmlop_get_thread_counts();
@@ -167,7 +156,7 @@ static void ggml_compute_forward_rms_norm_f32(
 
     int64_t end_time = ggml_time_us();
     int64_t duration = end_time - start_time;
-    GGMLHEXAGON_LOG_INFO("RMS_NORM elapse %lld us (ne00=%lld, nrows=%lld, eps=%f)",
+    GGMLHEXAGON_LOG_DEBUG("RMS_NORM elapse %lld us (ne00=%lld, nrows=%lld, eps=%f)",
                          (long long)duration, (long long)ne00, (long long)nrows, eps);
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
@@ -188,7 +177,7 @@ int ggmlop_dsp_rmsnorm(remote_handle64 h, const ggml_tensor * src0, const ggml_t
     ggml_compute_forward_rms_norm_f32(src0, dst);
 
     int64_t end_time = ggml_time_us();
-    GGMLHEXAGON_LOG_INFO("RMS_NORM elapse %lld us (ne00=%lld, nrows=%lld)",
+    GGMLHEXAGON_LOG_DEBUG("RMS_NORM elapse %lld us (ne00=%lld, nrows=%lld)",
                          (long long)(end_time - begin_time),
                          (long long)src0->ne[0],
                          (long long)(src0->ne[1] * src0->ne[2] * src0->ne[3]));
