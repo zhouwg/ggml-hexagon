@@ -7492,29 +7492,6 @@ void ggmlop_dsp_cache_inval_range(void * addr, size_t size) {
     __asm__ __volatile__("syncht\n");
 }
 
-/* Nosync variants: issue dcinva/dccleaninva without syncht barrier.
- * Caller must issue syncht before reading the invalidated range.
- * Used to batch multiple cache ops into a single syncht. */
-void ggmlop_dsp_cache_inval_range_nosync(void * addr, size_t size) {
-    if (!addr || size == 0) return;
-    char * p = (char *)addr;
-    char * end = p + size;
-    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
-    /* dcinva does not trigger page faults on Hexagon. Touch one byte per
-     * page to fault it in before invalidating. Without this, Pass 1 (which
-     * runs before any op accesses the tensor data) crashes with TLBMISS on
-     * pages that haven't been faulted in by prior op execution. */
-    uintptr_t last_page = 0;
-    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
-        uintptr_t cur_page = (uintptr_t)p & ~0xFFFULL;
-        if (cur_page != last_page) {
-            (void) *(volatile char *)p;
-            last_page = cur_page;
-        }
-        Q6_dcinva_A(p);
-    }
-}
-
 /*
  * Clean (writeback) DSP cache for a range of cacheable VTCM memory.
  * Uses Q6_dccleana_A (clean only, NO invalidate). Writes back dirty L1/L2

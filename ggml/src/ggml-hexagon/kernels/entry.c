@@ -969,9 +969,9 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
      * at the same offset, so DSP must invalidate to fetch fresh data.
-     * Use dcinva (invalidate-only) instead of dccleaninva: the descriptor
-     * region may have been a previous op's dst, and clean+invalidate would
-     * write stale dirty data back to DRAM, corrupting the fresh descriptor. */
+     * Use dcinva (invalidate only) instead of dccleaninva (clean+invalidate):
+     * dccleaninva would write back stale DSP cache lines to DRAM, overwriting
+     * the fresh data AP just flushed via DC CVAC. */
     ggmlop_dsp_cache_inval_range((void *)(base + batch_offset), batch_size);
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
@@ -991,35 +991,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         return AEE_EFAILED;
     }
 
-    /* Pass 1: invalidate all src tensor data before executing any op.
-     * Replaces per-op dcinva+syncht with one batched syncht.
-     * dcinva (invalidate-only) avoids writing stale dirty lines back to DRAM
-     * when ION regions are reused across batches. */
     FARF(ALWAYS, "ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
-    for (uint32_t i = 0; i < hdr->n_ops; i++) {
-        const hex_op_desc * op = &ops[i];
-        ggmlop_dsp_cache_inval_range_nosync(
-            (void *)(base + tens[op->src0_idx].data_offset),
-            tens[op->src0_idx].data_len);
-        if (op->src1_idx >= 0) {
-            ggmlop_dsp_cache_inval_range_nosync(
-                (void *)(base + tens[op->src1_idx].data_offset),
-                tens[op->src1_idx].data_len);
-        }
-        if (op->src2_idx >= 0) {
-            ggmlop_dsp_cache_inval_range_nosync(
-                (void *)(base + tens[op->src2_idx].data_offset),
-                tens[op->src2_idx].data_len);
-        }
-        if (op->src3_idx >= 0) {
-            ggmlop_dsp_cache_inval_range_nosync(
-                (void *)(base + tens[op->src3_idx].data_offset),
-                tens[op->src3_idx].data_len);
-        }
-    }
-    __asm__ __volatile__("syncht\n");
-
-    FARF(ALWAYS, "ion-batch: pass1 done, starting pass2");
 
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
@@ -1039,10 +1011,10 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         src0_dt.data_len = t0->data_len;
 
         if (1 == g_dump_diag_info) {
-            /* DSP-side DIAG: dump first 4 f32 values from src0 data */
+            /* DSP-side DIAG: dump first 4 f32 values from src0 data (BEFORE dcinva) */
             if (src0_dt.data && src0_dt.data_len >= 16) {
                 const float * fv = (const float *)src0_dt.data;
-                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 PRE-INVAL off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
                                  i, t0->data_offset, src0_dt.data, fv[0], fv[1], fv[2], fv[3]);
             }
         }
@@ -1107,7 +1079,30 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         dst_dt.data     = (void *)(base + td->data_offset);
         dst_dt.data_len = td->data_len;
 
-        /* src cache invalidation is done in Pass 1 above (batched syncht) */
+        /* Cache maintenance for non-coherent ION memory:
+         * - Invalidate DSP cache before reading src (AP wrote data into ION)
+         * - Always invalidate, even for weights: ION region reuse means the
+         *   same address may hold different data from a previous allocation
+         * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
+         *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
+         *   stale DSP cache lines and clobber the fresh DRAM data. */
+        ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
+        if (src1_dt_ptr) ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
+        if (src2_dt_ptr) ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
+        if (src3_dt_ptr) ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+
+        if (1 == g_dump_diag_info) {
+            /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).
+             * Compare with PRE-INVAL values to detect stale cache lines. */
+            if (src0_dt.data && src0_dt.data_len >= 16) {
+                const float * fv = (const float *)src0_dt.data;
+                float eps_f;
+                memcpy(&eps_f, dst_dt.op_params, sizeof(float));
+                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 POST-INVAL off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f] eps=%f ne=[%d,%d,%d,%d]",
+                                 i, t0->data_offset, src0_dt.data, fv[0], fv[1], fv[2], fv[3], eps_f,
+                                 (int)src0_dt.ne[0], (int)src0_dt.ne[1], (int)src0_dt.ne[2], (int)src0_dt.ne[3]);
+            }
+        }
 
         FARF(ALWAYS, "ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
 
@@ -1167,8 +1162,13 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
     FARF(ALWAYS, "ion-batch: all %u ops done", hdr->n_ops);
 
-    /* Last op's cache_flush_range already issued syncht, ensuring all dst
-     * writebacks complete before AP reads from DRAM. */
+    __asm__ __volatile__("" ::: "memory");
+    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx < hdr->n_tensors) {
+        uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx].data_offset;
+        if (batch_size > last_off + 4)
+            (void) *(volatile const int *)(base + last_off);
+    }
+    __asm__ __volatile__("" ::: "memory");
 
     /* Lazy VTCM release: if the release callback flagged us during the batch,
      * release now so other sessions (QNN/another GGML session) can use VTCM.
