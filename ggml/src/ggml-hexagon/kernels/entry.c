@@ -3,11 +3,13 @@
 #include <HAP_dcvs.h>
 #include <HAP_mem.h>
 #include <HAP_compute_res.h>
+#include <math.h>
 
 #include "ggml-dsp.h"
 #include "ggml-ops.h"
 #include "../htp/htp-ctx.h"
 #include "../htp/matmul-ops.h"
+#include "../htp/flash-attn-ops.h"
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
@@ -90,8 +92,8 @@ static int execute_op(struct htp_ops_context * octx) {
             return op_softmax(octx);
         case HTP_OP_ROPE:
             return op_rope(octx);
-        // case HTP_OP_FLASH_ATTN_EXT:
-        //     return op_flash_attn_ext(octx);
+        case HTP_OP_FLASH_ATTN_EXT:
+            return op_flash_attn_ext(octx);
         case HTP_OP_SET_ROWS:
             return op_set_rows(octx);
         case HTP_OP_GET_ROWS:
@@ -155,6 +157,7 @@ static inline void dsptensor_to_htp_tensor(const dsptensor * dt,
 }
 
 // Map GGML opcode to HTP opcode. Returns 0 on success, -1 if unsupported.
+// For GGML_OP_UNARY, op_params[0] selects the unary sub-op.
 static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
                              enum htp_op_code * htp_op) {
     switch (ggml_op) {
@@ -165,6 +168,59 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_MUL_MAT:  *htp_op = HTP_OP_MUL_MAT;     return 0;
         case GGML_OP_RMS_NORM: *htp_op = HTP_OP_RMS_NORM;    return 0;
         case GGML_OP_ROPE:     *htp_op = HTP_OP_ROPE;        return 0;
+        case GGML_OP_FLASH_ATTN_EXT: *htp_op = HTP_OP_FLASH_ATTN_EXT; return 0;
+        case GGML_OP_SOFT_MAX: *htp_op = HTP_OP_SOFTMAX;     return 0;
+        case GGML_OP_SCALE:   *htp_op = HTP_OP_SCALE;       return 0;
+        case GGML_OP_CONCAT:  *htp_op = HTP_OP_CONCAT;      return 0;
+        case GGML_OP_CPY:     *htp_op = HTP_OP_CPY;         return 0;
+        case GGML_OP_GET_ROWS: *htp_op = HTP_OP_GET_ROWS;   return 0;
+        case GGML_OP_SET_ROWS: *htp_op = HTP_OP_SET_ROWS;   return 0;
+        case GGML_OP_SUM_ROWS: *htp_op = HTP_OP_SUM_ROWS;   return 0;
+        case GGML_OP_CONT:    *htp_op = HTP_OP_CPY;         return 0;
+        case GGML_OP_REPEAT:  *htp_op = HTP_OP_REPEAT;       return 0;
+        case GGML_OP_NORM:    *htp_op = HTP_OP_NORM;        return 0;
+        case GGML_OP_L2_NORM: *htp_op = HTP_OP_L2_NORM;     return 0;
+        case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return 0;
+        case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return 0;
+        case GGML_OP_ARGSORT: *htp_op = HTP_OP_ARGSORT;     return 0;
+        case GGML_OP_PAD:     *htp_op = HTP_OP_PAD;         return 0;
+        case GGML_OP_CUMSUM:  *htp_op = HTP_OP_CUMSUM;      return 0;
+        case GGML_OP_FILL:    *htp_op = HTP_OP_FILL;        return 0;
+        case GGML_OP_DIAG:    *htp_op = HTP_OP_DIAG;        return 0;
+        case GGML_OP_TRI:     *htp_op = HTP_OP_TRI;         return 0;
+        case GGML_OP_UNARY: {
+            if (!op_params) {
+                FARF(ERROR, "ggml_op_to_htp_op: UNARY missing op_params");
+                return -1;
+            }
+            switch (op_params[0]) {
+                case GGML_UNARY_OP_NEG:      *htp_op = HTP_OP_UNARY_NEG;      return 0;
+                case GGML_UNARY_OP_TANH:     *htp_op = HTP_OP_UNARY_TANH;     return 0;
+                case GGML_UNARY_OP_SIGMOID:  *htp_op = HTP_OP_UNARY_SIGMOID;  return 0;
+                case GGML_UNARY_OP_GELU:
+                case GGML_UNARY_OP_GELU_QUICK: *htp_op = HTP_OP_UNARY_GELU;     return 0;
+                case GGML_UNARY_OP_SILU:      *htp_op = HTP_OP_UNARY_SILU;     return 0;
+                case GGML_UNARY_OP_EXP:       *htp_op = HTP_OP_UNARY_EXP;      return 0;
+                case GGML_UNARY_OP_SOFTPLUS: *htp_op = HTP_OP_UNARY_SOFTPLUS; return 0;
+                default:
+                    FARF(ERROR, "ggml_op_to_htp_op: unsupported unary_op %d", op_params[0]);
+                    return -1;
+            }
+        }
+        case GGML_OP_GLU: {
+            if (!op_params) {
+                FARF(ERROR, "ggml_op_to_htp_op: GLU missing op_params");
+                return -1;
+            }
+            switch (op_params[0]) {
+                case GGML_GLU_OP_SWIGLU:     *htp_op = HTP_OP_GLU_SWIGLU;     return 0;
+                case GGML_GLU_OP_SWIGLU_OAI: *htp_op = HTP_OP_GLU_SWIGLU_OAI; return 0;
+                case GGML_GLU_OP_GEGLU:      *htp_op = HTP_OP_GLU_GEGLU;      return 0;
+                default:
+                    FARF(ERROR, "ggml_op_to_htp_op: unsupported glu_op %d", op_params[0]);
+                    return -1;
+            }
+        }
         default:
             FARF(ERROR, "ggml_op_to_htp_op: unsupported ggml_op %d", ggml_op);
             return -1;
@@ -215,9 +271,115 @@ static void build_htp_octx(
     octx->n_threads = (uint32_t)g_thread_counts;
 }
 
+// Try HMX precompute (simple 2D path). Mirrors ggml_hexagon_precompute_hmx_mm_params
+// without the grouped batched path (we don't use MUL_MAT_ID).
+// Returns true on success, false to fall back to HVX.
+static bool build_mm_hmx_params(struct htp_ops_context * octx,
+                                struct htp_mm_kernel_params * kparams) {
+    const struct htp_tensor * src0 = octx->src[0];
+    const struct htp_tensor * src1 = octx->src[1];
+
+    const int      wtype = src0->type;
+    const uint32_t ne00  = src0->ne[0];
+    const uint32_t ne01  = src0->ne[1];
+    const uint32_t ne02  = src0->ne[2];
+    const uint32_t ne03  = src0->ne[3];
+    const uint32_t ne10  = src1->ne[0];
+    const uint32_t ne11  = src1->ne[1];
+    const uint32_t ne12  = src1->ne[2];
+    const uint32_t ne13  = src1->ne[3];
+
+    const bool is_repack = (wtype == HTP_TYPE_Q4_0 || wtype == HTP_TYPE_Q4_1 ||
+                            wtype == HTP_TYPE_Q8_0 || wtype == HTP_TYPE_IQ4_NL ||
+                            wtype == HTP_TYPE_MXFP4);
+    const bool is_hmx_wtype = (wtype == HTP_TYPE_F16 || wtype == HTP_TYPE_F32 || is_repack);
+    if (!is_hmx_wtype) return false;
+
+    const bool is_batched = (ne02 * ne03 > 1 || ne12 * ne13 > 1);
+
+    const int ne00_padded = is_repack ? hex_round_up(ne00, 32) : (int) ne00;
+    const int ne01_padded = is_repack ? hex_round_up(ne01, 32) : (int) ne01;
+    const int ne11_padded = hex_round_up(ne11, 32);
+
+    // Eligibility (mirrors ggml_hexagon_matmul_is_hmx_eligible)
+    if (ne01_padded % 32 != 0) return false;
+    if (ne00 % 32 != 0) return false;
+    if (is_batched && wtype != HTP_TYPE_F16) return false;
+    if (src0->nb[0] > src0->nb[1] || src1->nb[0] > src1->nb[1]) return false;
+    if (ne11 <= HTP_MM_HMX_MIN_NROWS) return false;
+
+    const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+    const bool     pipeline          = htp_mm_hmx_pipeline(ne11);
+    const int      n_threads         = (int) octx->n_threads;
+    const size_t   vtcm_budget       = g_vtcm_size;
+
+    size_t best_mblocks       = SIZE_MAX;
+    int    best_act_threads   = 0;
+    size_t best_m_chunk       = 0;
+    size_t best_n_chunk       = 0;
+    size_t best_vtcm_size     = 0;
+
+    int act_threads = n_threads;
+    while (act_threads >= 1) {
+        const size_t act_f32_size = hex_align_up(
+            (size_t) act_threads * HTP_MM_DMA_ACT_MULTIPLIER * ne00_padded * sizeof(float),
+            HTP_MM_HMX_TILE_SIZE);
+        const size_t overhead = 256 + act_f32_size;
+
+        size_t cost_n = 0, cost_m = 0, cost_mn = 0;
+        htp_mm_hmx_get_2d_chunk_costs(wtype, ne00_padded, pipeline, aligned_tile_size,
+                                      &cost_n, &cost_m, &cost_mn);
+
+        size_t m_chunk_cand = 0, n_chunk_cand = 0, vtcm_size_cand = 0;
+        if (htp_mm_hmx_compute_chunks(vtcm_budget, overhead, cost_n, cost_m, cost_mn,
+                                      (size_t) ne11_padded, (size_t) ne01_padded,
+                                      (size_t) ne01_padded * HTP_MM_HMX_COST_W_DEQUANT,
+                                      (size_t) ne11 * HTP_MM_HMX_COST_A_CONVERT,
+                                      &m_chunk_cand, &n_chunk_cand, &vtcm_size_cand) == 0) {
+            size_t exact_size = htp_mm_hmx_get_2d_vtcm_size(
+                wtype, ne00_padded, m_chunk_cand, n_chunk_cand, pipeline,
+                act_threads, aligned_tile_size);
+            if (exact_size <= vtcm_budget) {
+                size_t mblocks = ((size_t) ne11 + m_chunk_cand - 1) / m_chunk_cand;
+                if (mblocks < best_mblocks ||
+                    (mblocks == best_mblocks && act_threads > best_act_threads)) {
+                    best_mblocks     = mblocks;
+                    best_act_threads = act_threads;
+                    best_m_chunk     = m_chunk_cand;
+                    best_n_chunk     = n_chunk_cand;
+                    best_vtcm_size   = exact_size;
+                }
+            }
+        }
+        if (act_threads == 1) break;
+        act_threads /= 2;
+    }
+
+    if (best_act_threads == 0) return false;
+
+    kparams->n_hmx             = 1;
+    kparams->pipeline           = pipeline ? 1 : 0;
+    kparams->m_chunk            = (int32_t) best_m_chunk;
+    kparams->n_chunk            = (int32_t) best_n_chunk;
+    kparams->n_threads          = n_threads;
+    kparams->n_act_threads      = best_act_threads;
+    kparams->tile_size          = (int32_t) htp_mm_get_weight_tile_size(wtype);
+    kparams->aligned_tile_size  = (int32_t) aligned_tile_size;
+    kparams->src1_row_size      = (int32_t)((wtype == HTP_TYPE_Q4_1)
+                                            ? htp_mm_q8_1_tiled_row_size(ne10)
+                                            : htp_mm_q8_0_tiled_row_size(ne10));
+    kparams->vtcm_size          = (int32_t) best_vtcm_size;
+    kparams->vtcm_src0_size     = 0;
+    kparams->vtcm_src1_size     = 0;
+    kparams->vtcm_dst_size      = 0;
+    kparams->n_prefetch         = 16;
+    kparams->kernel_type        = is_batched ? HTP_MM_KERNEL_HMX_F16_BATCHED
+                                             : HTP_MM_KERNEL_HMX_2D;
+    return true;
+}
+
 // Compute htp_mm_kernel_params on DSP side for MUL_MAT.
-// Mirrors ggml_hexagon_precompute_hvx_mm_params (F32/F16 paths only).
-// HMX and quantized paths are not yet supported.
+// Tries HMX first (if available), falls back to HVX F32/F16/quantized paths.
 static int build_mm_kernel_params(struct htp_ops_context * octx) {
     const struct htp_tensor * src0 = octx->src[0];
     const struct htp_tensor * src1 = octx->src[1];
@@ -240,6 +402,11 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
     kparams->n_hmx       = 0;
     kparams->n_threads   = octx->n_threads;
     kparams->n_prefetch  = 16;
+
+    // Try HMX first (mirrors ggml_hexagon_precompute_matmul_params: HMX-first, HVX-fallback)
+    if (g_hmx_available && build_mm_hmx_params(octx, kparams)) {
+        goto mm_finalize;
+    }
 
     const bool is_batched  = (ne02 > 1) || (ne03 > 1);
     const bool is_permuted = (src0->nb[0] > src0->nb[1] || src0->nb[1] > src0->nb[2] || src0->nb[2] > src0->nb[3]) ||
@@ -361,6 +528,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
         }
     }
 
+mm_finalize:
     kparams->div_ne12_ne1 = init_fastdiv_values(ne12 * ne11);
     kparams->div_ne1      = init_fastdiv_values(ne11);
     kparams->div_r2       = init_fastdiv_values(ne02 > 0 ? ne12 / ne02 : 1);
@@ -370,7 +538,122 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
     return 0;
 }
 
-// Stub: FP16 weight cache was managed by kernels/mulmat.c (removed from build).
+// Build htp_fa_kernel_params on DSP side for FLASH_ATTN_EXT.
+// Mirrors ggml_hexagon_precompute_flash_attn_params on AP side, using
+// DSP-side globals (g_vtcm_size, g_thread_counts, g_hmx_available).
+static int build_fa_kernel_params(struct htp_ops_context * octx) {
+    const struct htp_tensor * q  = octx->src[0];
+    const struct htp_tensor * k  = octx->src[1];
+    const struct htp_tensor * v  = octx->src[2];
+    const struct htp_tensor * mask = octx->src[3];
+    const struct htp_tensor * dst = octx->dst;
+    if (!q || !k || !v || !dst) return -1;
+    FARF(ALWAYS, "build_fa: DK=%u DV=%u neq1=%u nek1=%u G=%u ktype=%d vtype=%d hmx=%d",
+         q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2]/k->ne[2],
+         k->type, v->type, g_hmx_available);
+
+    struct htp_fa_kernel_params * kparams =
+        (struct htp_fa_kernel_params *) octx->kernel_params;
+    memset(kparams, 0, sizeof(*kparams));
+
+    const uint32_t DK = q->ne[0];
+    const uint32_t DV = v->ne[0];
+    const uint32_t neq1 = q->ne[1];
+    const uint32_t nek1 = k->ne[1];
+    const uint32_t n_kv_heads = k->ne[2];
+    const uint32_t G = q->ne[2] / n_kv_heads;
+
+    float scale = 1.0f, max_bias = 0.0f, logit_softcap = 0.0f;
+    memcpy(&scale,         &octx->op_params[0], sizeof(float));
+    memcpy(&max_bias,      &octx->op_params[1], sizeof(float));
+    memcpy(&logit_softcap, &octx->op_params[2], sizeof(float));
+    if (logit_softcap != 0.0f) scale /= logit_softcap;
+
+    kparams->scale         = scale;
+    kparams->max_bias      = max_bias;
+    kparams->logit_softcap = logit_softcap;
+    kparams->is_q_fp32     = (q->type == HTP_TYPE_F32) ? 1 : 0;
+    kparams->is_dst_fp32   = (dst->type == HTP_TYPE_F32) ? 1 : 0;
+    kparams->G             = G;
+
+    // ALiBi: find largest power of 2 <= n_head, then compute slope bases.
+    // AP uses std::pow(2, -x); here we use 2^x = exp(x * ln2) to avoid powf.
+    // Always computed (matches AP): when max_bias = 0, m0 = m1 = 1.0.
+    const float ln2 = 0.6931471805599453f;
+    uint32_t n_head_log2 = 1;
+    while (n_head_log2 * 2u <= q->ne[2]) n_head_log2 *= 2;
+    kparams->n_head_log2 = n_head_log2;
+    kparams->m0 = expf(-ln2 * max_bias / (float)n_head_log2);
+    kparams->m1 = expf(-ln2 * (max_bias * 0.5f) / (float)n_head_log2);
+
+    // HMX eligibility: k/v F16, DK/DV divisible by 64, enough tokens.
+    bool hmx_eligible = false;
+    if (g_hmx_available && k->type == HTP_TYPE_F16 && v->type == HTP_TYPE_F16) {
+        if (DK % 64 == 0 && DV % 64 == 0 && !(DK <= 128 && neq1 < 5)) {
+            hmx_eligible = true;
+        }
+    }
+
+    if (hmx_eligible) {
+        size_t Br = 0, Bc = 0;
+        int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
+                                         g_vtcm_size, g_thread_counts);
+        if (ret == 0) {
+            kparams->kernel_type = HTP_FA_KERNEL_HMX;
+            kparams->Br          = (uint16_t)Br;
+            kparams->Bc          = (uint16_t)Bc;
+            kparams->n_kv_blocks = (uint16_t)((nek1 + Bc - 1) / Bc);
+            kparams->n_threads   = (kparams->n_kv_blocks >= 3 && g_thread_counts >= 2)
+                                    ? (uint8_t)g_thread_counts : 1;
+            kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
+            kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && g_thread_counts >= 2) ? 1 : 0;
+            kparams->vtcm_size       = (uint32_t)hmx_fa_compute_vtcm_usage(
+                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0);
+
+            const size_t row_vec_bytes = hex_align_up(Bc * sizeof(uint16_t), 256);
+            kparams->u.hmx.row_buf_stride = row_vec_bytes / 128;
+            const size_t m_line_bytes = hex_align_up(Bc * sizeof(uint16_t), 128);
+            kparams->u.hmx.mask_buf_row_stride = m_line_bytes / sizeof(uint16_t);
+            kparams->u.hmx.mask_broadcast = (mask && mask->ne[2] == 1) ? 1 : 0;
+            kparams->u.hmx.div_G = init_fastdiv_values(G);
+            if (mask) {
+                kparams->src3_div2 = init_fastdiv_values(mask->ne[2]);
+                kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
+            }
+            kparams->qrows = 0;
+            kparams->qrows_per_thread = 0;
+            return 0;
+        }
+    }
+
+    // Fallback to HVX
+    kparams->kernel_type    = HTP_FA_KERNEL_HVX;
+    kparams->Br             = 1;
+    kparams->Bc             = 64;
+    kparams->n_kv_blocks    = (uint16_t)((k->ne[1] + 64 - 1) / 64);
+    kparams->n_threads      = (uint8_t)g_thread_counts;
+    kparams->vtcm_size      = (uint32_t)hvx_fa_compute_vtcm_usage(
+        DK, DV, kparams->is_q_fp32 != 0, mask != NULL, g_thread_counts);
+
+    kparams->u.hvx.size_q_row_padded = hex_round_up(q->ne[0] * (kparams->is_q_fp32 ? 4 : 2), 128);
+    kparams->u.hvx.size_k_row_padded = hex_round_up(k->ne[0] * 2, 128);
+    kparams->u.hvx.size_v_row_padded = hex_round_up(v->ne[0] * 2, 128);
+    kparams->u.hvx.src0_div21     = init_fastdiv_values(q->ne[2] * q->ne[1]);
+    kparams->u.hvx.src0_div1      = init_fastdiv_values(q->ne[1]);
+    kparams->u.hvx.broadcast_rk2   = init_fastdiv_values(q->ne[2] / k->ne[2]);
+    kparams->u.hvx.broadcast_rk3   = init_fastdiv_values(q->ne[3] / k->ne[3]);
+    kparams->u.hvx.broadcast_rv2   = init_fastdiv_values(q->ne[2] / v->ne[2]);
+    kparams->u.hvx.broadcast_rv3   = init_fastdiv_values(q->ne[3] / v->ne[3]);
+    if (mask) {
+        kparams->src3_div2 = init_fastdiv_values(mask->ne[2]);
+        kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
+    }
+    kparams->qrows           = q->ne[1] * q->ne[2] * q->ne[3];
+    kparams->qrows_per_thread = (kparams->qrows + g_thread_counts - 1) / g_thread_counts;
+    return 0;
+}
+
+// Stub: original FP16 weight cache was managed by kernels/mulmat.c (removed from build).
 // The ION cache region setup is preserved, but no cache entries are populated.
 void ggmlop_dsp_fp16_cache_reset(void) {
     // no-op: cache is reset via g_ion_cache_offset in ggmlop_dsp_execute_batch_ion
@@ -1342,7 +1625,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         return AEE_EFAILED;
     }
 
-    FARF(ALWAYS, "ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+    GGMLHEXAGON_LOG_INFO("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
@@ -1455,7 +1738,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             }
         }
 
-        FARF(ALWAYS, "ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
+        GGMLHEXAGON_LOG_INFO("ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
 
         // Translation layer: map GGML op to HTP op, build octx, call execute_op
         enum htp_op_code htp_op;
@@ -1479,6 +1762,17 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             const int32_t kp_kernel_type = octx.kernel_params[0];
             if (kp_kernel_type == 0) {
                 if (build_mm_kernel_params(&octx) != 0) {
+                    return AEE_EFAILED;
+                }
+            }
+        }
+
+        if (htp_op == HTP_OP_FLASH_ATTN_EXT) {
+            /* htp_fa_kernel_params.kernel_type is at offset 0.
+             * HTP_FA_KERNEL_UNSUPPORTED = 0 means AP didn't precompute. */
+            const int32_t kp_kernel_type = octx.kernel_params[0];
+            if (kp_kernel_type == HTP_FA_KERNEL_UNSUPPORTED) {
+                if (build_fa_kernel_params(&octx) != 0) {
                     return AEE_EFAILED;
                 }
             }
@@ -1553,7 +1847,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
             return AEE_EFAILED;
         }
 
-        FARF(ALWAYS, "ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
+        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
 
         /* Flush DSP cache after writing dst (so AP can read from DRAM) */
         ggmlop_dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
@@ -1568,7 +1862,7 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
         }
     }
 
-    FARF(ALWAYS, "ion-batch: all %u ops done", hdr->n_ops);
+    GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done", hdr->n_ops);
 
     __asm__ __volatile__("" ::: "memory");
     if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx < hdr->n_tensors) {

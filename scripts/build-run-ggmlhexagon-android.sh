@@ -93,15 +93,19 @@ GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
+GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
+
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
-PROMPT_STRING="You are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-#running_params=" -ngl 99 -t 6 -n 256 --no-mmap --poll 1000"
-running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000"
+#running_params=" -ngl 99 -t 6 -n 256 --poll 1000 --no-warmup --no-mmap  -fa on"
+# Qualcomm recommended (docs/backend/snapdragon/developer.md): --ctx-size 8192
+# Note: -ctk q8_0 -ctv q8_0 causes garbled output with our FLASH_ATTN_EXT
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --poll 1000 --no-warmup --no-mmap -fa on"
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --device Hexagon-cDSP0,Hexagon-cDSP1"
 
 ######## part-3: utilities and functions ########
