@@ -79,6 +79,7 @@ typedef struct hex_op_desc {
     int32_t src2_idx;
     int32_t src3_idx;        /* e.g. FLASH_ATTN mask/sinks */
     int32_t dst_idx;
+    int32_t htp_opcode;      /* Direct HTP opcode for fused ops (0 = use ggml_op_to_htp_op) */
 } hex_op_desc;
 
 /* Batch header - entry point for DSP to find everything */

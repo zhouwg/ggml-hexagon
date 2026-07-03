@@ -1740,9 +1740,12 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         GGMLHEXAGON_LOG_INFO("ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
 
-        // Translation layer: map GGML op to HTP op, build octx, call execute_op
+        // Translation layer: map GGML op to HTP op, build octx, call execute_op.
+        // For fused ops, AP sets htp_opcode directly (skip ggml_op_to_htp_op).
         enum htp_op_code htp_op;
-        if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
+        if (op->htp_opcode != 0) {
+            htp_op = (enum htp_op_code) op->htp_opcode;
+        } else if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
             GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
             return AEE_EUNSUPPORTED;
         }

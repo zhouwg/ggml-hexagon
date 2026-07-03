@@ -5107,10 +5107,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
         hex_ops.push_back(op);
     }
 
-    const uint32_t n_ops     = (uint32_t)hex_ops.size();
     const uint32_t n_tensors = (uint32_t)tensor_src.size();
 
-    GGMLHEXAGON_LOG_DEBUG("ion-batch %u ops, %u unique tensors", n_ops, n_tensors);
+    GGMLHEXAGON_LOG_DEBUG("ion-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
     for (size_t i = 0; i < hex_ops.size(); i++) {
         const hex_op_desc & o = hex_ops[i];
         GGMLHEXAGON_LOG_DEBUG("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
@@ -5135,6 +5134,84 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_ion(ggml_backend_t bac
             }
         }
     }
+
+    // ---- Phase 2.5: op fusion ----
+    // Fuse RMS_NORM + MUL into HTP_OP_RMS_NORM_MUL.
+    // Fuse MUL_MAT + ADD into HTP_OP_MUL_MAT_ADD (bias add inside matmul kernel).
+    // Safety: intermediate dst must be single-use (only consumed by fused op)
+    {
+        // Count src usages of each tensor to ensure fused dst is single-use
+        std::vector<int> src_use_count(n_tensors, 0);
+        for (const auto & op : hex_ops) {
+            if (op.src0_idx >= 0 && op.src0_idx < (int)n_tensors) src_use_count[op.src0_idx]++;
+            if (op.src1_idx >= 0 && op.src1_idx < (int)n_tensors) src_use_count[op.src1_idx]++;
+            if (op.src2_idx >= 0 && op.src2_idx < (int)n_tensors) src_use_count[op.src2_idx]++;
+            if (op.src3_idx >= 0 && op.src3_idx < (int)n_tensors) src_use_count[op.src3_idx]++;
+        }
+
+        std::vector<hex_op_desc> fused_ops;
+        fused_ops.reserve(hex_ops.size());
+        size_t n_rms_norm_mul = 0;
+        size_t n_mul_mat_add  = 0;
+
+        for (size_t i = 0; i < hex_ops.size(); i++) {
+            hex_op_desc op = hex_ops[i];
+
+            // RMS_NORM + MUL -> RMS_NORM_MUL
+            if (op.opcode == GGML_OP_RMS_NORM && i + 1 < hex_ops.size()) {
+                const hex_op_desc & next = hex_ops[i + 1];
+                if (next.opcode == GGML_OP_MUL &&
+                    next.src0_idx == op.dst_idx &&
+                    src_use_count[op.dst_idx] == 1) {
+                    op.htp_opcode = HTP_OP_RMS_NORM_MUL;
+                    op.src1_idx   = next.src1_idx;
+                    op.dst_idx    = next.dst_idx;
+                    fused_ops.push_back(op);
+                    i++;
+                    n_rms_norm_mul++;
+                    continue;
+                }
+            }
+
+            // MUL_MAT + ADD -> MUL_MAT_ADD (bias add inside matmul kernel)
+            // Only applies to pre-norm models where MUL_MAT (down_proj)
+            // is immediately followed by residual ADD. Gemma uses post-norm
+            // (MUL_MAT -> RMS_NORM -> MUL -> ADD), so this won't trigger there.
+            if (op.opcode == GGML_OP_MUL_MAT && i + 1 < hex_ops.size()) {
+                const hex_op_desc & next = hex_ops[i + 1];
+                if (next.opcode == GGML_OP_ADD &&
+                    src_use_count[op.dst_idx] == 1 &&
+                    (next.src0_idx == op.dst_idx || next.src1_idx == op.dst_idx)) {
+                    int32_t bias_idx = -1;
+                    if (next.src0_idx == op.dst_idx) {
+                        bias_idx = next.src1_idx;
+                    } else if (next.src1_idx == op.dst_idx) {
+                        bias_idx = next.src0_idx;
+                    }
+                    if (bias_idx >= 0) {
+                        op.htp_opcode = HTP_OP_MUL_MAT_ADD;
+                        op.src2_idx   = bias_idx;
+                        op.dst_idx    = next.dst_idx;
+                        fused_ops.push_back(op);
+                        i++;
+                        n_mul_mat_add++;
+                        continue;
+                    }
+                }
+            }
+
+            fused_ops.push_back(op);
+        }
+
+        if (n_rms_norm_mul + n_mul_mat_add > 0) {
+            GGMLHEXAGON_LOG_WARN("op-fusion: %zu ops -> %zu ops (%zu RMS_NORM_MUL, %zu MUL_MAT_ADD)",
+                                 hex_ops.size(), fused_ops.size(),
+                                 n_rms_norm_mul, n_mul_mat_add);
+            hex_ops = std::move(fused_ops);
+        }
+    }
+
+    const uint32_t n_ops = (uint32_t)hex_ops.size();
 
     // ---- Phase 3: compute layout sizes ----
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);          // ~24 bytes
