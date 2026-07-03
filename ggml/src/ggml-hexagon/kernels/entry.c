@@ -6,8 +6,8 @@
 
 #include "ggml-dsp.h"
 #include "ggml-ops.h"
-#include "worker_pool.h"
-#include "hmx-queue.h"
+#include "../htp/htp-ctx.h"
+#include "../htp/matmul-ops.h"
 
 static int g_thread_counts                  = 1;
 static int g_mulmat_algotype                = 0;
@@ -25,6 +25,11 @@ static struct hmx_queue * g_hmx_queue        = NULL;  // Async HMX queue (create
 static volatile int g_vtcm_needs_release    = 0;  // For cache mode VTCM management
 static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently valid/available
 
+// htp_context for calling Qualcomm's execute_op.
+// Shares our already-acquired VTCM/HMX resources; worker_pool and dma queues
+// are initialized in ggmlop_dsp_open.
+static struct htp_context g_htp_ctx;
+
 static void * g_hexagon_power_ctx           = NULL;
 static void * g_ion_dsp_base                = NULL;
 static size_t g_ion_dsp_size                = 0;     // ION total size (bytes)
@@ -39,6 +44,337 @@ static size_t g_ion_cache_offset        = 0;     // monotonic allocation offset 
 
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
+
+// ===========================================================================
+// Qualcomm execute_op dispatch (moved from htp/main.c)
+// All op_xxx functions are exported from htp/*.c (non-static, declared in
+// htp-ctx.h). We only need this dispatch wrapper + a translation layer.
+// ===========================================================================
+static int execute_op(struct htp_ops_context * octx) {
+    switch (octx->op) {
+        case HTP_OP_MUL_MAT:
+        case HTP_OP_MUL_MAT_ADD:
+            return op_matmul(octx);
+        case HTP_OP_MUL_MAT_ID:
+            return op_matmul_id(octx);
+        case HTP_OP_MUL_MAT_QKV:
+            return op_matmul_qkv(octx);
+        case HTP_OP_MUL_MAT_FFN:
+            return op_matmul_ffn(octx);
+        case HTP_OP_MUL:
+        case HTP_OP_ADD:
+        case HTP_OP_SUB:
+        case HTP_OP_DIV:
+        case HTP_OP_ADD_ID:
+            return op_binary(octx);
+        case HTP_OP_NORM:
+        case HTP_OP_RMS_NORM:
+        case HTP_OP_RMS_NORM_MUL:
+        case HTP_OP_SCALE:
+        case HTP_OP_SQR:
+        case HTP_OP_SQRT:
+        case HTP_OP_UNARY_SOFTPLUS:
+        case HTP_OP_UNARY_SIGMOID:
+        case HTP_OP_UNARY_NEG:
+        case HTP_OP_UNARY_EXP:
+        case HTP_OP_UNARY_TANH:
+        case HTP_OP_L2_NORM:
+            return op_unary(octx);
+        case HTP_OP_UNARY_SILU:
+        case HTP_OP_UNARY_GELU:
+        case HTP_OP_GLU_SWIGLU:
+        case HTP_OP_GLU_SWIGLU_OAI:
+        case HTP_OP_GLU_GEGLU:
+            return op_activations(octx);
+        case HTP_OP_SOFTMAX:
+            return op_softmax(octx);
+        case HTP_OP_ROPE:
+            return op_rope(octx);
+        // case HTP_OP_FLASH_ATTN_EXT:
+        //     return op_flash_attn_ext(octx);
+        case HTP_OP_SET_ROWS:
+            return op_set_rows(octx);
+        case HTP_OP_GET_ROWS:
+            return op_get_rows(octx);
+        case HTP_OP_SUM_ROWS:
+            return op_sum_rows(octx);
+        case HTP_OP_CPY:
+            return op_cpy(octx);
+        case HTP_OP_REPEAT:
+            return op_repeat(octx);
+        case HTP_OP_ARGSORT:
+            return op_argsort(octx);
+        case HTP_OP_SSM_CONV:
+            return op_ssm_conv(octx);
+        case HTP_OP_CUMSUM:
+            return op_cumsum(octx);
+        case HTP_OP_FILL:
+            return op_fill(octx);
+        case HTP_OP_DIAG:
+            return op_diag(octx);
+        case HTP_OP_SOLVE_TRI:
+            return op_solve_tri(octx);
+        case HTP_OP_PAD:
+            return op_pad(octx);
+        case HTP_OP_CONCAT:
+            return op_concat(octx);
+        case HTP_OP_GATED_DELTA_NET:
+            return op_gated_delta_net(octx);
+        case HTP_OP_TRI:
+            return op_tri(octx);
+        case HTP_OP_INVALID:
+            break;
+    }
+    FARF(ERROR, "Unknown Op %u", octx->op);
+    return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Translation layer: dsptensor -> htp_tensor, GGML_OP -> HTP_OP
+// ---------------------------------------------------------------------------
+
+// Hexagon DSP is 32-bit address space: pointer fits in uint32_t.
+// htp_tensor.data is uint32_t offset, but Qualcomm's prep_tensor replaces
+// it with actual pointer. We set it directly to the pointer value and mark
+// HTP_TENSOR_FLUSHED so proc_op_req skips L2 flush (we handle cache ourselves).
+static inline void dsptensor_to_htp_tensor(const dsptensor * dt,
+                                            struct htp_tensor * ht) {
+    ht->data  = (uint32_t)(uintptr_t)dt->data;
+    ht->size  = (uint32_t)dt->data_len;
+    ht->flags = HTP_TENSOR_FLUSHED;
+    ht->type  = (uint16_t)dt->type;
+    ht->bi    = 0;
+    ht->ne[0] = (uint32_t)dt->ne[0];
+    ht->ne[1] = (uint32_t)dt->ne[1];
+    ht->ne[2] = (uint32_t)dt->ne[2];
+    ht->ne[3] = (uint32_t)dt->ne[3];
+    ht->nb[0] = (uint32_t)dt->nb[0];
+    ht->nb[1] = (uint32_t)dt->nb[1];
+    ht->nb[2] = (uint32_t)dt->nb[2];
+    ht->nb[3] = (uint32_t)dt->nb[3];
+}
+
+// Map GGML opcode to HTP opcode. Returns 0 on success, -1 if unsupported.
+static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
+                             enum htp_op_code * htp_op) {
+    switch (ggml_op) {
+        case GGML_OP_ADD:      *htp_op = HTP_OP_ADD;         return 0;
+        case GGML_OP_SUB:      *htp_op = HTP_OP_SUB;         return 0;
+        case GGML_OP_MUL:      *htp_op = HTP_OP_MUL;         return 0;
+        case GGML_OP_DIV:      *htp_op = HTP_OP_DIV;         return 0;
+        case GGML_OP_MUL_MAT:  *htp_op = HTP_OP_MUL_MAT;     return 0;
+        case GGML_OP_RMS_NORM: *htp_op = HTP_OP_RMS_NORM;    return 0;
+        case GGML_OP_ROPE:     *htp_op = HTP_OP_ROPE;        return 0;
+        default:
+            FARF(ERROR, "ggml_op_to_htp_op: unsupported ggml_op %d", ggml_op);
+            return -1;
+    }
+}
+
+// Build htp_ops_context from our dsptensor structures, ready for execute_op.
+// Mirrors proc_op_req in htp/main.c: unconditionally copy op_params, and copy
+// kernel_params when available (non-NULL). For dsptensor-based callers (no
+// kernel_params), pass NULL and the memset-zero state is preserved.
+static void build_htp_octx(
+    struct htp_ops_context * octx,
+    enum htp_op_code htp_op,
+    const int32_t * op_params,
+    const int32_t * kernel_params,
+    const dsptensor * src0, const dsptensor * src1,
+    const dsptensor * src2, const dsptensor * src3,
+    const dsptensor * dst,
+    struct htp_tensor src_ht[HTP_OP_MAX_INPUTS],
+    struct htp_tensor * dst_ht) {
+
+    memset(octx, 0, sizeof(*octx));
+    octx->ctx = &g_htp_ctx;
+    octx->op  = htp_op;
+    // Mirror proc_op_req: unconditional copy (op_params is always provided)
+    memcpy(octx->op_params, op_params, sizeof(octx->op_params));
+    if (kernel_params) {
+        memcpy(octx->kernel_params, kernel_params, sizeof(octx->kernel_params));
+    }
+
+    const dsptensor * srcs[HTP_OP_MAX_INPUTS] = {src0, src1, src2, src3, NULL, NULL};
+    for (int i = 0; i < HTP_OP_MAX_INPUTS; i++) {
+        if (srcs[i]) {
+            dsptensor_to_htp_tensor(srcs[i], &src_ht[i]);
+            octx->src[i] = &src_ht[i];
+        } else {
+            octx->src[i] = NULL;
+        }
+    }
+
+    if (dst) {
+        dsptensor_to_htp_tensor(dst, dst_ht);
+        octx->dsts[0] = dst_ht;
+    } else {
+        octx->dsts[0] = NULL;
+    }
+
+    octx->n_threads = (uint32_t)g_thread_counts;
+}
+
+// Compute htp_mm_kernel_params on DSP side for MUL_MAT.
+// Mirrors ggml_hexagon_precompute_hvx_mm_params (F32/F16 paths only).
+// HMX and quantized paths are not yet supported.
+static int build_mm_kernel_params(struct htp_ops_context * octx) {
+    const struct htp_tensor * src0 = octx->src[0];
+    const struct htp_tensor * src1 = octx->src[1];
+    const struct htp_tensor * dst  = octx->dst;
+    if (!src0 || !src1 || !dst) return -1;
+
+    struct htp_mm_kernel_params * kparams =
+        (struct htp_mm_kernel_params *) octx->kernel_params;
+    memset(kparams, 0, sizeof(*kparams));
+
+    const int wtype = src0->type;
+    const uint32_t ne02 = src0->ne[2];
+    const uint32_t ne03 = src0->ne[3];
+    const uint32_t ne10 = src1->ne[0];
+    const uint32_t ne11 = src1->ne[1];
+    const uint32_t ne12 = src1->ne[2];
+    const uint32_t ne13 = src1->ne[3];
+    const uint32_t src1_nrows = ne11 * ne12 * ne13;
+
+    kparams->n_hmx       = 0;
+    kparams->n_threads   = octx->n_threads;
+    kparams->n_prefetch  = 16;
+
+    const bool is_batched  = (ne02 > 1) || (ne03 > 1);
+    const bool is_permuted = (src0->nb[0] > src0->nb[1] || src0->nb[1] > src0->nb[2] || src0->nb[2] > src0->nb[3]) ||
+                             (src1->nb[0] > src1->nb[1] || src1->nb[1] > src1->nb[2] || src1->nb[2] > src1->nb[3]);
+
+    size_t vtcm_src0_size = 0, vtcm_src1_size = 0, vtcm_dst_size = 0;
+
+    if (wtype == HTP_TYPE_F32) {
+        size_t vtcm_size = htp_mm_hvx_get_vtcm_sizes(
+            HTP_MM_KERNEL_HVX_F32_F32_VTCM, wtype, ne10, src1_nrows, octx->n_threads,
+            dst->nb[1], src0->nb[1], src1->nb[1], 16,
+            &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
+
+        if (!is_batched && !is_permuted && vtcm_size <= g_vtcm_size) {
+            kparams->kernel_type    = HTP_MM_KERNEL_HVX_F32_F32_VTCM;
+            kparams->src1_row_size  = hex_round_up(ne10 * 4, 128);
+        } else {
+            kparams->kernel_type    = HTP_MM_KERNEL_HVX_F32_F32_DDR;
+            kparams->src1_row_size  = src1->nb[1];
+            vtcm_size = htp_mm_hvx_get_vtcm_sizes(
+                kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
+                dst->nb[1], src0->nb[1], src1->nb[1], 16,
+                &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
+        }
+        kparams->vtcm_size      = (int32_t) vtcm_size;
+        kparams->vtcm_src0_size = (int32_t) vtcm_src0_size;
+        kparams->vtcm_src1_size = (int32_t) vtcm_src1_size;
+        kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
+    } else if (wtype == HTP_TYPE_F16) {
+        size_t vtcm_size = htp_mm_hvx_get_vtcm_sizes(
+            HTP_MM_KERNEL_HVX_F16_F16_VTCM, wtype, ne10, src1_nrows, octx->n_threads,
+            dst->nb[1], src0->nb[1], src1->nb[1], 16,
+            &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
+
+        if (!is_batched && !is_permuted && vtcm_size <= g_vtcm_size) {
+            kparams->kernel_type    = HTP_MM_KERNEL_HVX_F16_F16_VTCM;
+            kparams->src1_row_size  = hex_round_up(ne10 * 2, 128);
+        } else {
+            if (src1->type == HTP_TYPE_F32) {
+                kparams->kernel_type = HTP_MM_KERNEL_HVX_F16_F32_DDR;
+            } else {
+                kparams->kernel_type = HTP_MM_KERNEL_HVX_F16_F16_DDR;
+            }
+            kparams->src1_row_size  = src1->nb[1];
+            vtcm_size = htp_mm_hvx_get_vtcm_sizes(
+                kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
+                dst->nb[1], src0->nb[1], src1->nb[1], 16,
+                &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
+        }
+        kparams->vtcm_size      = (int32_t) vtcm_size;
+        kparams->vtcm_src0_size = (int32_t) vtcm_src0_size;
+        kparams->vtcm_src1_size = (int32_t) vtcm_src1_size;
+        kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
+    } else {
+        // Quantized HVX path (Q4_0, Q4_1, Q5_0, Q8_0, IQ4_NL, MXFP4)
+        kparams->tile_size         = (int32_t) htp_mm_get_weight_tile_size(wtype);
+        kparams->aligned_tile_size = (int32_t) htp_mm_get_weight_aligned_tile_size(wtype);
+
+        const bool k_align   = (ne10 % 32 == 0);
+        const bool try_tiled = k_align && kparams->tile_size > 0;
+        bool tiled_ok = false;
+
+        if (try_tiled) {
+            kparams->src1_row_size = (int32_t)((wtype == HTP_TYPE_Q4_1)
+                ? htp_mm_q8_1_tiled_row_size(ne10)
+                : htp_mm_q8_0_tiled_row_size(ne10));
+            kparams->kernel_type = (src1_nrows < octx->n_threads)
+                ? HTP_MM_KERNEL_HVX_QUANT_BLOCK
+                : HTP_MM_KERNEL_HVX_QUANT_ROW;
+
+            const uint32_t max_prefetch = (src1_nrows > HTP_MM_HMX_MIN_NROWS) ? 2 : 16;
+            uint32_t best_n_prefetch = 2;
+            size_t vs0 = 0, vs1 = 0, vd = 0;
+            size_t total_size = 0;
+            for (uint32_t d = max_prefetch; d >= 2; d /= 2) {
+                total_size = htp_mm_hvx_get_vtcm_sizes(
+                    kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
+                    dst->nb[1], src0->nb[1], src1->nb[1], d,
+                    &vs0, &vs1, &vd);
+                if (total_size <= g_vtcm_size) {
+                    best_n_prefetch = d;
+                    break;
+                }
+            }
+            if (best_n_prefetch == 2 && total_size > g_vtcm_size) {
+                total_size = htp_mm_hvx_get_vtcm_sizes(
+                    kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
+                    dst->nb[1], src0->nb[1], src1->nb[1], 2,
+                    &vs0, &vs1, &vd);
+            }
+            kparams->n_prefetch = (int32_t) best_n_prefetch;
+
+            if (total_size <= g_vtcm_size) {
+                kparams->vtcm_size      = (int32_t) total_size;
+                kparams->vtcm_src0_size = (int32_t) vs0;
+                kparams->vtcm_src1_size = (int32_t) vs1;
+                kparams->vtcm_dst_size  = (int32_t) vd;
+                tiled_ok = true;
+            }
+        }
+
+        if (!tiled_ok) {
+            kparams->src1_row_size = (int32_t)((wtype == HTP_TYPE_Q4_1)
+                ? htp_mm_q8_1_flat_row_size(ne10)
+                : htp_mm_q8_0_flat_row_size(ne10));
+            kparams->kernel_type = HTP_MM_KERNEL_HVX_QUANT_ROW_FLAT;
+
+            size_t vs0 = 0, vs1 = 0, vd = 0;
+            const size_t total_size = htp_mm_hvx_get_vtcm_sizes(
+                kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
+                dst->nb[1], src0->nb[1], src1->nb[1], 16,
+                &vs0, &vs1, &vd);
+
+            kparams->n_prefetch     = 16;
+            kparams->vtcm_size      = (int32_t) total_size;
+            kparams->vtcm_src0_size = (int32_t) vs0;
+            kparams->vtcm_src1_size = (int32_t) vs1;
+            kparams->vtcm_dst_size  = (int32_t) vd;
+        }
+    }
+
+    kparams->div_ne12_ne1 = init_fastdiv_values(ne12 * ne11);
+    kparams->div_ne1      = init_fastdiv_values(ne11);
+    kparams->div_r2       = init_fastdiv_values(ne02 > 0 ? ne12 / ne02 : 1);
+    kparams->div_r3       = init_fastdiv_values(ne03 > 0 ? ne13 / ne03 : 1);
+    kparams->div_ne11     = init_fastdiv_values(ne11);
+
+    return 0;
+}
+
+// Stub: FP16 weight cache was managed by kernels/mulmat.c (removed from build).
+// The ION cache region setup is preserved, but no cache entries are populated.
+void ggmlop_dsp_fp16_cache_reset(void) {
+    // no-op: cache is reset via g_ion_cache_offset in ggmlop_dsp_execute_batch_ion
+}
 
 static int power_on_hvx_hmx(void) {
     HAP_power_request_t req;
@@ -279,6 +615,18 @@ int ggmlop_dsp_close(remote_handle64 handle) {
         g_work_size = 0;
     }
 
+    // Cleanup htp_context resources (worker_pool + dma queues)
+    if (g_htp_ctx.worker_pool) {
+        worker_pool_release(&g_htp_ctx.worker_pool);
+        g_htp_ctx.worker_pool = NULL;
+    }
+    for (int i = 0; i < HTP_MAX_NTHREADS; i++) {
+        if (g_htp_ctx.dma[i]) {
+            dma_queue_delete(g_htp_ctx.dma[i]);
+            g_htp_ctx.dma[i] = NULL;
+        }
+    }
+
     if (g_hmx_queue != NULL) {
         hmx_queue_delete(g_hmx_queue);
         g_hmx_queue = NULL;
@@ -487,9 +835,24 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
     ggml_type_traits_dsp_init(1);
     GGMLHEXAGON_LOG_INFO("ggml_dsp_use_hvx %d", 1);
 
+    // Initialize htp_context for calling Qualcomm's execute_op.
+    // Shares our already-acquired VTCM and HMX queue.
     if (g_thread_counts >= 1) {
-        AEEResult result = worker_pool_reinit_with_threads(g_thread_counts);
-        FARF(HIGH, "worker_pool_reinit_with_threads returned %d", result);
+        memset(&g_htp_ctx, 0, sizeof(g_htp_ctx));
+        g_htp_ctx.vtcm_base      = (uint8_t *)g_vtcm_base;
+        g_htp_ctx.vtcm_size      = g_vtcm_size;
+        g_htp_ctx.vtcm_rctx      = g_compute_res_ctx_id;
+        g_htp_ctx.hmx_queue      = g_hmx_queue;
+        g_htp_ctx.n_threads      = (uint32_t)g_thread_counts;
+        g_htp_ctx.hmx_enabled    = g_hmx_available ? true : false;
+
+        AEEResult wp = worker_pool_init(&g_htp_ctx.worker_pool, (uint32_t)g_thread_counts);
+        FARF(ALWAYS, "htp_ctx worker_pool_init returned %d (n_threads=%d)", wp, g_thread_counts);
+
+        for (int i = 0; i < g_thread_counts; i++) {
+            g_htp_ctx.dma[i] = dma_queue_create(256);
+        }
+        FARF(ALWAYS, "htp_ctx dma_queue created x%d", g_thread_counts);
     }
 
     g_hexagon_power_ctx = (void *)(handle);
@@ -693,66 +1056,37 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
         return AEE_EFAILED;
     }
 
-    switch (ggml_op) {
-        case GGML_OP_SUB:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SUB task");
-            ggmlop_dsp_sub(h, src0, src1, dst);
-            break;
-        case GGML_OP_ADD:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_ADD task");
-            ggmlop_dsp_add(h, src0, src1, dst);
-            break;
-        case GGML_OP_MUL:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL task");
-            ggmlop_dsp_mul(h, src0, src1, dst);
-            break;
-        case GGML_OP_DIV:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_DIV task");
-            ggmlop_dsp_div(h, src0, src1, dst);
-            break;
-        case GGML_OP_MUL_MAT:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_MUL_MAT task");
-            ggmlop_dsp_mulmat(h, src0, src1, dst);
-            break;
-        case GGML_OP_RMS_NORM:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_RMS_NORM task");
-            ggmlop_dsp_rmsnorm(h, src0, src1, dst);
-            break;
-        case GGML_OP_ROPE:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_ROPE task");
-            ggmlop_dsp_rope(h, src0, src1, NULL, dst);
-            break;
-        case GGML_OP_SOFT_MAX:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SOFT_MAX task");
-            ggmlop_dsp_softmax(h, src0, src1, NULL, dst);
-            break;
-        case GGML_OP_UNARY:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_UNARY (SILU) task");
-            ggmlop_dsp_silu(h, src0, src1, dst);
-            break;
-        case GGML_OP_SCALE:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_SCALE task");
-            ggmlop_dsp_scale(h, src0, dst);
-            break;
-        case GGML_OP_CPY:
-            GGMLHEXAGON_LOG_DEBUG("executing GGML_OP_CPY task");
-            ggmlop_dsp_cpy(h, src0, src1, dst);
-            break;
-        case GGML_OP_FLASH_ATTN_EXT:
-            // Not supported through the per-task path (requires 4 src tensors).
-            // Use the batch path (ggmlop_dsp_execute_batch / _ion) instead.
-            GGMLHEXAGON_LOG_ERROR("FLASH_ATTN_EXT not supported via per-task path; use batch");
-            return AEE_EUNSUPPORTED;
-        case 168:  // Test HMX operation
-            GGMLHEXAGON_LOG_INFO("executing TEST_HMX task (op=168)");
-            GGMLHEXAGON_LOG_INFO("src0: data=%p, ne[0]=%d, ne[1]=%d", src0->data, src0->ne[0], src0->ne[1]);
-            GGMLHEXAGON_LOG_INFO("src1: data=%p, ne[0]=%d, ne[1]=%d", src1->data, src1->ne[0], src1->ne[1]);
-            ggmlop_dsp_test_hmx(h, src0, src1, dst);
-            GGMLHEXAGON_LOG_INFO("TEST_HMX task completed");
-            break;
-        default:
-            GGMLHEXAGON_LOG_ERROR("unsupported op type: %d", ggml_op);
-            return AEE_EUNSUPPORTED;
+    // Translation layer: map GGML op to HTP op, build octx, call execute_op
+    enum htp_op_code htp_op;
+    if (ggml_op_to_htp_op(ggml_op, dst->op_params, &htp_op) != 0) {
+        GGMLHEXAGON_LOG_ERROR("unsupported op type: %d", ggml_op);
+        return AEE_EUNSUPPORTED;
+    }
+
+    struct htp_ops_context octx;
+    struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
+    struct htp_tensor dst_ht;
+
+    build_htp_octx(&octx, htp_op, dst->op_params, NULL,
+                   src0, src1, NULL, NULL, dst, src_ht, &dst_ht);
+
+    if (htp_op == HTP_OP_MUL_MAT) {
+        if (build_mm_kernel_params(&octx) != 0) {
+            return AEE_EFAILED;
+        }
+    }
+
+    int op_ret = execute_op(&octx);
+
+    octx.src0_spad.src = NULL;
+    octx.src1_spad.src = NULL;
+    octx.src2_spad.src = NULL;
+    octx.src3_spad.src = NULL;
+    octx.dst_spad.src  = NULL;
+
+    if (op_ret != HTP_STATUS_OK) {
+        GGMLHEXAGON_LOG_ERROR("execute_op returned %d (htp_op=%d)", op_ret, htp_op);
+        return AEE_EFAILED;
     }
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
@@ -830,52 +1164,39 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
             }
         }
 
-        int op_ret = 0;
-        switch (op->opcode) {
-            case GGML_OP_SUB:
-                ggmlop_dsp_sub(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_ADD:
-                ggmlop_dsp_add(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_MUL:
-                ggmlop_dsp_mul(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_DIV:
-                ggmlop_dsp_div(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_MUL_MAT:
-                op_ret = ggmlop_dsp_mulmat(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_RMS_NORM:
-                op_ret = ggmlop_dsp_rmsnorm(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_ROPE:
-                op_ret = ggmlop_dsp_rope(h, src0_dt, src1_dt, src2_dt, dst_dt);
-                break;
-            case GGML_OP_SOFT_MAX:
-                op_ret = ggmlop_dsp_softmax(h, src0_dt, src1_dt, src2_dt, dst_dt);
-                break;
-            case GGML_OP_UNARY:
-                op_ret = ggmlop_dsp_silu(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_SCALE:
-                op_ret = ggmlop_dsp_scale(h, src0_dt, dst_dt);
-                break;
-            case GGML_OP_CPY:
-                op_ret = ggmlop_dsp_cpy(h, src0_dt, src1_dt, dst_dt);
-                break;
-            case GGML_OP_FLASH_ATTN_EXT:
-                // Q=src0, K=src1, V=src2, mask=src3 (optional)
-                op_ret = ggmlop_dsp_flash_attn(h, src0_dt, src1_dt, src2_dt, src3_dt, dst_dt);
-                break;
-            default:
-                GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
-                return AEE_EUNSUPPORTED;
+        // Translation layer: map GGML op to HTP op, build octx, call execute_op
+        enum htp_op_code htp_op;
+        if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
+            GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
+            return AEE_EUNSUPPORTED;
         }
-        if (op_ret != 0) {
-            GGMLHEXAGON_LOG_ERROR("batch op %d (%s) failed with ret=%d", i, ggml_op_name(op->opcode), op_ret);
-            return op_ret;
+
+        struct htp_ops_context octx;
+        struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
+        struct htp_tensor dst_ht;
+
+        build_htp_octx(&octx, htp_op, op->params, NULL,
+                       src0_dt, src1_dt, src2_dt, src3_dt,
+                       dst_dt, src_ht, &dst_ht);
+
+        if (htp_op == HTP_OP_MUL_MAT) {
+            if (build_mm_kernel_params(&octx) != 0) {
+                return AEE_EFAILED;
+            }
+        }
+
+        int op_ret = execute_op(&octx);
+
+        octx.src0_spad.src = NULL;
+        octx.src1_spad.src = NULL;
+        octx.src2_spad.src = NULL;
+        octx.src3_spad.src = NULL;
+        octx.dst_spad.src  = NULL;
+
+        if (op_ret != HTP_STATUS_OK) {
+            GGMLHEXAGON_LOG_ERROR("batch op %d: execute_op returned %d (htp_op=%d)",
+                                  i, op_ret, htp_op);
+            return AEE_EFAILED;
         }
 
         if (1 == g_dump_diag_info) {
@@ -903,6 +1224,36 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req
 
     //GGMLHEXAGON_LOG_DEBUG("leave %s (dsp_execute_batch)", __func__);
     return AEE_SUCCESS;
+}
+
+// FastRPC IDL per-op methods (referenced by skel.c case 3/4)
+int ggmlop_dsp_add(remote_handle64 h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) {
+    GGML_UNUSED(h);
+    enum htp_op_code htp_op = HTP_OP_ADD;
+    struct htp_ops_context octx;
+    struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
+    struct htp_tensor dst_ht;
+    build_htp_octx(&octx, htp_op, dst->op_params, NULL, src0, src1, NULL, NULL, dst, src_ht, &dst_ht);
+    int ret = execute_op(&octx);
+    octx.src0_spad.src = NULL; octx.src1_spad.src = NULL;
+    octx.src2_spad.src = NULL; octx.src3_spad.src = NULL; octx.dst_spad.src = NULL;
+    return ret;
+}
+
+int ggmlop_dsp_mulmat(remote_handle64 h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) {
+    GGML_UNUSED(h);
+    enum htp_op_code htp_op = HTP_OP_MUL_MAT;
+    struct htp_ops_context octx;
+    struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
+    struct htp_tensor dst_ht;
+    build_htp_octx(&octx, htp_op, dst->op_params, NULL, src0, src1, NULL, NULL, dst, src_ht, &dst_ht);
+    if (build_mm_kernel_params(&octx) != 0) {
+        return AEE_EFAILED;
+    }
+    int ret = execute_op(&octx);
+    octx.src0_spad.src = NULL; octx.src1_spad.src = NULL;
+    octx.src2_spad.src = NULL; octx.src3_spad.src = NULL; octx.dst_spad.src = NULL;
+    return ret;
 }
 
 /*
@@ -1106,44 +1457,101 @@ AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset,
 
         FARF(ALWAYS, "ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
 
-        int op_ret = 0;
-        switch (op->opcode) {
-            case GGML_OP_SUB:
-                ggmlop_dsp_sub(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_ADD:
-                ggmlop_dsp_add(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_MUL:
-                ggmlop_dsp_mul(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_DIV:
-                ggmlop_dsp_div(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_MUL_MAT:
-                op_ret = ggmlop_dsp_mulmat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_RMS_NORM:
-                op_ret = ggmlop_dsp_rmsnorm(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_ROPE:
-                op_ret = ggmlop_dsp_rope(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
-            case GGML_OP_SOFT_MAX:
-                op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
-            case GGML_OP_UNARY:
-                op_ret = ggmlop_dsp_silu(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_SCALE:
-                op_ret = ggmlop_dsp_scale(h, &src0_dt, &dst_dt); break;
-            case GGML_OP_CPY:
-                op_ret = ggmlop_dsp_cpy(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_CONCAT:
-                op_ret = ggmlop_dsp_concat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_REPEAT:
-                op_ret = ggmlop_dsp_repeat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_DIAG_MASK_INF:
-                op_ret = ggmlop_dsp_diag_mask_inf(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-            case GGML_OP_FLASH_ATTN_EXT:
-                // Q=src0, K=src1, V=src2, mask=src3 (optional, may be NULL).
-                op_ret = ggmlop_dsp_flash_attn(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr, &dst_dt); break;
-            default:
-                GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
-                return AEE_EUNSUPPORTED;
+        // Translation layer: map GGML op to HTP op, build octx, call execute_op
+        enum htp_op_code htp_op;
+        if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
+            GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
+            return AEE_EUNSUPPORTED;
         }
-        if (op_ret != 0) return op_ret;
+
+        struct htp_ops_context octx;
+        struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
+        struct htp_tensor dst_ht;
+
+        build_htp_octx(&octx, htp_op, op->params, op->kernel_params,
+                       &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr,
+                       &dst_dt, src_ht, &dst_ht);
+
+        if (htp_op == HTP_OP_MUL_MAT) {
+            /* kernel_params already copied in build_htp_octx.
+             * Fall back to DSP-side computation only when AP didn't precompute
+             * (kernel_type == 0, e.g. per-op FastRPC path). */
+            const int32_t kp_kernel_type = octx.kernel_params[0];
+            if (kp_kernel_type == 0) {
+                if (build_mm_kernel_params(&octx) != 0) {
+                    return AEE_EFAILED;
+                }
+            }
+        }
+
+        /* F32 MUL_MAT diagnostic: dump src0 row 0/16, src1 row 0, dst[16] BEFORE execute_op.
+         * Case 1 (m=32,n=14,k=64): src0 nb[1]=256, so row 16 = +1024 floats. */
+        if (htp_op == HTP_OP_MUL_MAT && src0_dt.type == 0 /*F32*/ &&
+            src0_dt.data && src0_dt.data_len >= (size_t)(17 * 256) &&
+            src1_dt_ptr && src1_dt_buf.data && src1_dt_buf.data_len >= 16 &&
+            dst_dt.data && dst_dt.data_len >= (size_t)(17 * 4)) {
+            const float * s0  = (const float *) src0_dt.data;
+            const float * s1  = (const float *) src1_dt_buf.data;
+            const float * dp  = (const float *) dst_dt.data;
+            const uint32_t s0_row16_off = src0_dt.nb[1] * 16 / 4;
+            /* htp_mm_kernel_params layout (see matmul-ops.h):
+             *   [0]kernel_type [1]pipeline [2]m_chunk [3]n_chunk [4]n_threads
+             *   [5]n_act_threads [6]n_hmx [7]n_prefetch [8]tile_size [9]aligned_tile_size
+             *   [10]src1_row_size [11]vtcm_size [12]vtcm_src0_size [13]vtcm_src1_size
+             *   [14]vtcm_src2_size [15]vtcm_src3_size [16]vtcm_dst_size */
+            GGMLHEXAGON_LOG_ERROR("[DSP-MM-PRE] op%u kp_type=%d s0r0=[%.4f,%.4f,%.4f,%.4f] s0r16=[%.4f,%.4f,%.4f,%.4f] s1r0=[%.4f,%.4f,%.4f,%.4f] dst16=[%.4f,%.4f,%.4f,%.4f] nb=[%u,%u,%u,%u] ne=[%u,%u,%u,%u]",
+                i, octx.kernel_params[0],
+                s0[0], s0[1], s0[2], s0[3],
+                s0[s0_row16_off+0], s0[s0_row16_off+1], s0[s0_row16_off+2], s0[s0_row16_off+3],
+                s1[0], s1[1], s1[2], s1[3],
+                dp[16], dp[17], dp[18], dp[19],
+                src0_dt.nb[0], src0_dt.nb[1], src0_dt.nb[2], src0_dt.nb[3],
+                src0_dt.ne[0], src0_dt.ne[1], src0_dt.ne[2], src0_dt.ne[3]);
+            GGMLHEXAGON_LOG_ERROR("[DSP-MM-KP]  op%u ktype=%d pipe=%d mch=%d nch=%d nthr=%d nact=%d nhmx=%d npf=%d src1rs=%d vtcm_sz=%d src0_sz=%d src1_sz=%d dst_sz=%d",
+                i,
+                octx.kernel_params[0],  /* kernel_type */
+                octx.kernel_params[1],  /* pipeline */
+                octx.kernel_params[2],  /* m_chunk */
+                octx.kernel_params[3],  /* n_chunk */
+                octx.kernel_params[4],  /* n_threads */
+                octx.kernel_params[5],  /* n_act_threads */
+                octx.kernel_params[6],  /* n_hmx */
+                octx.kernel_params[7],  /* n_prefetch */
+                octx.kernel_params[10], /* src1_row_size */
+                octx.kernel_params[11], /* vtcm_size */
+                octx.kernel_params[12], /* vtcm_src0_size */
+                octx.kernel_params[13], /* vtcm_src1_size */
+                octx.kernel_params[16]);/* vtcm_dst_size */
+        }
+
+        int op_ret = execute_op(&octx);
+
+        /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op.
+         * Locates whether NaN at index 16 originates in execute_op. */
+        if (htp_op == HTP_OP_MUL_MAT && src0_dt.type == 0 /*F32*/ &&
+            dst_dt.data && dst_dt.data_len >= (size_t)(20 * 4)) {
+            const float * dp = (const float *) dst_dt.data;
+            GGMLHEXAGON_LOG_ERROR("[DSP-MM-POST] op%u d[0..3]=[%.4f,%.4f,%.4f,%.4f] d[16..19]=[%.4f,%.4f,%.4f,%.4f]",
+                i, dp[0], dp[1], dp[2], dp[3], dp[16], dp[17], dp[18], dp[19]);
+        }
+
+        // Clear spad refs (matches proc_op_req post-execute cleanup)
+        octx.src0_spad.src = NULL;
+        octx.src1_spad.src = NULL;
+        octx.src2_spad.src = NULL;
+        octx.src3_spad.src = NULL;
+        octx.dst_spad.src  = NULL;
+
+        if (op_ret != HTP_STATUS_OK) {
+            const char * st_name =
+                (op_ret == HTP_STATUS_INTERNAL_ERR)   ? "INTERNAL_ERR"   :
+                (op_ret == HTP_STATUS_NO_SUPPORT)    ? "NO_SUPPORT"     :
+                (op_ret == HTP_STATUS_INVAL_PARAMS)  ? "INVAL_PARAMS"   :
+                (op_ret == HTP_STATUS_VTCM_TOO_SMALL) ? "VTCM_TOO_SMALL" : "UNKNOWN";
+            GGMLHEXAGON_LOG_ERROR("ion-op %u: execute_op returned %d/%s (htp_op=%d)",
+                                  i, op_ret, st_name, htp_op);
+            return AEE_EFAILED;
+        }
 
         FARF(ALWAYS, "ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
 

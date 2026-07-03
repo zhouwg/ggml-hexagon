@@ -73,6 +73,7 @@ typedef struct hex_tensor_desc {
 typedef struct hex_op_desc {
     int32_t opcode;          /* GGML_OP_XXX */
     int32_t params[16];      /* operation parameters */
+    int32_t kernel_params[32]; /* precomputed kernel params (e.g. htp_mm_kernel_params for MUL_MAT) */
     int32_t src0_idx;        /* index into tensor table (-1 = none) */
     int32_t src1_idx;
     int32_t src2_idx;
