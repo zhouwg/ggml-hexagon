@@ -656,7 +656,7 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
 // Stub: original FP16 weight cache was managed by kernels/mulmat.c (removed from build).
 // The ION cache region setup is preserved, but no cache entries are populated.
 void ggmlop_dsp_fp16_cache_reset(void) {
-    // no-op: cache is reset via g_ion_cache_offset in ggmlop_dsp_execute_batch_ion
+    // no-op: cache is reset via g_ion_cache_offset in ggmlop_dsp_execute_batch
 }
 
 static int power_on_hvx_hmx(void) {
@@ -1246,7 +1246,7 @@ void * ggmlop_cache_mempool_alloc(size_t size) {
 
 
 // Acquire VTCM for the current batch/op (cache mode).
-// Called once at batch entry (ggmlop_dsp_execute_batch_ion) or at per-op entry
+// Called once at batch entry (ggmlop_dsp_execute_batch) or at per-op entry
 // (ggmlop_dsp_execute_task). Per-op mulmat/flash_attn code no longer calls this.
 // If already valid, returns 0 immediately (cheap check).
 // If needs_release was flagged by the release callback, release first, then re-acquire.
@@ -1260,7 +1260,7 @@ int ggmlop_ensure_vtcm_available(void) {
 
     // Already valid - batch is running, keep using VTCM until batch boundary.
     // The release callback only sets needs_release; the actual release happens
-    // in ggmlop_dsp_execute_batch_ion after the batch loop (lazy release).
+    // in ggmlop_dsp_execute_batch after the batch loop (lazy release).
     if (g_vtcm_valid) {
         return 0;
     }
@@ -1289,7 +1289,7 @@ int ggmlop_ensure_vtcm_available(void) {
 }
 
 // Release VTCM if the release callback flagged it (lazy release at batch boundary).
-// Called after ggmlop_dsp_execute_batch_ion finishes its op loop.
+// Called after ggmlop_dsp_execute_batch finishes its op loop.
 static void ggmlop_vtcm_lazy_release(void) {
     if (g_compute_res_ctx_id != 0 && g_vtcm_needs_release) {
         g_vtcm_needs_release = 0;
@@ -1377,138 +1377,6 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 }
 
 
-AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, const dsp_opbatch_req* req) {
-    //GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
-
-    if (!req) {
-        GGMLHEXAGON_LOG_ERROR("invalid input: req=%p", req);
-        return AEE_EBADPARM;
-    }
-
-    if (req->n_tensors == 0 || req->n_ops == 0) {
-        GGMLHEXAGON_LOG_ERROR("empty batch: n_tensors=%d, n_ops=%d", req->n_tensors, req->n_ops);
-        return AEE_EBADPARM;
-    }
-
-    // req->tensors[] are dsptensor structs with data pointers already
-    // translated from AP VA to DSP VA by FastRPC (same as per-op path).
-    // No need for manual base+offset calculation or fd lookup.
-    if (1 == g_dump_diag_info) {
-        GGMLHEXAGON_LOG_INFO("batch: %d tensors, %d ops", req->n_tensors, req->n_ops);
-    }
-
-    // dispatch each op using pre-translated dsptensor pointers
-    for (int i = 0; i < req->n_ops; i++) {
-        const dsp_op_desc * op = &req->ops[i];
-
-        if (op->src0_idx < 0 || op->src0_idx >= req->n_tensors ||
-            op->dst_idx < 0  || op->dst_idx >= req->n_tensors) {
-            GGMLHEXAGON_LOG_ERROR("op %d: invalid tensor indices src0=%d src1=%d dst=%d",
-                                  i, op->src0_idx, op->src1_idx, op->dst_idx);
-            return AEE_EBADPARM;
-        }
-
-        const dsptensor * src0_dt = &req->tensors[op->src0_idx];
-        const dsptensor * src1_dt = (op->src1_idx >= 0) ? &req->tensors[op->src1_idx] : NULL;
-        const dsptensor * src2_dt = (op->src2_idx >= 0) ? &req->tensors[op->src2_idx] : NULL;
-        const dsptensor * src3_dt = (op->src3_idx >= 0) ? &req->tensors[op->src3_idx] : NULL;
-        const dsptensor * dst_dt  = &req->tensors[op->dst_idx];
-
-        if (1 == g_dump_diag_info) {
-            // log tensor details and sample data for debugging
-            GGMLHEXAGON_LOG_INFO("batch op %d: opcode=%d(%s), src0[t%d] data=%p ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] type=%d len=%d",
-                                 i, op->opcode, ggml_op_name(op->opcode),
-                                 op->src0_idx, src0_dt->data,
-                                 src0_dt->ne[0], src0_dt->ne[1], src0_dt->ne[2], src0_dt->ne[3],
-                                 src0_dt->nb[0], src0_dt->nb[1], src0_dt->nb[2], src0_dt->nb[3],
-                                 src0_dt->type, src0_dt->data_len);
-            if (src1_dt) {
-                GGMLHEXAGON_LOG_INFO("  src1[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                                     op->src1_idx, src1_dt->data,
-                                     src1_dt->ne[0], src1_dt->ne[1], src1_dt->ne[2], src1_dt->ne[3],
-                                     src1_dt->type, src1_dt->data_len);
-            }
-            if (src2_dt) {
-                GGMLHEXAGON_LOG_INFO("  src2[t%d] data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                                     op->src2_idx, src2_dt->data,
-                                     src2_dt->ne[0], src2_dt->ne[1], src2_dt->ne[2], src2_dt->ne[3],
-                                     src2_dt->type, src2_dt->data_len);
-            }
-            GGMLHEXAGON_LOG_INFO("  dst[t%d]  data=%p ne=[%d,%d,%d,%d] type=%d len=%d",
-                                 op->dst_idx, dst_dt->data,
-                                 dst_dt->ne[0], dst_dt->ne[1], dst_dt->ne[2], dst_dt->ne[3],
-                                 dst_dt->type, dst_dt->data_len);
-
-            // sample first few float values from src0 (for f32/f16 tensors)
-            if (src0_dt->data && src0_dt->data_len >= 16) {
-                const float * fdata = (const float *)src0_dt->data;
-                GGMLHEXAGON_LOG_INFO("  src0 sample before: [%f, %f, %f, %f]",
-                                     fdata[0], fdata[1], fdata[2], fdata[3]);
-            }
-        }
-
-        // Translation layer: map GGML op to HTP op, build octx, call execute_op
-        enum htp_op_code htp_op;
-        if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
-            GGMLHEXAGON_LOG_ERROR("batch op %d: unsupported opcode %d", i, op->opcode);
-            return AEE_EUNSUPPORTED;
-        }
-
-        struct htp_ops_context octx;
-        struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
-        struct htp_tensor dst_ht;
-
-        build_htp_octx(&octx, htp_op, op->params, NULL,
-                       src0_dt, src1_dt, src2_dt, src3_dt,
-                       dst_dt, src_ht, &dst_ht);
-
-        if (htp_op == HTP_OP_MUL_MAT) {
-            if (build_mm_kernel_params(&octx) != 0) {
-                return AEE_EFAILED;
-            }
-        }
-
-        int op_ret = execute_op(&octx);
-
-        octx.src0_spad.src = NULL;
-        octx.src1_spad.src = NULL;
-        octx.src2_spad.src = NULL;
-        octx.src3_spad.src = NULL;
-        octx.dst_spad.src  = NULL;
-
-        if (op_ret != HTP_STATUS_OK) {
-            GGMLHEXAGON_LOG_ERROR("batch op %d: execute_op returned %d (htp_op=%d)",
-                                  i, op_ret, htp_op);
-            return AEE_EFAILED;
-        }
-
-        if (1 == g_dump_diag_info) {
-            // sample dst after op execution
-            if (dst_dt->data && dst_dt->data_len >= 16) {
-                const float * fdata = (const float *)dst_dt->data;
-                GGMLHEXAGON_LOG_INFO("  dst sample after: [%f, %f, %f, %f]",
-                                 fdata[0], fdata[1], fdata[2], fdata[3]);
-            }
-        }
-    }
-
-    // [Direction-3 debug] ensure all DSP memory writes (especially HMX/DMA) are visible
-    // before returning to FastRPC, which will copy data back to AP side.
-    // Use same pattern as test-hmx.c: compiler barrier + volatile read to flush stores.
-    __asm__ __volatile__("" ::: "memory");
-    // force a volatile read on dst of last op to ensure writeback is committed
-    if (req->n_ops > 0 && req->ops[req->n_ops - 1].dst_idx >= 0) {
-        const dsptensor * last_dst = &req->tensors[req->ops[req->n_ops - 1].dst_idx];
-        if (last_dst->data && last_dst->data_len >= 4) {
-            (void) *(volatile const int *)(last_dst->data);
-        }
-    }
-    __asm__ __volatile__("" ::: "memory");
-
-    //GGMLHEXAGON_LOG_DEBUG("leave %s (dsp_execute_batch)", __func__);
-    return AEE_SUCCESS;
-}
-
 // FastRPC IDL per-op methods (referenced by skel.c case 3/4)
 int ggmlop_dsp_add(remote_handle64 h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) {
     GGML_UNUSED(h);
@@ -1545,7 +1413,7 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const dsptensor* src0, const dsptensor*
  *
  * Probe mode: when batch_size == 0, performs bidirectional ION memory test.
  */
-AEEResult ggmlop_dsp_execute_batch_ion(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
+AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
     if (g_ion_dsp_base == NULL) {
         GGMLHEXAGON_LOG_ERROR("ION base not registered");
         return AEE_EBADPARM;

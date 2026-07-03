@@ -268,8 +268,7 @@ __QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_setclocks)(remote_handle
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_add)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_mulmat)(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT int __QAIC_HEADER(ggmlop_dsp_execute_task)(remote_handle64 _h, int32 ggml_op_type, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_execute_batch)(remote_handle64 _h, const dsp_opbatch_req* req) __QAIC_HEADER_ATTRIBUTE;
-__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_execute_batch_ion)(remote_handle64 _h, uint32 batch_offset, uint32 batch_size) __QAIC_HEADER_ATTRIBUTE;
+__QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_execute_batch)(remote_handle64 _h, uint32 batch_offset, uint32 batch_size) __QAIC_HEADER_ATTRIBUTE;
 __QAIC_HEADER_EXPORT AEEResult __QAIC_HEADER(ggmlop_dsp_register_ion)(remote_handle64 _h, uint32 ion_fd, uint32 size_lo, uint32 size_hi) __QAIC_HEADER_ATTRIBUTE;
 #ifndef ggmlop_URI
 #define ggmlop_URI "file:///libggmldsp-skel.so?ggmldsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1"

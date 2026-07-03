@@ -656,10 +656,6 @@ static __inline int _stub_method_3(remote_handle64 _handle, uint32_t _mid, uintp
    _allocator_deinit(_al);
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch)(remote_handle64 _handle, const dsp_opbatch_req* req) __QAIC_STUB_ATTRIBUTE {
-   uint32_t _mid = 6;
-   return _stub_method_3(_handle, _mid, (uintptr_t*)req);
-}
 static __inline int _stub_method_4(remote_handle64 _handle, uint32_t _mid, uint32_t _in0[1], uint32_t _in1[1]) {
    remote_arg _pra[1] = {0};
    uint32_t _primIn[2]= {0};
@@ -674,7 +670,7 @@ static __inline int _stub_method_4(remote_handle64 _handle, uint32_t _mid, uint3
    }
    return _nErr;
 }
-__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch_ion)(remote_handle64 _handle, uint32 batch_offset, uint32 batch_size) __QAIC_STUB_ATTRIBUTE {
+__QAIC_STUB_EXPORT AEEResult __QAIC_STUB(ggmlop_dsp_execute_batch)(remote_handle64 _handle, uint32 batch_offset, uint32 batch_size) __QAIC_STUB_ATTRIBUTE {
    uint32_t _mid = 7;
    return _stub_method_4(_handle, _mid, (uint32_t*)&batch_offset, (uint32_t*)&batch_size);
 }

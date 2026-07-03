@@ -816,9 +816,9 @@ __QAIC_SKEL_EXPORT int __QAIC_SKEL(ggmldsp_skel_handle_invoke)(remote_handle64 _
       case 5:
       return _skel_method_3(__QAIC_IMPL(ggmlop_dsp_execute_task), _h, _sc, _pra);
       case 6:
-      return _skel_method_2(__QAIC_IMPL(ggmlop_dsp_execute_batch), _h, _sc, _pra);
+      return AEE_EUNSUPPORTED;
       case 7:
-      return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_execute_batch_ion), _h, _sc, _pra);
+      return _skel_method_1(__QAIC_IMPL(ggmlop_dsp_execute_batch), _h, _sc, _pra);
       case 8:
       return _skel_method(__QAIC_IMPL(ggmlop_dsp_register_ion), _h, _sc, _pra);
    }
