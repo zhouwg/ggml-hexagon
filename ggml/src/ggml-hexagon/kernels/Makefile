@@ -24,9 +24,14 @@ LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB
 # vpath: search ../htp for .c files not in kernels/
 vpath %.c ../htp
 
-# Only entry.c/ggml-dsp.c/skel.c from kernels/; all ops come from ../htp/
+# Qualcomm execute_op kernels (binary-ops.c, matmul-ops.c, etc.) come from ../htp/.
+# Self-built ggmlop_dsp_* kernels (add.c, mulmat.c, etc.) live in kernels/.
+# Dual-channel dispatch in entry.c selects between them by mulmat_algotype.
 SRCS = ggml-dsp.c skel.c entry.c worker-pool.c hex-dma.c hmx-queue.c binary-ops.c unary-ops.c sum-rows-ops.c softmax-ops.c act-ops.c rope-ops.c set-rows-ops.c get-rows-ops.c cpy-ops.c repeat-ops.c argsort-ops.c ssm-conv.c cumsum-ops.c fill-ops.c concat-ops.c diag-ops.c solve-tri-ops.c gated-delta-net-ops.c pad-ops.c matmul-ops.c flash-attn-ops.c
-OBJS = $(SRCS:.c=.o)
+SRCS += add.c sub.c mul.c div.c concat.c cpy.c repeat.c getrows.c diagmask.c rmsnorm.c rope.c scale.c silu.c softmax.c mulmat.c flash_attn.c sgemm.cpp
+OBJS = $(patsubst %.c, %.o, $(patsubst %.cpp, %.o, $(SRCS)))
+OBJS += dot.o
+OBJS += worker_pool.o
 
 ALL:$(OBJS)
 		${HEXAGON_CC} ${LDFLAGS} -o ${TARGET} -Wl,--start-group ${OBJS} -Wl,--end-group

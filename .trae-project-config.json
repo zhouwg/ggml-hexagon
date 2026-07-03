@@ -296,10 +296,20 @@
       "description": "How to test and measure mulmat performance",
       "test_command": "./scripts/build-run-android.sh run_testop MUL_MAT 0 [algo_type]",
       "algo_types": {
-        "0": "HVX + multithread",
-        "31": "sgemm (llamafile-style)",
-        "32": "HMX",
-        "33": "VTCM + multithread"
+        "0": "HVX + multithread (self-built path)",
+        "29": "Qualcomm execute_op path (full op coverage; delegates to ../htp/*.c)",
+        "30": "HMX sync + x4x2 repack (self-built path)",
+        "31": "sgemm (llamafile-style, self-built path)",
+        "32": "HMX pipeline (self-built path)",
+        "33": "VTCM + multithread (self-built path)"
+      },
+      "dual_channel_dispatch": {
+        "description": "entry.c dispatches ops to two kernel sets based on mulmat_algotype. Applies to per-op (ggmlop_dsp_execute_task) and ION-batch (ggmlop_dsp_execute_batch) paths.",
+        "qualcomm_path": "mulmat_algotype == 29 -> Qualcomm execute_op. Full op coverage (see enabled_ops in ggml-hexagon.cfg).",
+        "self_built_path": "mulmat_algotype != 29 -> ggmlop_dsp_* kernels. Limited op coverage.",
+        "self_built_supported_ops": ["ADD", "SUB", "MUL", "DIV", "MUL_MAT", "RMS_NORM", "ROPE", "SOFT_MAX", "UNARY", "SCALE", "CPY", "CONCAT", "REPEAT", "DIAG_MASK_INF", "FLASH_ATTN_EXT"],
+        "self_built_unsupported_ops_in_cfg": ["GET_ROWS", "SET_ROWS", "SUM_ROWS", "CONT", "GLU", "NORM", "L2_NORM", "SQR", "SQRT", "ARGSORT", "PAD", "CUMSUM", "FILL", "DIAG", "TRI"],
+        "note": "When using self-built path (algotype != 29), trim enabled_ops in ggml-hexagon.cfg to match self_built_supported_ops. Otherwise unsupported ops return AEE_EUNSUPPORTED on DSP and corrupt inference output (e.g. algotype=30 produces garbled text)."
       },
       "log_command": "adb logcat | grep CDSP0",
       "note": "Use DSP-side log timing for performance analysis. Do NOT run ./scripts/build-run-android.sh run_perfop unless explicitly approved - it is very time-consuming."

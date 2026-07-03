@@ -696,10 +696,10 @@ function run_llamacli()
 {
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -710,11 +710,11 @@ function run_llamabench()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench  -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
+               && ${REMOTE_PATH}/llama-bench --mulmat-algotype ${mulmat_algotype} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench --mulmat-algotype ${mulmat_algotype} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
 }
 
 
@@ -745,9 +745,9 @@ function run_test-ops()
 function check_mulmat_algotype
 {
     printf "mulmat_algotype ${mulmat_algotype} \n"
-    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]]; then
+    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]] && [[ ${mulmat_algotype} != 29 ]]; then
         printf "invalid mulmat algotype\n"
-        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 30, 31, 32, 33 \n"
+        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 29, 30, 31, 32, 33 \n"
         exit 1
     fi
 }
@@ -940,9 +940,11 @@ elif [ $# == 1 ]; then
         run_test-ops
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
+        mulmat_algotype=32
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
+        mulmat_algotype=32
         run_llamabench
         exit 0
     else
@@ -964,10 +966,13 @@ elif [ $# == 2 ]; then
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
+        mulmat_algotype=$2
+        check_mulmat_algotype
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
-        mulmat_algotype=32
+        mulmat_algotype=$2
+        check_mulmat_algotype
         run_llamabench
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then

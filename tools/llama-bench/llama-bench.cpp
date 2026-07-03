@@ -2187,6 +2187,34 @@ int llama_bench(int argc, char ** argv) {
     fprintf(stderr, "warning: sanitizer enabled, performance may be affected\n");
 #endif
 
+#ifdef GGML_USE_HEXAGON
+    // Strip --mulmat-algotype <N> from argv before parse_cmd_params, which
+    // rejects unknown args. Must run BEFORE ggml_backend_load_all(), which
+    // registers the Hexagon backend and loads cfg. Matches completion.cpp
+    // and test-backend-ops.cpp semantics: -1 = not specified, use cfg file
+    // value; >=0 = override cfg.
+    int mulmat_algotype = -1;
+    std::vector<char *> filtered_argv;
+    filtered_argv.reserve(argc);
+    filtered_argv.push_back(argv[0]);
+    for (int i = 1; i < argc; i++) {
+        if (0 == strcmp(argv[i], "--mulmat-algotype")) {
+            if (i + 1 < argc) {
+                mulmat_algotype = atoi(argv[i + 1]);
+                i++;
+            }
+            continue;
+        }
+        filtered_argv.push_back(argv[i]);
+    }
+    if (mulmat_algotype >= 0) {
+        argc = (int)filtered_argv.size();
+        argv = filtered_argv.data();
+        fprintf(stderr, "mulmat_algotype %d\n", mulmat_algotype);
+        ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
+    }
+#endif
+
     // initialize backends
     ggml_backend_load_all();
 

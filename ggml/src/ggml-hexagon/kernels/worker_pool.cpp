@@ -30,6 +30,14 @@ written permission of Qualcomm Technologies Incorporated.
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+
+/* Rename to avoid link collision with ../htp/worker-pool.c (linked in same .so).
+ * Self-built kernels use only synctoken/submit/num_workers, not these 4. */
+#define worker_pool_init                     jz_worker_pool_init
+#define worker_pool_init_with_stack_size     jz_worker_pool_init_with_stack_size
+#define worker_pool_set_thread_priority     jz_worker_pool_set_thread_priority
+#define worker_pool_get_thread_priority     jz_worker_pool_get_thread_priority
+
 #include "worker_pool.h"
 
 #ifndef _DEBUG
