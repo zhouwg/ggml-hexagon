@@ -654,6 +654,6 @@ the following screenshot <b>can be reproduced</b> in branch self-build.
 <img width="1727" height="599" alt="Screenshot from 2026-06-30 12-45-57" src="https://github.com/user-attachments/assets/93ab11e3-5b1c-4af1-8636-af5513ab9c7b" />
 
 
-the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build_qcom)and <b>can't be reproduced</b> in (remote) branch self-build-jz. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
+the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build_qcom)and <b>can be reproduced</b> in branch self-build-jz. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
 
 <img width="1688" height="595" alt="Screenshot from 2026-06-29 17-12-12" src="https://github.com/user-attachments/assets/52b54fa7-9b46-47da-b6c2-41e81940c4f5" />
