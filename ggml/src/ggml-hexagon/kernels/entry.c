@@ -908,9 +908,9 @@ static void build_htp_octx(
     const int32_t * kernel_params,
     const dsptensor * src0, const dsptensor * src1,
     const dsptensor * src2, const dsptensor * src3,
-    const dsptensor * dst,
+    const dsptensor * const dsts[HTP_OP_MAX_OUTPUTS],
     struct htp_tensor src_ht[HTP_OP_MAX_INPUTS],
-    struct htp_tensor * dst_ht) {
+    struct htp_tensor dst_ht[HTP_OP_MAX_OUTPUTS]) {
 
     memset(octx, 0, sizeof(*octx));
     octx->ctx = &g_htp_ctx;
@@ -931,11 +931,13 @@ static void build_htp_octx(
         }
     }
 
-    if (dst) {
-        dsptensor_to_htp_tensor(dst, dst_ht);
-        octx->dsts[0] = dst_ht;
-    } else {
-        octx->dsts[0] = NULL;
+    for (int i = 0; i < HTP_OP_MAX_OUTPUTS; i++) {
+        if (dsts[i]) {
+            dsptensor_to_htp_tensor(dsts[i], &dst_ht[i]);
+            octx->dsts[i] = &dst_ht[i];
+        } else {
+            octx->dsts[i] = NULL;
+        }
     }
 
     octx->n_threads = (uint32_t)g_thread_counts;
@@ -1403,10 +1405,11 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
     struct htp_ops_context octx;
     struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
-    struct htp_tensor dst_ht;
+    struct htp_tensor dst_ht[HTP_OP_MAX_OUTPUTS];
+    const dsptensor * dsts[HTP_OP_MAX_OUTPUTS] = {dst};
 
     build_htp_octx(&octx, htp_op, dst->op_params, NULL,
-                   src0, src1, NULL, NULL, dst, src_ht, &dst_ht);
+                   src0, src1, NULL, NULL, dsts, src_ht, dst_ht);
 
     if (htp_op == HTP_OP_MUL_MAT) {
         if (build_mm_kernel_params(&octx) != 0) {
@@ -1522,11 +1525,13 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
-        dsptensor src0_dt, src1_dt_buf, src2_dt_buf, src3_dt_buf, dst_dt;
+        dsptensor src0_dt, src1_dt_buf, src2_dt_buf, src3_dt_buf;
+        dsptensor dst_dt_buf[HTP_OP_MAX_OUTPUTS];
         const dsptensor *src1_dt_ptr = NULL, *src2_dt_ptr = NULL, *src3_dt_ptr = NULL;
+        const dsptensor * dst_dt_ptrs[HTP_OP_MAX_OUTPUTS] = {NULL};
 
         /* Build src0 from hex_tensor_desc using ION base + offset */
-        const hex_tensor_desc * t0 = &tens[op->src0_idx];
+        const hex_tensor_desc * t0 = &tens[op->src_idx[0]];
         memset(&src0_dt, 0, sizeof(src0_dt));
         src0_dt.type     = t0->type;
         memcpy(src0_dt.ne, t0->ne, sizeof(src0_dt.ne));
@@ -1545,8 +1550,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             }
         }
 
-        if (op->src1_idx >= 0) {
-            const hex_tensor_desc * t1 = &tens[op->src1_idx];
+        if (op->src_idx[1] >= 0) {
+            const hex_tensor_desc * t1 = &tens[op->src_idx[1]];
             memset(&src1_dt_buf, 0, sizeof(src1_dt_buf));
             src1_dt_buf.type     = t1->type;
             memcpy(src1_dt_buf.ne, t1->ne, sizeof(src1_dt_buf.ne));
@@ -1566,8 +1571,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
                 }
             }
         }
-        if (op->src2_idx >= 0) {
-            const hex_tensor_desc * t2 = &tens[op->src2_idx];
+        if (op->src_idx[2] >= 0) {
+            const hex_tensor_desc * t2 = &tens[op->src_idx[2]];
             memset(&src2_dt_buf, 0, sizeof(src2_dt_buf));
             src2_dt_buf.type     = t2->type;
             memcpy(src2_dt_buf.ne, t2->ne, sizeof(src2_dt_buf.ne));
@@ -1578,8 +1583,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             src2_dt_buf.data_len = t2->data_len;
             src2_dt_ptr = &src2_dt_buf;
         }
-        if (op->src3_idx >= 0) {
-            const hex_tensor_desc * t3 = &tens[op->src3_idx];
+        if (op->src_idx[3] >= 0) {
+            const hex_tensor_desc * t3 = &tens[op->src_idx[3]];
             memset(&src3_dt_buf, 0, sizeof(src3_dt_buf));
             src3_dt_buf.type     = t3->type;
             memcpy(src3_dt_buf.ne, t3->ne, sizeof(src3_dt_buf.ne));
@@ -1591,19 +1596,28 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             src3_dt_ptr = &src3_dt_buf;
         }
 
-        const hex_tensor_desc * td = &tens[op->dst_idx];
-        memset(&dst_dt, 0, sizeof(dst_dt));
-        dst_dt.type     = td->type;
-        memcpy(dst_dt.ne, td->ne, sizeof(dst_dt.ne));
-        memcpy(dst_dt.nb, td->nb, sizeof(dst_dt.nb));
-        memcpy(dst_dt.op_params, td->op_params, sizeof(dst_dt.op_params));
-        // Always override with op-level params (from node->op_params).
-        // Confirmed: node->op_params is correct for all ops, but dst tensor's
-        // op_params can be zero (ROPE, SOFT_MAX) or stale (SCALE in-place reuse).
-        memcpy(dst_dt.op_params, op->params, sizeof(dst_dt.op_params));
-        dst_dt.flags    = td->flags;
-        dst_dt.data     = (void *)(base + td->data_offset);
-        dst_dt.data_len = td->data_len;
+        /* Read all dst outputs (QKV/FFN fusion uses dst_idx[0..2] / dst_idx[0..1]).
+         * Single-output ops only use dst_idx[0]; the rest are -1 (NULL). */
+        for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
+            if (op->dst_idx[k] < 0) {
+                dst_dt_ptrs[k] = NULL;
+                continue;
+            }
+            const hex_tensor_desc * td = &tens[op->dst_idx[k]];
+            memset(&dst_dt_buf[k], 0, sizeof(dst_dt_buf[k]));
+            dst_dt_buf[k].type     = td->type;
+            memcpy(dst_dt_buf[k].ne, td->ne, sizeof(dst_dt_buf[k].ne));
+            memcpy(dst_dt_buf[k].nb, td->nb, sizeof(dst_dt_buf[k].nb));
+            memcpy(dst_dt_buf[k].op_params, td->op_params, sizeof(dst_dt_buf[k].op_params));
+            // Always override with op-level params (from node->op_params).
+            // Confirmed: node->op_params is correct for all ops, but dst tensor's
+            // op_params can be zero (ROPE, SOFT_MAX) or stale (SCALE in-place reuse).
+            memcpy(dst_dt_buf[k].op_params, op->params, sizeof(dst_dt_buf[k].op_params));
+            dst_dt_buf[k].flags    = td->flags;
+            dst_dt_buf[k].data     = (void *)(base + td->data_offset);
+            dst_dt_buf[k].data_len = td->data_len;
+            dst_dt_ptrs[k] = &dst_dt_buf[k];
+        }
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
@@ -1623,7 +1637,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             if (src0_dt.data && src0_dt.data_len >= 16) {
                 const float * fv = (const float *)src0_dt.data;
                 float eps_f;
-                memcpy(&eps_f, dst_dt.op_params, sizeof(float));
+                memcpy(&eps_f, dst_dt_buf[0].op_params, sizeof(float));
                 GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 POST-INVAL off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f] eps=%f ne=[%d,%d,%d,%d]",
                                  i, t0->data_offset, src0_dt.data, fv[0], fv[1], fv[2], fv[3], eps_f,
                                  (int)src0_dt.ne[0], (int)src0_dt.ne[1], (int)src0_dt.ne[2], (int)src0_dt.ne[3]);
@@ -1637,21 +1651,21 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         if (g_mulmat_algotype != 29) {
             int op_ret = 0;
             switch (op->opcode) {
-                case GGML_OP_ADD:      op_ret = ggmlop_dsp_add(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_SUB:      op_ret = ggmlop_dsp_sub(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_MUL:      op_ret = ggmlop_dsp_mul(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_DIV:      op_ret = ggmlop_dsp_div(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_MUL_MAT:  op_ret = ggmlop_dsp_mulmat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_RMS_NORM: op_ret = ggmlop_dsp_rmsnorm(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_ROPE:     op_ret = ggmlop_dsp_rope(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
-                case GGML_OP_SOFT_MAX: op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt); break;
-                case GGML_OP_UNARY:    op_ret = ggmlop_dsp_silu(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_SCALE:    op_ret = ggmlop_dsp_scale(h, &src0_dt, &dst_dt); break;
-                case GGML_OP_CPY:      op_ret = ggmlop_dsp_cpy(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_CONCAT:   op_ret = ggmlop_dsp_concat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_REPEAT:   op_ret = ggmlop_dsp_repeat(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_DIAG_MASK_INF: op_ret = ggmlop_dsp_diag_mask_inf(h, &src0_dt, src1_dt_ptr, &dst_dt); break;
-                case GGML_OP_FLASH_ATTN_EXT: op_ret = ggmlop_dsp_flash_attn(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr, &dst_dt); break;
+                case GGML_OP_ADD:      op_ret = ggmlop_dsp_add(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_SUB:      op_ret = ggmlop_dsp_sub(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_MUL:      op_ret = ggmlop_dsp_mul(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_DIV:      op_ret = ggmlop_dsp_div(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_MUL_MAT:  op_ret = ggmlop_dsp_mulmat(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_RMS_NORM: op_ret = ggmlop_dsp_rmsnorm(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_ROPE:     op_ret = ggmlop_dsp_rope(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_SOFT_MAX: op_ret = ggmlop_dsp_softmax(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_UNARY:    op_ret = ggmlop_dsp_silu(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_SCALE:    op_ret = ggmlop_dsp_scale(h, &src0_dt, &dst_dt_buf[0]); break;
+                case GGML_OP_CPY:      op_ret = ggmlop_dsp_cpy(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_CONCAT:   op_ret = ggmlop_dsp_concat(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_REPEAT:   op_ret = ggmlop_dsp_repeat(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_DIAG_MASK_INF: op_ret = ggmlop_dsp_diag_mask_inf(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
+                case GGML_OP_FLASH_ATTN_EXT: op_ret = ggmlop_dsp_flash_attn(h, &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr, &dst_dt_buf[0]); break;
                 default:
                     GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
                     return AEE_EUNSUPPORTED;
@@ -1662,8 +1676,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
                 return AEE_EFAILED;
             }
 
-            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
-            ggmlop_dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
+            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
+            ggmlop_dsp_cache_flush_range(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
             continue;
         }
 
@@ -1679,11 +1693,11 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
         struct htp_ops_context octx;
         struct htp_tensor src_ht[HTP_OP_MAX_INPUTS];
-        struct htp_tensor dst_ht;
+        struct htp_tensor dst_ht[HTP_OP_MAX_OUTPUTS];
 
         build_htp_octx(&octx, htp_op, op->params, op->kernel_params,
                        &src0_dt, src1_dt_ptr, src2_dt_ptr, src3_dt_ptr,
-                       &dst_dt, src_ht, &dst_ht);
+                       dst_dt_ptrs, src_ht, dst_ht);
 
         if (htp_op == HTP_OP_MUL_MAT) {
             /* kernel_params already copied in build_htp_octx.
@@ -1713,10 +1727,10 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         if (htp_op == HTP_OP_MUL_MAT && src0_dt.type == 0 /*F32*/ &&
             src0_dt.data && src0_dt.data_len >= (size_t)(17 * 256) &&
             src1_dt_ptr && src1_dt_buf.data && src1_dt_buf.data_len >= 16 &&
-            dst_dt.data && dst_dt.data_len >= (size_t)(17 * 4)) {
+            dst_dt_ptrs[0] && dst_dt_buf[0].data && dst_dt_buf[0].data_len >= (size_t)(17 * 4)) {
             const float * s0  = (const float *) src0_dt.data;
             const float * s1  = (const float *) src1_dt_buf.data;
-            const float * dp  = (const float *) dst_dt.data;
+            const float * dp  = (const float *) dst_dt_buf[0].data;
             const uint32_t s0_row16_off = src0_dt.nb[1] * 16 / 4;
             /* htp_mm_kernel_params layout (see matmul-ops.h):
              *   [0]kernel_type [1]pipeline [2]m_chunk [3]n_chunk [4]n_threads
@@ -1753,8 +1767,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op.
          * Locates whether NaN at index 16 originates in execute_op. */
         if (htp_op == HTP_OP_MUL_MAT && src0_dt.type == 0 /*F32*/ &&
-            dst_dt.data && dst_dt.data_len >= (size_t)(20 * 4)) {
-            const float * dp = (const float *) dst_dt.data;
+            dst_dt_ptrs[0] && dst_dt_buf[0].data && dst_dt_buf[0].data_len >= (size_t)(20 * 4)) {
+            const float * dp = (const float *) dst_dt_buf[0].data;
             GGMLHEXAGON_LOG_ERROR("[DSP-MM-POST] op%u d[0..3]=[%.4f,%.4f,%.4f,%.4f] d[16..19]=[%.4f,%.4f,%.4f,%.4f]",
                 i, dp[0], dp[1], dp[2], dp[3], dp[16], dp[17], dp[18], dp[19]);
         }
@@ -1777,17 +1791,24 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             return AEE_EFAILED;
         }
 
-        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt.data_len);
+        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
 
-        /* Flush DSP cache after writing dst (so AP can read from DRAM) */
-        ggmlop_dsp_cache_flush_range(dst_dt.data, dst_dt.data_len);
+        /* Flush DSP cache after writing dst (so AP can read from DRAM).
+         * For multi-output ops (QKV/FFN fusion), flush all non-NULL dsts. */
+        for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
+            if (dst_dt_ptrs[k]) {
+                ggmlop_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+            }
+        }
 
         if (1 == g_dump_diag_info) {
-            /* DSP-side DIAG: dump first 4 f32 values from dst data */
-            if (dst_dt.data && dst_dt.data_len >= 16) {
-                const float * fv = (const float *)dst_dt.data;
-                GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst  off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
-                                 i, tens[op->dst_idx].data_offset, dst_dt.data, fv[0], fv[1], fv[2], fv[3]);
+            /* DSP-side DIAG: dump first 4 f32 values from each dst output */
+            for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
+                if (dst_dt_ptrs[k] && dst_dt_buf[k].data && dst_dt_buf[k].data_len >= 16) {
+                    const float * fv = (const float *)dst_dt_buf[k].data;
+                    GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst[%d] off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
+                                     i, k, tens[op->dst_idx[k]].data_offset, dst_dt_buf[k].data, fv[0], fv[1], fv[2], fv[3]);
+                }
             }
         }
     }
@@ -1795,8 +1816,8 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done", hdr->n_ops);
 
     __asm__ __volatile__("" ::: "memory");
-    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx < hdr->n_tensors) {
-        uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx].data_offset;
+    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
+        uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx[0]].data_offset;
         if (batch_size > last_off + 4)
             (void) *(volatile const int *)(base + last_off);
     }

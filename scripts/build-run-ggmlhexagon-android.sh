@@ -2,15 +2,15 @@
 #
 # this self-contained file is part of JZ's ggml-hexagon:
 #
-# 1. build llama.cpp + jz's ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
-#    this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
-#    this script is AI Agent friendly and verified with Trae AI Agent.
+# this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
 #
-# 2. verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
-
-# 3. verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 4. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 1. build&verify llama.cpp + jz's ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
+#
+# 2. build&verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+#
+# 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
 # Jeff Zhou - zhouwg2000@gmail.com
 # GitHub:   - https://github.com/zhouwg/ggml-hexagon
@@ -40,6 +40,7 @@ LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
 #path of toolchain, for purpose of share same toolchain in multiple instance of JZ's ggml-hexagon
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+#TOOLCHAIN_PATH=/home/zhouwg/develop/ggml-hexagon/prebuilts
 
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
@@ -98,7 +99,7 @@ GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+#GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
@@ -107,7 +108,11 @@ PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know ma
 #running_params=" -ngl 99 -t 6 -n 256 --poll 1000 --no-warmup --no-mmap  -fa on"
 # Qualcomm recommended (docs/backend/snapdragon/developer.md): --ctx-size 8192
 # Note: -ctk q8_0 -ctv q8_0 causes garbled output with our FLASH_ATTN_EXT
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --poll 1000 --no-warmup --no-mmap -fa on"
+# --ubatch-size 32 caps PP batch so MUL_MAT passes mulmat_min_n=30 check at
+# graph compute time (actual n=32 > 30). Graph build calls supports_op with
+# max ubatch=512, but VTCM check is skipped for algotype=29. Raise if PP
+# throughput matters (n=64/128/256 also pass; n<=30 stays on CPU).
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --device Hexagon-cDSP0,Hexagon-cDSP1"
 
 ######## part-3: utilities and functions ########
@@ -887,19 +892,18 @@ function show_usage()
     echo "  $0 help"
     echo "  $0 print_oplist"
     echo "  $0 update_ggml_libs"
+    echo -e "\n"
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
     echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
     echo "  $0 clean"
-    echo "  $0 run_testops"
-    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify accuracy    of ADD/MUL_MAT)"
-    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT                                 (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli                 "
-    echo "  $0 run_llamabench               "
-    echo "  $0 run_threadsafety             "
-    echo "  $0 run_perfop     MUL_MAT       (verify performance of MUL_MAT)"
-    echo "  $0 run_testop     MUL_MAT       (verify accuracy    of MUL_MAT)"
-
+    echo -e "\n"
+    echo "  $0 run_testops    [mulmat_algotype]"
+    echo "  $0 run_llamacli   [mulmat_algotype]"
+    echo "  $0 run_llamabench [mulmat_algotype]"
+    echo -e "\n"
+    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
+    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
     echo -e "\n\n\n"
 }
 
