@@ -99,7 +99,7 @@ GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
-#GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
@@ -110,8 +110,9 @@ PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know ma
 # Note: -ctk q8_0 -ctv q8_0 causes garbled output with our FLASH_ATTN_EXT
 # --ubatch-size 32 caps PP batch so MUL_MAT passes mulmat_min_n=30 check at
 # graph compute time (actual n=32 > 30). Graph build calls supports_op with
-# max ubatch=512, but VTCM check is skipped for algotype=29. Raise if PP
-# throughput matters (n=64/128/256 also pass; n<=30 stays on CPU).
+# max ubatch=512; VTCM fit is decided later by ggml_hexagon_ion_precompute_mm_params
+# (4-level fallback: tiled -> n_prefetch 16/8/4/2 -> flat DDR kernel). Raise
+# if PP throughput matters (n=64/128/256 also pass; n<=30 stays on CPU).
 running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --device Hexagon-cDSP0,Hexagon-cDSP1"
 
