@@ -2,7 +2,7 @@
 
 ## 背景
 
-当 `mulmat_algotype=29` 时，JZ 版本和高通版本的 ggml-hexagon backend 都走 Qualcomm 的 `execute_op` 路径（DSP 端代码共享，位于 `htp/` 目录下）。但两者在 AP 端的实现差异巨大，导致性能显著不同。
+当 `mulmat_algotype=29` 时，JZ 版本和高通版本的 ggml-hexagon backend 都走 Qualcomm 的 `execute_op` 路径（`execute_op` 实现位于 `htp/` 目录下，被两版本共享调用）。但 DSP 端入口不同：JZ 为 `kernels/entry.c`，高通为 `htp/main.c`。两者在 AP 端的实现差异巨大，导致性能显著不同。
 
 本文档全面对比两个版本在 algotype=29 时的 AP 端差异，按性能影响程度从大到小排序。
 

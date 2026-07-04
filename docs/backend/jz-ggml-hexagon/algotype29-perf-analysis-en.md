@@ -2,7 +2,7 @@
 
 ## Background
 
-When `mulmat_algotype=29`, both the JZ and Qualcomm versions of the ggml-hexagon backend route through Qualcomm's `execute_op` path (sharing DSP-side code in `htp/`). However, the AP-side implementations differ significantly, leading to substantial performance differences.
+When `mulmat_algotype=29`, both the JZ and Qualcomm versions of the ggml-hexagon backend route through Qualcomm's `execute_op` path (the `execute_op` implementation lives in `htp/` and is shared by both versions). However, the DSP entry points differ: JZ uses `kernels/entry.c`, while Qualcomm uses `htp/main.c`. The AP-side implementations differ significantly, leading to substantial performance differences.
 
 This document provides a comprehensive comparison of the AP-side differences when algotype=29, ranked by performance impact (largest to smallest).
 
@@ -12,7 +12,8 @@ This document provides a comprehensive comparison of the AP-side differences whe
 |------|-------------|
 | `ggml/src/ggml-hexagon/ggml-hexagon.cpp` | JZ version AP code (5491 lines) |
 | `ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp` | Qualcomm version AP code (4392 lines) |
-| `ggml/src/ggml-hexagon/kernels/entry.c` | DSP entry point (shared) |
+| `ggml/src/ggml-hexagon/kernels/entry.c` | JZ version DSP entry point |
+| `ggml/src/ggml-hexagon/htp/main.c` | Qualcomm version DSP entry point |
 | `ggml/src/ggml-hexagon/htp/matmul-ops.c` | Qualcomm DSP matmul kernel (shared) |
 
 > Note: Ignore all files under the `refs/` directory in the project root.

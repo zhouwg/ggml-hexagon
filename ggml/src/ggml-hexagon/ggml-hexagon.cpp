@@ -148,6 +148,7 @@ static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_
 static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
 static const char *          ggmlhexagon_get_mulmat_algotype_desc(int algotype);
 static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
+static int                   hexagon_probe_invoke_timed(ggml_backend_hexagon_context * ctx);
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size);
 
 struct ggmlhexagon_task {
@@ -233,6 +234,35 @@ struct ggml_backend_hexagon_context {
     int64_t  cumulative_p7_us;       // cumulative FastRPC time (p7 phase)
     int64_t  cumulative_graph_us;    // cumulative graph inference duration
     int64_t  last_graph_end_us;      // wall clock of last graph end (to measure gap)
+
+    // Per-graph node statistics
+    uint32_t max_nodes_per_graph;    // max node count in a single graph
+    uint32_t min_nodes_per_graph;    // min node count in a single graph
+    uint32_t total_nodes_processed;  // cumulative node count across all graphs
+
+    // Per-call execution time range
+    int64_t  min_graph_us;          // shortest single graph execution
+    int64_t  max_graph_us;          // longest single graph execution
+    uint32_t max_graph_n_nodes;     // cgraph node count when max_graph_us recorded
+    uint32_t max_graph_n_ops;       // DSP op count (post-fusion) when max_graph_us recorded
+    int64_t  min_p7_us;             // shortest single FastRPC call
+    int64_t  max_p7_us;             // longest single FastRPC call
+
+    // AP-side per-phase cumulative time
+    int64_t  cum_p4_us;       // Phase 4: tensor mirroring
+    int64_t  cum_p45_us;      // Phase 4.5: weight repack (dominant for algotype=29)
+    int64_t  cum_p6_us;       // Phase 6: descriptor construction
+    int64_t  cum_p65_us;      // Phase 6.5: cache flush
+    int64_t  cum_p75_us;      // Phase 7.5: cache inval
+
+    // FastRPC transport overhead calibration (measured via probe invokes at init).
+    // probe mode (batch_size=0) does minimal DSP work (1 byte read, 32 bytes write,
+    // 2 cache line flushes, 2x LOG_INFO), so measured time is an upper bound of
+    // pure FastRPC transport overhead (invoke round-trip: AP -> DSP -> AP).
+    int64_t  rpc_overhead_min_us;  // shortest probe invoke
+    int64_t  rpc_overhead_max_us;  // longest probe invoke
+    int64_t  rpc_overhead_sum_us;  // sum of all probe invokes (for avg)
+    uint32_t rpc_overhead_count;   // number of probe invokes measured
 
     // buffer type owned by this context (each device has its own buft)
     struct ggml_backend_buffer_type buffer_type;
@@ -1850,7 +1880,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
         // Call with batch_size=0 --> DSP enters probe mode: writes 0xAB at base+0,
         // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
         {
-            int probe_err = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, 0, 0);
+            int probe_err = hexagon_probe_invoke_timed(ctx);
             if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
                 // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
                 __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
@@ -1890,7 +1920,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                     __builtin___clear_cache((char *)ctx->rpc_mempool,
                                             (char *)ctx->rpc_mempool + 16);
 
-                    int err = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, 0, 0);
+                    int err = hexagon_probe_invoke_timed(ctx);
                     if (err != AEE_SUCCESS) {
                         GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
                                               round + 1, N_ROUNDS, err);
@@ -2019,6 +2049,7 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 
     uint32_t hmx_depth = 0;
     uint32_t hmx_spatial = 0;
+    //FIXME: better approach to get correct/accurate info
     ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_DEPTH, &hmx_depth);
     ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_SPATIAL, &hmx_spatial);
 
@@ -2036,12 +2067,54 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 
     GGMLHEXAGON_LOG_VERBOSE("vtcm_count %d", vtcm_count);
     GGMLHEXAGON_LOG_VERBOSE("vtcm_page %d", vtcm_page);
-    GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d hmx_spatial %d", hmx_depth, hmx_spatial);
+    //FIXME: the log output is "hmx_depth 0 hmx_spatial 0", this is not correct
+    //GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d hmx_spatial %d", hmx_depth, hmx_spatial);
     GGMLHEXAGON_LOG_VERBOSE("hvx_support_128b %d", hvx_support_128b);
     GGMLHEXAGON_LOG_VERBOSE("unsigned pd supported %d", ggmlhexagon_get_unsignedpd_support());
     GGMLHEXAGON_LOG_VERBOSE("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
     GGMLHEXAGON_LOG_VERBOSE("device %d caps: has_vtcm=%d has_hvx=%d has_hmx=%d", ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx);
     return htp_arch;
+}
+
+// Invoke probe (batch_size=0) and record FastRPC transport overhead timing.
+// probe mode does minimal DSP work, so measured time is an upper bound of
+// pure FastRPC transport overhead. Used at init only, no per-graph overhead.
+static int hexagon_probe_invoke_timed(ggml_backend_hexagon_context * ctx) {
+    int64_t t0 = ggml_time_us();
+    int err = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, 0, 0);
+    int64_t dt = ggml_time_us() - t0;
+    ctx->rpc_overhead_sum_us += dt;
+    ctx->rpc_overhead_count++;
+    if (ctx->rpc_overhead_min_us == 0 || dt < ctx->rpc_overhead_min_us) ctx->rpc_overhead_min_us = dt;
+    if (dt > ctx->rpc_overhead_max_us)                                  ctx->rpc_overhead_max_us = dt;
+    return err;
+}
+
+// dump accumulated performance statistics collected during graph_compute_batch
+static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx) {
+    if (nullptr == ctx) {
+        return;
+    }
+    GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
+                             (unsigned long long)ctx->rpc_batch_call_count,
+                             (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_p7_us / (int64_t)ctx->rpc_batch_call_count) : 0,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
+    GGMLHEXAGON_LOG_VERBOSE("graph nodes: min=%u max=%u total=%u",
+                             ctx->min_nodes_per_graph, ctx->max_nodes_per_graph, ctx->total_nodes_processed);
+    GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p7=[%lld, %lld] us",
+                             (long long)ctx->min_graph_us, (long long)ctx->max_graph_us,
+                             (long long)ctx->min_p7_us, (long long)ctx->max_p7_us);
+    GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
+                             (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
+    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7.5=%lld us",
+                             (long long)ctx->cum_p4_us, (long long)ctx->cum_p45_us,
+                             (long long)ctx->cum_p6_us, (long long)ctx->cum_p65_us,
+                             (long long)ctx->cum_p75_us);
+    GGMLHEXAGON_LOG_VERBOSE("rpc overhead (probe): n=%u min=%lld max=%lld avg=%lld us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)",
+                             ctx->rpc_overhead_count,
+                             (long long)ctx->rpc_overhead_min_us, (long long)ctx->rpc_overhead_max_us,
+                             ctx->rpc_overhead_count ? (long long)(ctx->rpc_overhead_sum_us / (int64_t)ctx->rpc_overhead_count) : 0);
 }
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
@@ -2057,6 +2130,7 @@ static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     ggmlhexagon_deinit_rpcmempool(ctx);
     //probe before domain_id is invalidated so AP-side domain queries still work
     ggmlhexagon_probe_dspinfo(ctx);
+    ggmlhexagon_dump_perf_stats(ctx);
     ctx->domain_id             = -1;
     GGMLHEXAGON_LOG_INFO("leave %s", __func__);
 }
@@ -2266,6 +2340,24 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       cumulative_p7_us(0),
       cumulative_graph_us(0),
       last_graph_end_us(0),
+      max_nodes_per_graph(0),
+      min_nodes_per_graph(0),
+      total_nodes_processed(0),
+      min_graph_us(0),
+      max_graph_us(0),
+      max_graph_n_nodes(0),
+      max_graph_n_ops(0),
+      min_p7_us(0),
+      max_p7_us(0),
+      cum_p4_us(0),
+      cum_p45_us(0),
+      cum_p6_us(0),
+      cum_p65_us(0),
+      cum_p75_us(0),
+      rpc_overhead_min_us(0),
+      rpc_overhead_max_us(0),
+      rpc_overhead_sum_us(0),
+      rpc_overhead_count(0),
       buffer_type{},
       has_vtcm(false),
       has_hvx(false),
@@ -4178,6 +4270,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t begin_time = ggml_time_us();
     int64_t gap_from_prev = ctx->last_graph_end_us ? (begin_time - ctx->last_graph_end_us) : 0;
 
+    // track per-graph node statistics (what ggml core assigned to this backend)
+    uint32_t graph_n_nodes = (uint32_t)cgraph->n_nodes;
+    ctx->total_nodes_processed += graph_n_nodes;
+    if (ctx->min_nodes_per_graph == 0 || graph_n_nodes < ctx->min_nodes_per_graph) {
+        ctx->min_nodes_per_graph = graph_n_nodes;
+    }
+    if (graph_n_nodes > ctx->max_nodes_per_graph) {
+        ctx->max_nodes_per_graph = graph_n_nodes;
+    }
+
     // collect supported ops
     std::vector<ggml_tensor *> supported_nodes;
     std::vector<ggml_tensor *> unsupported_nodes;
@@ -4395,7 +4497,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     const uint32_t total_desc_size = tensors_offset + tens_region;
 
     // ---- Phase 4: handle heap tensors -> mirror into ION ----
-    int64_t t_p4, t_p6, t_p65, t_p7, t_p75, t_p8;
+    int64_t t_p4, t_p45, t_p6, t_p65, t_p7, t_p75, t_p8;
     int64_t t_prev = ggml_time_us();
     // Two-step approach:
     //   Step 1: Collect unique data pointers and compute max mirror size per buffer
@@ -4500,6 +4602,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     // ---- Phase 4.5: repack quantized weights into ION ----
+    t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     // For mulmat_algotype=29: repack Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4 to tile-based layout
     //   expected by Qualcomm HMX kernels (hvx_mm_2d_repacked_*).
     // For mulmat_algotype=30: repack Q4_0 to x4x2 format.
@@ -4636,6 +4739,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     // ---- Phase 5: allocate batch descriptor region in ION mempool ----
+    t_p45 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     size_t batch_align = HEX_BATCH_ALIGN;
     size_t batch_offset_raw = ctx->rpc_mempool_usage;
     size_t batch_offset_aligned = (batch_offset_raw + batch_align - 1) & ~(batch_align - 1);
@@ -4661,7 +4765,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     temp_region_indices.push_back(ctx->ion_regions.size() - 1);
 
     // ---- Phase 6: build descriptors in local buffer, then memcpy to ION ----
-    t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    // Phase 5 (batch descriptor alloc) is trivial, folded into t_p6 timing.
+    t_prev = ggml_time_us();
     std::vector<uint8_t> local_buf(total_desc_size);
     hex_batch_hdr * hdr = (hex_batch_hdr *)local_buf.data();
     memset(hdr, 0, sizeof(*hdr));
@@ -5064,8 +5169,26 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     ctx->cumulative_p7_us    += t_p7;
     ctx->cumulative_graph_us += graph_dur;
     ctx->last_graph_end_us   = end_time;
-    GGMLHEXAGON_LOG_WARN("ion-batch timing: p4=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
-                         (long long)t_p4, (long long)t_p6, (long long)t_p65,
+    // per-phase cumulative time
+    ctx->cum_p4_us  += t_p4;
+    ctx->cum_p45_us += t_p45;
+    ctx->cum_p6_us  += t_p6;
+    ctx->cum_p65_us += t_p65;
+    ctx->cum_p75_us += t_p75;
+    // per-call min/max
+    if (ctx->min_p7_us == 0 || t_p7 < ctx->min_p7_us)    ctx->min_p7_us = t_p7;
+    if (t_p7 > ctx->max_p7_us)                            ctx->max_p7_us = t_p7;
+    if (ctx->min_graph_us == 0 || graph_dur < ctx->min_graph_us) ctx->min_graph_us = graph_dur;
+    if (graph_dur > ctx->max_graph_us) {
+        ctx->max_graph_us     = graph_dur;
+        ctx->max_graph_n_nodes = graph_n_nodes;
+        ctx->max_graph_n_ops   = n_ops;
+        GGMLHEXAGON_LOG_WARN("new max graph_dur=%lld us (n_nodes=%u n_ops=%u p7=%lld p6.5=%lld p7.5=%lld)",
+                             (long long)graph_dur, graph_n_nodes, n_ops,
+                             (long long)t_p7, (long long)t_p65, (long long)t_p75);
+    }
+    GGMLHEXAGON_LOG_WARN("ion-batch timing: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
+                         (long long)t_p4, (long long)t_p45, (long long)t_p6, (long long)t_p65,
                          (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
     GGMLHEXAGON_LOG_WARN("graph supported_nodes   %d", supported_nodes.size());
     GGMLHEXAGON_LOG_WARN("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);

@@ -23,14 +23,16 @@ PWD=`pwd`
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
 HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)}'`
+
 VERBOSE=OFF
 VERBOSE=ON
+is_build_jz_ggmlhexagon=1
+default_mulmat_algotype=29
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
 
 #path of built artifacts
-is_build_jz_ggmlhexagon=1
 LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
 LOCAL_BUILD_DIR_JZ=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
 LOCAL_BUILD_DIR_QCOM=${PROJECT_ROOT_PATH}/out/qcom-ggmlhexagon-android
@@ -735,9 +737,14 @@ function run_test-ops()
     prog_name=test-backend-ops
     prepare_run_on_phone ${prog_name}
 
+    echo "adb shell \"cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && ${REMOTE_PATH}/${prog_name} -a ${mulmat_algotype} test\""
+
+
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} test"
+               && ${REMOTE_PATH}/${prog_name} -a ${mulmat_algotype} test"
 
 }
 
@@ -937,14 +944,15 @@ elif [ $# == 1 ]; then
         remove_temp_dir
         exit 0
     elif [ "$1" == "run_testops" ]; then
+        mulmat_algotype=${default_mulmat_algotype}
         run_test-ops
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        mulmat_algotype=32
+        mulmat_algotype=${default_mulmat_algotype}
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
-        mulmat_algotype=32
+        mulmat_algotype=${default_mulmat_algotype}
         run_llamabench
         exit 0
     else
@@ -957,12 +965,12 @@ elif [ $# == 2 ]; then
 
     if [ "$1" == "run_testop" ]; then
         opname=$2
-        mulmat_algotype=32
+        mulmat_algotype=${default_mulmat_algotype}
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
         opname=$2
-        mulmat_algotype=32
+        mulmat_algotype=${default_mulmat_algotype}
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
@@ -976,7 +984,7 @@ elif [ $# == 2 ]; then
         run_llamabench
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
-        mulmat_algotype=32
+        mulmat_algotype=${default_mulmat_algotype}
         run_threadsafety
         exit 0
     else
