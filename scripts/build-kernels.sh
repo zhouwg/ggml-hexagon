@@ -4,7 +4,7 @@
 
 PROJECT_HOME_PATH=`pwd`
 PROJECT_ROOT_PATH=${PROJECT_HOME_PATH}
-LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
+LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 REMOTE_PATH=/data/local/tmp
 
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts

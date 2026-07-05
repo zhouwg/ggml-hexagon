@@ -6,9 +6,9 @@
 #
 # this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 1. build&verify llama.cpp + jz's ggml-hexagon backend on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC
+# 1. build&verify llama.cpp + JZ's ggml-hexagon backend(libggmldsp-skel.so) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 2. build&verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 2. build&verify llama.cpp + Qualcomm's ggml-hexagon backend(libggml-htp.so) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
 # 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
@@ -26,16 +26,12 @@ HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)
 
 VERBOSE=OFF
 VERBOSE=ON
-is_build_jz_ggmlhexagon=1
 default_mulmat_algotype=29
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
 
 #path of built artifacts
-LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
-LOCAL_BUILD_DIR_JZ=${PROJECT_ROOT_PATH}/out/jz-ggmlhexagon-android
-LOCAL_BUILD_DIR_QCOM=${PROJECT_ROOT_PATH}/out/qcom-ggmlhexagon-android
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
 #path of toolchain, for purpose of share same toolchain in multiple instance of JZ's ggml-hexagon
@@ -86,7 +82,7 @@ HTP_ARCH_VERSIONS="v79"
 
 ######## part-2: prompt and LLM models ########
 
-#the following LLM models has verified(works fine) with the jz's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
+#the following LLM models has verified(works fine) with the JZ's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
 #1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 
@@ -103,9 +99,8 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
-#running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-#running_params=" -ngl 99 -t 6 -n 256 --poll 1000 --no-warmup --no-mmap  -fa on"
+#running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
 # Qualcomm recommended (docs/backend/snapdragon/developer.md): --ctx-size 8192
 # Note: -ctk q8_0 -ctv q8_0 causes garbled output with our FLASH_ATTN_EXT
 # --ubatch-size 32 caps PP batch so MUL_MAT passes mulmat_min_n=30 check at
@@ -372,9 +367,8 @@ function build_extra_dsp_skels()
 
 function build_arm64
 {
-    update_local_build_dir 1
-
     build_idl
+
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
@@ -393,9 +387,8 @@ function build_arm64
 
 function build_arm64_debug
 {
-    update_local_build_dir 1
-
     build_idl
+
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
@@ -411,28 +404,9 @@ function build_arm64_debug
     cd -
 }
 
-function update_local_build_dir
-{
-    if [ $# != 1 ]; then
-        print "invalid param"
-        return
-    fi
-    is_build_jz_ggmlhexagon=$1
-
-    if [ ${is_build_jz_ggmlhexagon} -eq 1 ]; then
-        LOCAL_BUILD_DIR=${LOCAL_BUILD_DIR_JZ}
-    else
-        LOCAL_BUILD_DIR=${LOCAL_BUILD_DIR_QCOM}
-    fi
-
-    echo ${is_build_jz_ggmlhexagon} > /tmp/ggmlhexagon-buildowner.txt
-}
-
-#build qualcomm's official ggml-hexagon backend for performance comparison
+#build Qualcomm's ggml-hexagon backend for performance comparison
 function build_arm64_qcom
 {
-    update_local_build_dir 0
-
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom
 
@@ -464,9 +438,9 @@ function build_arm64_qcom
 
 function remove_temp_dir()
 {
-    if [ -d ${LOCAL_BUILD_DIR_JZ} ]; then
-        echo "remove ${LOCAL_BUILD_DIR_JZ} directory"
-        rm -rf ${LOCAL_BUILD_DIR_JZ}
+    if [ -d ${LOCAL_BUILD_DIR} ]; then
+        echo "remove ${LOCAL_BUILD_DIR} directory"
+        rm -rf ${LOCAL_BUILD_DIR}
     fi
 }
 
@@ -513,7 +487,7 @@ function build_ggml_hexagon_qcom()
 }
 
 
-#for Qualcomm's ggml-hexagon backend
+#for Qualcomm's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmlhtp()
 {
     echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
@@ -534,7 +508,7 @@ esac
 }
 
 
-#for jz's open-source ggml-hexagon backend in branch self-build-jz
+#for JZ's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
 {
     adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
@@ -637,8 +611,6 @@ function is_so_file_changed() {
 
 function update_ggml_libs()
 {
-    update_local_build_dir 1
-
     #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-base.so                 ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so                  ${REMOTE_PATH}/
@@ -661,10 +633,6 @@ function prepare_run_on_phone()
 
     update_cfg
 
-    local is_build_jz
-    is_build_jz=$(cat /tmp/ggmlhexagon-buildowner.txt)
-    update_local_build_dir ${is_build_jz}
-
     check_prebuilt_models
 
     is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
@@ -677,12 +645,12 @@ function prepare_run_on_phone()
         update_ggml_libs
     fi
 
-    #for verify jz's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
-    #this is default behaviour(it will report libggmldsp-skel.so can't found when exec UT after build_qcom), but qualcomm's backend so already updated on device side when running build_qcom
+    #for verify JZ's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
+    #this is default behaviour(it will report libggmldsp-skel.so can't found when exec UT after build_qcom), but Qualcomm's backend so already updated on device side when running build_qcom
     prepare_ggmldsp
 
     #for verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) which generated from source codes in this branch
-    #this is non-default behaviour, but jz's backend so already updated on device side when running build
+    #this is non-default behaviour, but JZ's backend so already updated on device side when running build
     #prepare_ggmlhtp
 
     adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
@@ -894,9 +862,9 @@ function show_usage()
     echo "  $0 print_oplist"
     echo "  $0 update_ggml_libs"
     echo -e "\n"
-    echo "  $0 build"
-    echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
-    echo "  $0 build_qcom (build qualcomm's official ggml-hexagon backend for performance comparison)"
+    echo "  $0 build (build JZ's ggml-hexagon backend)"
+    echo "  $0 build_debug (build JZ's ggml-hexagon backend in debug mode)"
+    echo "  $0 build_qcom (build Qualcomm's ggml-hexagon backend for performance comparison)"
     echo "  $0 clean"
     echo -e "\n"
     echo "  $0 run_testops    [mulmat_algotype]"
