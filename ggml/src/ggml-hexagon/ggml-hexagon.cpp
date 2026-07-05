@@ -14,7 +14,6 @@
  * this is a practical implementation(although mulmat's performance is slower than Qualcomm's official
  * ggml-hexagon backend at the moment), can expand other ggml ops easily & accordingly.
  *
- *           - v0.99.03 - 2026-07-04
  * Jeff Zhou - zhouwg2000@gmail.com
  * GitHub:   - https://github.com/zhouwg/ggml-hexagon
  */
@@ -589,7 +588,11 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
 
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     ggmlhexagon_get_timestring(timestamp);
-    GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
+        GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", "F32, F16, Q4_0");
+    } else {
+        GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
+    }
     GGMLHEXAGON_LOG_VERBOSE("using rpc ion memory pool:        %s", ggmlhexagon_use_ion_mempool() ? "YES" : "NO");
     GGMLHEXAGON_LOG_VERBOSE("thread_counts on CDSP:            %d", g_hexagon_appcfg.thread_counts);
     int algotype = g_hexagon_appcfg.mulmat_algotype;
@@ -598,8 +601,11 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("offload cgraph type:              %d", g_hexagon_appcfg.offload_cgraph_type);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
-    //GGMLHEXAGON_LOG_VERBOSE("enabled_types:                    %s", g_hexagon_appcfg.enabled_types.c_str());
-    GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
+        GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", "MUL_MAT");
+    } else {
+        GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
+    }
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
 
@@ -963,6 +969,13 @@ static bool ggmlhexagon_check_valid_appcfg() {
         GGMLHEXAGON_LOG_WARN("invalid offload_cgraph_type %d, reset to 2 (only 0=per-op and 2=ION-batch supported)",
                              g_hexagon_appcfg.offload_cgraph_type);
         g_hexagon_appcfg.offload_cgraph_type = 2;
+    }
+
+    if (g_hexagon_appcfg.offload_cgraph_type != 2) {
+        if (g_hexagon_appcfg.mulmat_algotype == 29) {
+            GGMLHEXAGON_LOG_WARN("mulmat_algotype can't be 29 when offload_cgraph_type !=2");
+            g_hexagon_appcfg.mulmat_algotype = 32;
+        }
     }
 
     if (g_hexagon_appcfg.thread_counts > 6) {
@@ -1818,12 +1831,13 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     probe_slots.push_back(1024+2048);
     if (htp_arch > 75) {
         probe_slots.push_back(1024+2048+900);
+        if (2 != g_hexagon_appcfg.offload_cgraph_type) {
+            probe_slots.push_back(4096);
+        }
     } else {
         probe_slots.push_back(1024+2048+200);
     }
-    if (2 != g_hexagon_appcfg.offload_cgraph_type) {
-        probe_slots.push_back(4096);
-    }
+
     size_t probe_counts     = probe_slots.size();
     for (size_t idx = 0; idx < probe_counts; idx++) {
         rpc_buffer = static_cast<uint8_t *>(rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, (probe_slots[idx] * SIZE_IN_MB)));
@@ -3062,9 +3076,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         case GGML_TYPE_IQ1_S:
 #endif
         {
-            // Qualcomm's HTP kernel has no BF16 / Q5_0 type support (htp_data_type enum
-            // lacks HTP_TYPE_BF16 and HTP_TYPE_Q5_0); op_matmul returns
-            // HTP_STATUS_NO_SUPPORT for those types.
             if (src0->ne[0] % 32) {
                 return false;
             }
@@ -3192,19 +3203,29 @@ static bool ggmlhexagon_supported_flash_attn(
     return true;
 }
 
-// Relaxed supports_op for cgraph offload mode (offload_cgraph_type==2).
-// Uses op-type-specific validation (type consistency, broadcast support, contiguity)
-// but omits the strict size threshold (ne00 >= 1024) that limits per-op granularity.
-// This allows the scheduler to form larger subgraphs with more ops per batch,
-// reducing FastRPC call overhead (the dominant cost).
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
-    if (2 != g_hexagon_appcfg.offload_cgraph_type) {
-        if (op_tensor->op == GGML_OP_MUL_MAT || op_tensor->op == GGML_OP_ADD) {
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
+        if (ggmlhexagon_is_metadata_op(op_tensor->op)) {
             return true;
-        } else {
+        }
+        if (op_tensor->op != GGML_OP_MUL_MAT) { //limited to MUL_MAT in FastRPC per-op mode for debug only
             return false;
         }
-    }
+        const ggml_tensor * src0 = op_tensor->src[0];
+        const ggml_tensor * src1 = op_tensor->src[1];
+        const int64_t ne00      = src0->ne[0];
+        const int     src0_rank = ggml_n_dims(src0);
+        int           src1_rank = ggml_n_dims(src1);
+        if (ne00 < 1024) {
+            return false;
+        }
+        if (src0_rank != src1_rank || src0_rank < 2) {
+            return false;
+        }
+        return (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16
+                || src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q8_0
+                ) && (src1->type == GGML_TYPE_F32) && (op_tensor->type == GGML_TYPE_F32);
+    } //end if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
 
     if (ggmlhexagon_is_metadata_op(op_tensor->op)) {
         return true;
@@ -3511,17 +3532,21 @@ struct ggml_backend_hexagon_buffer_context {
     ~ggml_backend_hexagon_buffer_context() {
         if (buffer) {
             if (is_ion_buffer) {
-                // Mark the ION pool region as free so it can be reused.
                 if (backend_ctx && backend_ctx->rpc_mempool) {
-                    const char * buf_ptr = (const char *)buffer;
-                    const char * pool_base = (const char *)backend_ctx->rpc_mempool;
-                    if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
-                        size_t buf_offset = (size_t)(buf_ptr - pool_base);
-                        for (auto & r : backend_ctx->ion_regions) {
-                            if (r.in_use && r.offset == buf_offset) {
-                                r.in_use = false;
-                                GGMLHEXAGON_LOG_WARN("[FREE] device=%d region offset=%zu size=%zu", backend_ctx->device, r.offset, r.size);
-                                break;
+                    if (2 != g_hexagon_appcfg.offload_cgraph_type) {
+                        backend_ctx->rpc_mempool_usage -= buffer_size;
+                    } else {
+                        // Mark the ION pool region as free so it can be reused.
+                        const char * buf_ptr = (const char *)buffer;
+                        const char * pool_base = (const char *)backend_ctx->rpc_mempool;
+                        if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
+                            size_t buf_offset = (size_t)(buf_ptr - pool_base);
+                            for (auto & r : backend_ctx->ion_regions) {
+                                if (r.in_use && r.offset == buf_offset) {
+                                    r.in_use = false;
+                                    GGMLHEXAGON_LOG_WARN("[FREE] device=%d region offset=%zu size=%zu", backend_ctx->device, r.offset, r.size);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -4058,8 +4083,56 @@ static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_ty
     return "hexagon-ion-buffer";
 }
 
+static ggml_backend_buffer_t alloc_buffer_general(
+           ggml_backend_buffer_type_t buft, size_t size) {
+    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
+    GGML_ASSERT(nullptr != ctx);
+    GGMLHEXAGON_LOG_WARN("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
+    ggml_backend_hexagon_buffer_context * buffer_ctx = new ggml_backend_hexagon_buffer_context;
+    buffer_ctx->backend_ctx = ctx;
+    buffer_ctx->is_ion_buffer = true;
+
+    size_t size_page = 0;
+#if defined(__ANDROID__) || defined(__linux__)
+    size_page = sysconf(_SC_PAGESIZE);
+#endif
+    size_t size_aligned = size;
+    if (0 != (size_aligned % size_page)) {
+        size_aligned += (size_page - (size_aligned % size_page));
+    }
+
+    GGML_ASSERT(nullptr != ctx->rpc_mempool);
+
+    // Bump allocate from the static ION mempool; fall back to heap when full.
+    size_t aligned_offset = (ctx->rpc_mempool_usage + 127) / 128 * 128;
+    if (aligned_offset + size_aligned <= ctx->rpc_mempool_len) {
+        buffer_ctx->buffer      = (char *)ctx->rpc_mempool + aligned_offset;
+        buffer_ctx->buffer_size = size_aligned;
+        ctx->rpc_mempool_usage  = aligned_offset + size_aligned;
+        GGMLHEXAGON_LOG_WARN("[ALLOC] device=%d ion pool: offset=%zu size=%zu",
+                             ctx->device, aligned_offset, size_aligned);
+    } else {
+        GGMLHEXAGON_LOG_WARN("device=%d ion pool exhausted, falling back to heap", ctx->device);
+        buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+        buffer_ctx->buffer_size = size_aligned;
+        buffer_ctx->is_ion_buffer = false;
+    }
+
+    if (nullptr == buffer_ctx->buffer) {
+        GGMLHEXAGON_LOG_WARN("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
+        delete buffer_ctx;
+        return nullptr;
+    }
+
+    return ggml_backend_buffer_init(buft, ggml_backend_hexagon_buffer_interface, buffer_ctx, size);
+}
+
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
            ggml_backend_buffer_type_t buft, size_t size) {
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) {
+        return alloc_buffer_general(buft, size);
+    }
+
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
     GGMLHEXAGON_LOG_WARN("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
@@ -4212,7 +4285,7 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
 # 1 = FastRPC-based op-batch (experimental, support has been removed)
 # 2 = ION-based op-batch (production, data via ion shared memory)
 */
-// MODE 0: per-op FastRPC call (debug only, limited to MUL_MAT and ADD)
+// MODE 0: per-op FastRPC call (debug only, limited to MUL_MAT)
 static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
     enum ggml_status result         = GGML_STATUS_SUCCESS;
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
@@ -4224,8 +4297,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_general(ggml_backend_t
             || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
             continue;
         }
-        // Mode 0 only supports MUL_MAT and ADD for debugging
-        if (node->op != GGML_OP_MUL_MAT && node->op != GGML_OP_ADD) {
+        // Mode 0 only supports MUL_MAT for debugging
+        if (node->op != GGML_OP_MUL_MAT) {
             continue;
         }
         bool ok = ggmlhexagon_compute_forward(ctx, node);
@@ -4323,11 +4396,27 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // tiles remain valid and TG can reuse them (first call miss, later hit).
     // Do NOT reset cache here: resetting kills TG hit rate.
 
+    // ---- graph cache: skip Phase 1/2/2.5 when cgraph->uid matches ----
+    std::vector<ggml_tensor *> tensor_src;
+    std::vector<hex_op_desc> hex_ops;
+    std::unordered_set<uint32_t> weight_indices;
+    uint32_t n_tensors = 0;
+    uint32_t n_ops = 0;
+
+    const bool cache_hit = (cgraph->uid != 0 && ctx->cached_graph.uid == cgraph->uid);
+    if (cache_hit) {
+        tensor_src = ctx->cached_graph.tensor_src;
+        hex_ops = ctx->cached_graph.hex_ops;
+        weight_indices = ctx->cached_graph.weight_indices;
+        n_tensors = (uint32_t)tensor_src.size();
+        n_ops = (uint32_t)hex_ops.size();
+        GGMLHEXAGON_LOG_ALWAYS("graph-cache: HIT uid=%llu, %u ops, %u tensors",
+                              (unsigned long long)cgraph->uid, n_ops, n_tensors);
+    } else {
     // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
     // Each tensor object gets its own descriptor with correct ne/nb,
     // even if multiple tensors share the same data buffer (in-place or buffer reuse).
     std::unordered_map<ggml_tensor *, int32_t> tensor_index_map;
-    std::vector<ggml_tensor *> tensor_src;
 
     auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
         if (!t) return -1;
@@ -4340,7 +4429,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     };
 
     // ---- Phase 2: build op descriptors ----
-    std::vector<hex_op_desc> hex_ops;
     for (auto * node : supported_nodes) {
         hex_op_desc op;
         memset(&op, 0, sizeof(op));
@@ -4362,7 +4450,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         hex_ops.push_back(op);
     }
 
-    const uint32_t n_tensors = (uint32_t)tensor_src.size();
+    n_tensors = (uint32_t)tensor_src.size();
 
     GGMLHEXAGON_LOG_DEBUG("ion-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
     for (size_t i = 0; i < hex_ops.size(); i++) {
@@ -4376,7 +4464,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // Weights are read-only across batches; AP never modifies them per batch,
     // so cache flush/invalidate can be skipped for them.
     std::unordered_set<uint32_t> dst_indices;
-    std::unordered_set<uint32_t> weight_indices;
     for (const auto & op : hex_ops) {
         dst_indices.insert(op.dst_idx[0]);
     }
@@ -4668,7 +4755,18 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
     }
 
-    const uint32_t n_ops = (uint32_t)hex_ops.size();
+    n_ops = (uint32_t)hex_ops.size();
+
+    // update graph cache
+    if (cgraph->uid != 0) {
+        ctx->cached_graph.uid = cgraph->uid;
+        ctx->cached_graph.tensor_src = tensor_src;
+        ctx->cached_graph.hex_ops    = hex_ops;
+        ctx->cached_graph.weight_indices = weight_indices;
+        GGMLHEXAGON_LOG_ALWAYS("graph-cache: MISS uid=%llu, cached %u ops, %u tensors",
+                              (unsigned long long)cgraph->uid, n_ops, n_tensors);
+    }
+    }  // end of Phase 1/2/2.5 (else block)
 
     // ---- Phase 3: compute layout sizes ----
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);          // ~24 bytes

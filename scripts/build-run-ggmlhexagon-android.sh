@@ -533,6 +533,7 @@ function check_and_download_model()
         printf "the prebuild LLM model ${model_name} already exist on Android phone\n"
     else
         printf "the prebuild LLM model ${model_name} not exist on Android phone\n"
+        printf "downloading from ${model_url}\n"
         wget --no-config --quiet --show-progress -O ${PROJECT_ROOT_PATH}/models/${model_name} ${model_url}
         adb push ${PROJECT_ROOT_PATH}/models/${model_name} /sdcard/
     fi

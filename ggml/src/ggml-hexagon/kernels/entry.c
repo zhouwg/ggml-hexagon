@@ -7,6 +7,7 @@
 
 #include "ggml-dsp.h"
 #include "ggml-ops.h"
+#include "hmx-queue.h"
 #include "../htp/htp-ctx.h"
 #include "../htp/matmul-ops.h"
 #include "../htp/flash-attn-ops.h"
@@ -1344,9 +1345,10 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
     // Strategy: use HAP_mmap2(fd) to get a DSP-user-space-accessible VA,
     //            same as QCOM's htp_iface_mmap() in htp/main.c.
     if (ggml_op == GGML_OP_NONE) {
-        if (src0 && src0->data) {
+        if (src0 && src0->data && src1 && src1->data) {
             if (2 != g_offload_cgraph_type) {
-                uint32_t * meta = (uint32_t *)src0->data;
+                // src0: ION pool base; src1: metadata [fd, size_lo, size_hi, size_mb]
+                uint32_t * meta = (uint32_t *)src1->data;
                 int32_t fd = (int32_t)meta[0];
                 uint64_t size = ((uint64_t)(uint32_t)meta[2] << 32) | (uint64_t)(uint32_t)meta[1];
                 int32_t size_mb = (int32_t)meta[3];
@@ -1357,7 +1359,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
             }
         } else {
             g_ion_dsp_base = NULL;
-            GGMLHEXAGON_LOG_ERROR("GGML_OP_NONE: no src0 data");
+            GGMLHEXAGON_LOG_ERROR("GGML_OP_NONE: no src0 or src1 data");
         }
         return AEE_SUCCESS;
     }
@@ -1371,7 +1373,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
     /* Dual-channel dispatch: mulmat_algotype == 29 uses Qualcomm execute_op,
      * other values use self-built kernels (ggmlop_dsp_*). */
-    if (g_mulmat_algotype != 29) {
+    if ((g_mulmat_algotype != 29) || (g_offload_cgraph_type != 2)) {
         switch (ggml_op) {
             case GGML_OP_ADD:      ggmlop_dsp_add(h, src0, src1, dst); break;
             case GGML_OP_SUB:      ggmlop_dsp_sub(h, src0, src1, dst); break;
