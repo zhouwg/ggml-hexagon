@@ -26,7 +26,7 @@ HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)
 
 VERBOSE=OFF
 VERBOSE=ON
-default_mulmat_algotype=29
+default_mulmat_algotype=32
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
@@ -96,6 +96,24 @@ GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
+
+# Model aliases for quick testing of multiple models
+# Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
+#   qwen3   -> Qwen3-0.6B-Q8_0.gguf
+#   gemma4  -> gemma-4-E2B-it-Q4_0.gguf
+#   qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf
+#   llama3  -> llama-3.2-1B-Q4_0.gguf
+#   (default) -> gemma-4-E2B-it-Q4_0.gguf
+function resolve_model_name()
+{
+    case "$1" in
+        qwen3)  echo "/sdcard/Qwen3-0.6B-Q8_0.gguf" ;;
+        gemma4) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        qwen1)  echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
+        llama3) echo "/sdcard/llama-3.2-1B-Q4_0.gguf" ;;
+        *)      echo "" ; return 1 ;;
+    esac
+}
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
@@ -671,12 +689,26 @@ function prepare_run_on_phone()
 
 function run_llamacli()
 {
+    local model_name=""
+    local model_path=""
+
+    if [ $# -ge 1 ]; then
+        model_name="$1"
+        model_path=$(resolve_model_name "$model_name")
+        if [ -z "$model_path" ]; then
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            exit 1
+        fi
+    else
+        model_path="${GGUF_MODEL_NAME}"
+    fi
+
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${GGUF_MODEL_NAME} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -692,6 +724,36 @@ function run_llamabench()
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && ${REMOTE_PATH}/llama-bench --mulmat-algotype ${mulmat_algotype} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
+}
+
+
+function run_llamacli_all()
+{
+    local models=("gemma4" "qwen3" "qwen1" "llama3")
+    #local algotypes=(29 30 32)
+    local algotypes=(29 33)
+
+    local total=$(( ${#models[@]} * ${#algotypes[@]} ))
+    local count=0
+
+    echo "=============================================="
+    echo "  Batch inference test: ${#models[@]} models x ${#algotypes[@]} algotypes = ${total} tests"
+    echo "=============================================="
+
+    for model in "${models[@]}"; do
+        for algotype in "${algotypes[@]}"; do
+            count=$(( count + 1 ))
+            echo ""
+            echo "--- [${count}/${total}] model=${model} algotype=${algotype} ---"
+            mulmat_algotype=${algotype}
+            run_llamacli "${model}"
+        done
+    done
+
+    echo ""
+    echo "=============================================="
+    echo "  Batch inference test complete: ${total} tests done"
+    echo "=============================================="
 }
 
 
@@ -869,8 +931,23 @@ function show_usage()
     echo "  $0 clean"
     echo -e "\n"
     echo "  $0 run_testops    [mulmat_algotype]"
-    echo "  $0 run_llamacli   [mulmat_algotype]"
     echo "  $0 run_llamabench [mulmat_algotype]"
+    echo -e "\n"
+    echo "  $0 run_llamacli   [model_alias] [mulmat_algotype]"
+    echo "  Model aliases for run_llamacli:"
+    echo "    qwen3   -> Qwen3-0.6B-Q8_0.gguf"
+    echo "    gemma4  -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf"
+    echo "    llama3  -> llama-3.2-1B-Q4_0.gguf"
+    echo "    (default) -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "  Examples:"
+    echo "    $0 run_llamacli qwen3        # test qwen3 with default algotype"
+    echo "    $0 run_llamacli qwen3 32     # test qwen3 with algotype=32 (HMX pipeline)"
+    echo "    $0 run_llamacli gemma4 29    # test gemma4 with algotype=29 (Qualcomm execute_op)"
+    echo -e "\n"
+    echo "  $0 run_llamacli_all            # batch test 4 models x 2 algotypes (29,33) = 8 tests"
+    echo "    Log capture example:"
+    echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%y%m%d-%H%M%S).txt"
     echo -e "\n"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
@@ -929,6 +1006,9 @@ elif [ $# == 1 ]; then
         mulmat_algotype=${default_mulmat_algotype}
         run_llamabench
         exit 0
+    elif [ "$1" == "run_llamacli_all" ]; then
+        run_llamacli_all
+        exit 0
     else
         show_usage
         exit 1
@@ -948,9 +1028,21 @@ elif [ $# == 2 ]; then
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        mulmat_algotype=$2
-        check_mulmat_algotype
-        run_llamacli
+        mulmat_algotype=${default_mulmat_algotype}
+        # If second arg is numeric, treat as algotype (backward compatibility)
+        # Otherwise, treat as model name alias
+        if [[ "$2" =~ ^[0-9]+$ ]]; then
+            mulmat_algotype=$2
+            check_mulmat_algotype
+            run_llamacli
+        else
+            if [ -z "$(resolve_model_name "$2")" ]; then
+                echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+                show_usage
+                exit 1
+            fi
+            run_llamacli "$2"
+        fi
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
         mulmat_algotype=$2
@@ -977,6 +1069,16 @@ elif [ $# == 3 ]; then
         mulmat_algotype=$3
         check_mulmat_algotype
         run_test-op
+        exit 0
+    elif [ "$1" == "run_llamacli" ]; then
+        if [ -z "$(resolve_model_name "$2")" ]; then
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            show_usage
+            exit 1
+        fi
+        mulmat_algotype=$3
+        check_mulmat_algotype
+        run_llamacli "$2"
         exit 0
     else
         show_usage

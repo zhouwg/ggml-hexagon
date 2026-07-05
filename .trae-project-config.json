@@ -7,6 +7,78 @@
     "scope_of_approval": "Approval is per-change. A prior approved change does not grant blanket permission for subsequent unrelated edits.",
     "applies_to": "All source files, scripts, configs, and documentation in the workspace."
   },
+  "commit_rules": {
+    "description": "Mandatory rules that MUST be followed before any git commit",
+    "pre_commit_testing": {
+      "description": "Before committing, MUST run CI batch inference test and analyze the log file to verify no regression.",
+      "ci_command": "./scripts/build-run-ggmlhexagon-android.sh run_llamacli_all 2>&1 | tee log_ci_$(date +%y%m%d-%H%M%S).txt",
+      "ci_log_analysis": {
+        "description": "After running CI command, the agent MUST analyze the generated log file to verify all tests pass.",
+        "steps": [
+          "1. Extract PP and TG values from each test's common_perf_print lines",
+          "2. Verify PP and TG are valid numbers (not 'inf', 'nan', or empty)",
+          "3. Verify output text is readable (no garbled/random characters)",
+          "4. Verify output text has no repetition loops (same sentence/phrase repeated endlessly)",
+          "5. Present a summary table with pass/fail status for each test"
+        ],
+        "auto_analysis_patterns": {
+          "pp_tg": "grep 'common_perf_print' log_ci_*.txt | grep 'prompt eval time|eval time'",
+          "garbled_check": "grep -c '[^[:print:]]' or manual inspection of model output lines",
+          "repetition_check": "visually inspect output for repeated sentence patterns (e.g. same sentence appearing 3+ times)"
+        }
+      },
+      "test_matrix": {
+        "models": ["gemma4", "qwen3", "qwen1", "llama3"],
+        "algotypes": [29, 33],
+        "total_tests": 8,
+        "algotype_meanings": {
+          "29": "Qualcomm execute_op (delegates to ../htp/*.c)",
+          "33": "HVX multithread + VTCM (self-built path)"
+        }
+      },
+      "validation_criteria": {
+        "pp_tg_valid": {
+          "description": "PP and TG values must be valid numbers",
+          "check": "prompt eval time and eval time lines must contain valid numeric tokens per second values. 'inf', 'nan', or empty values indicate test failure.",
+          "action_on_failure": "Re-run the failed test. If persistent, the commit MUST NOT proceed."
+        },
+        "no_garbled_output": {
+          "description": "Model output must be readable text in the expected language",
+          "check": "Output should contain coherent sentences. Garbled/random characters, binary data, or unreadable symbols indicate corrupted inference.",
+          "action_on_failure": "The commit MUST NOT proceed. Investigate cache coherency, tensor layout, or DSP kernel correctness."
+        },
+        "no_repetition_loop": {
+          "description": "Model output must not contain endless repetition of the same sentence or phrase",
+          "check": "Scan output for the same sentence appearing 3+ times consecutively. A single repeated sentence is OK; endless looping is a bug.",
+          "action_on_failure": "The commit MUST NOT proceed. This indicates a sampling or logits corruption issue."
+        },
+        "all_8_tests_pass": {
+          "description": "All 8 tests (4 models X 2 algotypes) MUST pass all 3 validation criteria above. Any single failure blocks the commit.",
+          "summary_table_format": "| # | Model | Algotype | PP (tok/s) | TG (tok/s) | Output OK | Status |"
+        }
+      },
+      "commands": [
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4 29",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4 33",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3 29",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3 33",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1 29",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1 33",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3 29",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3 33"
+      ]
+    },
+    "commit_message_rules": {
+      "description": "Format rules for commit messages",
+      "format": "ggml-hexagon: <brief description>",
+      "no_ai_generated": "The agent MUST NOT write commit messages. The user writes the commit message."
+    },
+    "commit_actions": {
+      "agent_allowed": ["git status", "git diff", "git log"],
+      "agent_forbidden": ["git add", "git checkout", "git commit", "git push", "gh pr create"],
+      "reason": "Commits and pushes must be explicitly performed by the user. Automated PR submissions may result in contributor ban."
+    }
+  },
   "scripts": {
     "build": "./scripts/build-run-android.sh build",
     "run_testops": "./scripts/build-run-android.sh run_testops",

@@ -7462,14 +7462,23 @@ void ggmlop_dsp_cache_flush_range(void * addr, size_t size) {
     char * p = (char *)addr;
     char * end = p + size;
     /* Align start down to cache line boundary */
-    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
-    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+    const size_t line_size = DSP_CACHE_LINE_SIZE;
+    p = (char *)((uintptr_t)p & ~(line_size - 1));
+    // 8x unrolled: 8 cache lines per iteration
+    for (; p + line_size * 8 <= end; p += line_size * 8) {
+        Q6_dccleaninva_A(p + line_size * 0);
+        Q6_dccleaninva_A(p + line_size * 1);
+        Q6_dccleaninva_A(p + line_size * 2);
+        Q6_dccleaninva_A(p + line_size * 3);
+        Q6_dccleaninva_A(p + line_size * 4);
+        Q6_dccleaninva_A(p + line_size * 5);
+        Q6_dccleaninva_A(p + line_size * 6);
+        Q6_dccleaninva_A(p + line_size * 7);
+    }
+    // tail: remaining lines
+    for (; p < end; p += line_size) {
         Q6_dccleaninva_A(p);
     }
-    /* Q6_dccleaninva_A is an async ST-slot instruction; without a sync,
-     * subsequent DSP loads may hit stale lines (ION is non-coherent).
-     * Mirrors Qualcomm's qurt_mem_cache_clean() which performs syncht
-     * on V60+. See hexagon_protos.h and SDK utils/test_main.c. */
     __asm__ __volatile__("syncht\n");
 }
 
@@ -7485,8 +7494,21 @@ void ggmlop_dsp_cache_inval_range(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
-    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
-    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+    const size_t line_size = DSP_CACHE_LINE_SIZE;
+    p = (char *)((uintptr_t)p & ~(line_size - 1));
+    // 8x unrolled: 8 cache lines per iteration
+    for (; p + line_size * 8 <= end; p += line_size * 8) {
+        Q6_dcinva_A(p + line_size * 0);
+        Q6_dcinva_A(p + line_size * 1);
+        Q6_dcinva_A(p + line_size * 2);
+        Q6_dcinva_A(p + line_size * 3);
+        Q6_dcinva_A(p + line_size * 4);
+        Q6_dcinva_A(p + line_size * 5);
+        Q6_dcinva_A(p + line_size * 6);
+        Q6_dcinva_A(p + line_size * 7);
+    }
+    // tail: remaining lines
+    for (; p < end; p += line_size) {
         Q6_dcinva_A(p);
     }
     __asm__ __volatile__("syncht\n");
@@ -7504,8 +7526,21 @@ void ggmlop_dsp_cache_clean_range(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
-    p = (char *)((uintptr_t)p & ~(DSP_CACHE_LINE_SIZE - 1));
-    for (; p < end; p += DSP_CACHE_LINE_SIZE) {
+    const size_t line_size = DSP_CACHE_LINE_SIZE;
+    p = (char *)((uintptr_t)p & ~(line_size - 1));
+    // 8x unrolled: 8 cache lines per iteration
+    for (; p + line_size * 8 <= end; p += line_size * 8) {
+        Q6_dccleana_A(p + line_size * 0);
+        Q6_dccleana_A(p + line_size * 1);
+        Q6_dccleana_A(p + line_size * 2);
+        Q6_dccleana_A(p + line_size * 3);
+        Q6_dccleana_A(p + line_size * 4);
+        Q6_dccleana_A(p + line_size * 5);
+        Q6_dccleana_A(p + line_size * 6);
+        Q6_dccleana_A(p + line_size * 7);
+    }
+    // tail: remaining lines
+    for (; p < end; p += line_size) {
         Q6_dccleana_A(p);
     }
     __asm__ __volatile__("syncht\n");
