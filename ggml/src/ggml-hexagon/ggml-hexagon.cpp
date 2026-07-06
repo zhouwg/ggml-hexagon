@@ -5276,11 +5276,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     GGMLHEXAGON_LOG_DEBUG("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)",
                          batch_offset, total_desc_size, n_ops, n_tensors);
 
+    // ion_sync_mode controls which cache coherency mechanism to use:
+    //   0 = both DC CVAC/CIVAC + DMA_BUF_IOCTL_SYNC (default, safest)
+    //   1 = ion_sync only (skip manual DC CVAC/CIVAC, rely on kernel DMA_BUF_IOCTL_SYNC)
+    //   2 = DC CVAC/CIVAC only (skip ion_sync, manual cache maintenance only)
+    const bool do_dc_cvac  = (g_hexagon_appcfg.ion_sync_mode != 1);
+    const bool do_ion_sync = (g_hexagon_appcfg.ion_sync_mode != 2);
+
     // ---- Phase 6.5: AP -> DSP cache coherency ----
     t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     // Flush CPU cache to DRAM so DSP can read AP-written data.
-    // Always do DC CVAC first: DMA_BUF_IOCTL_SYNC may succeed but be a no-op
-    // on platforms the kernel considers coherent (7us for 4GB = no actual flush).
     {
         // Collect per-tensor dirty ranges and flush them individually (merged).
         // A single continuous [min, max] range would also flush the holes
@@ -5324,7 +5329,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         uint32_t flush_bytes = 0;
         uint32_t n_flush     = 0;
-        if (!ranges.empty()) {
+        if (do_dc_cvac && !ranges.empty()) {
             std::sort(ranges.begin(), ranges.end());
             // Merge overlapping/adjacent ranges. Merge gap = 1 cache line (64B):
             // flushing a tiny gap is cheaper than issuing a second flush call.
@@ -5349,8 +5354,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             n_flush++;
         }
         // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
-        int ion_fd = ctx->rpc_mempool_handle;
-        if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+        if (do_ion_sync) {
+            int ion_fd = ctx->rpc_mempool_handle;
+            if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+        }
 
         ctx->weights_dirty = false;
         GGMLHEXAGON_LOG_WARN("ion-batch: phase6.5 DC CVAC %u ranges, %u bytes flushed",
@@ -5425,7 +5432,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
     t_p7 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     // DSP writes results to DRAM via ION buffer, but CPU cache may still hold
-    // stale data.  Always do DC CIVAC first: DMA_BUF_IOCTL_SYNC may be a no-op.
+    // stale data.  DC CIVAC + ion_sync controlled by ion_sync_mode (see Phase 6.5).
     if (hexagon_error == AEE_SUCCESS) {
         uint32_t inval_min = ~0u, inval_max = 0;
         for (uint32_t oi = 0; oi < n_ops; oi++) {
@@ -5457,14 +5464,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             if (start < inval_min) inval_min = start;
             if (end > inval_max) inval_max = end;
         }
-        if (inval_max > inval_min) {
+        if (do_dc_cvac && inval_max > inval_min) {
             cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
             GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
                                   inval_min, inval_max, inval_max - inval_min);
         }
         // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
-        int ion_fd = ctx->rpc_mempool_handle;
-        if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+        if (do_ion_sync) {
+            int ion_fd = ctx->rpc_mempool_handle;
+            if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+        }
     }
 
     // ---- Phase 7.6: Post-CIVAC verification ----
