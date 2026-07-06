@@ -1,13 +1,15 @@
 // HMX feature ported from Qualcomm's official ggml-hexagon
 //
-#include "ggml-dsp.h"
-#include "worker_pool.h"
-#include "sgemm.h"
-#include "hmx-queue.h"        // for hmx_queue_push/pop/suspend/make_desc (static inline)
 #include <stdlib.h>
 #include <string.h>
+
+#include "ggml-dsp.h"
+#include "sgemm.h"
+#include "worker_pool.h"
+
 #include "../htp/hex-dma.h"    // for Qualcomm's official DMA async transfers
 #include "../htp/hvx-base.h"   // for hvx_vec_splat_f16, hvx_vec_is_nan_f16, hvx_vec_f32_to_f16, etc.
+#include "../htp/hmx-queue.h"  // for hmx_queue_push/pop/suspend/make_desc (static inline)
 
 #define HMX_FP16_TILE_N_ROWS 32
 #define HMX_FP16_TILE_N_COLS 32
@@ -2772,7 +2774,7 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     }
 
-    unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
+    unsigned int compute_res_ctx_id = g_dsp_ctx->compute_res_ctx_id;
     int hmx_locked = 0;
     if (compute_res_ctx_id != 0) {
         int lock_result = HAP_compute_res_hmx_lock(compute_res_ctx_id);
@@ -3207,7 +3209,7 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
 
 int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     // Step 1: hmx_queue availability + basic type checks
-    struct hmx_queue * hmx_q = ggmlop_get_hmx_queue();
+    struct hmx_queue * hmx_q = g_dsp_ctx->hmx_queue;
     if (hmx_q == NULL) {
         GGMLHEXAGON_LOG_INFO("fallback to ggmlop_dsp_mulmat_hmx_sync");
         return ggmlop_dsp_mulmat_hmx_sync(h, src0, src1, dst);
@@ -3385,7 +3387,7 @@ int ggmlop_dsp_mulmat_hmx(remote_handle64 h, const struct dsptensor * src0, cons
         (use_hvx && wt->dequant_hvx) ? wt->dequant_hvx :
         (wt->dequant ? wt->dequant : wt->dequant_hvx);
 
-    int n_threads = ggmlop_get_thread_counts();
+    int n_threads = g_dsp_ctx->thread_counts;
     if (n_threads < 1) n_threads = 1;
     if (n_threads > MAX_NUM_WORKERS) n_threads = MAX_NUM_WORKERS;
 
@@ -3910,7 +3912,7 @@ static int ggmlop_dsp_mulmat_sgemm(remote_handle64 h, const struct dsptensor * s
     return 0;
 
 fallback:
-    if (ggmlop_get_thread_counts() > 1) {
+    if (g_dsp_ctx->thread_counts > 1) {
         return ggmlop_dsp_mulmat_multithread_vtcm(h, src0, src1, dst);
     } else {
         return ggmlop_dsp_mulmat_singlethread(h, src0, src1, dst);
@@ -4172,7 +4174,7 @@ static const struct mulmat_dispatch_entry mulmat_dispatch_table[] = {
 
 int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const struct dsptensor * src1, dsptensor * dst) {
     char tempbuf[256];
-    int  mulmat_algo = ggmlop_get_mulmat_algotype();
+    int  mulmat_algo = g_dsp_ctx->mulmat_algotype;
     ggml_get_opkey(GGML_OP_MUL_MAT, src0, src1, tempbuf, 256);
     int64_t begin_time = ggml_time_us();
 
@@ -4191,7 +4193,7 @@ int ggmlop_dsp_mulmat(remote_handle64 h, const struct dsptensor * src0, const st
 
     // algotype=0 (default): dispatch based on thread count
     if (fn == NULL) {
-        if (ggmlop_get_thread_counts() > 1) {
+        if (g_dsp_ctx->thread_counts > 1) {
             fn = ggmlop_dsp_mulmat_multithread;
             desc = "MT_HVX mode";
         } else {

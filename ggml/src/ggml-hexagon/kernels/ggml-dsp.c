@@ -4,7 +4,6 @@ this self-contained file is part of JZ's ggml-hexagon:
     - ported from original ggml(https://github.com/ggml-org/ggml)
     - ggml-dsp.c can be easily ported to other xPU(x86/arm/riscv... CPU, POSIX friendly DSP / NPU)
 
-          - v0.99.03 - 2026-06-27
 Jeff Zhou - zhouwg2000@gmail.com
 GitHub:   - https://github.com/zhouwg/ggml-hexagon
 */
@@ -34,7 +33,7 @@ void ggml_log_internal(int level, const char *file, const char *func, int line, 
 void ggml_log_always(int level, const char *file, const char *func, int line, const char *format, ...) {
     // Skip all log formatting + FARF when dump_diag_info is 0 (production mode).
     // This avoids snprintf + FARF overhead in the hot path (mulmat, batch loop, etc.)
-    if (!ggmlop_is_dumpdiag_enabled()) {
+    if (!g_dsp_ctx->dump_diag_info) {
         return;
     }
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];

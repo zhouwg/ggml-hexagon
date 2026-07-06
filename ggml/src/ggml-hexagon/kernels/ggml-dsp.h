@@ -4,7 +4,6 @@ this self-contained file is part of JZ's ggml-hexagon:
     - ported from original ggml(https://github.com/ggml-org/ggml)
     - ggml-dsp.h can be easily ported to other xPU(x86/arm/riscv... CPU, POSIX friendly DSP / NPU)
 
-          - v0.99.02 - 2026-06-24
 Jeff Zhou - zhouwg2000@gmail.com
 GitHub:   - https://github.com/zhouwg/ggml-hexagon
 */
@@ -2148,11 +2147,6 @@ GGML_API void           ggml_log_always(int level, const char *file, const char 
 GGML_API size_t         ggml_get_op_index(const struct ggml_tensor * tensor);
 GGML_API void           ggml_get_opkey(enum ggml_op op, const struct ggml_tensor * src0, const struct ggml_tensor * src1, char * buf, size_t buf_size);
 
-GGML_API int            ggmlop_get_thread_counts(void);
-GGML_API int            ggmlop_get_mulmat_algotype(void);
-GGML_API int            ggmlop_get_offload_cgraph_type(void);
-GGML_API unsigned int   ggmlop_get_compute_res_ctx_id(void);
-GGML_API int            ggmlop_is_hmx_available(void);
 GGML_API bool           ggmlop_is_ion_mode(void);
 GGML_API void *         ggmlop_get_work_data(size_t size);
 GGML_API void *         ggmlop_get_vtcm_pool(size_t * size);
@@ -2161,13 +2155,11 @@ GGML_API void           ggmlop_dsp_cache_inval_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_cache_clean_range(void * addr, size_t size);
 GGML_API void           ggmlop_dsp_fp16_cache_reset(void);
 GGML_API int            ggmlop_ensure_vtcm_available(void);  // Ensure VTCM resource is available (for cache mode)
-GGML_API int            ggmlop_is_dumpdiag_enabled(void);  // Returns 1 if dump_diag_info is enabled (controls log output)
 
 // Async HMX queue: dedicated worker thread holding the HMX hardware lock.
 // Returns NULL if HMX queue is not initialized (caller should fall back to
 // synchronous HMX execution).
 struct hmx_queue;
-GGML_API struct hmx_queue * ggmlop_get_hmx_queue(void);
 
 // FP16 weight cache: allocates from ION shared memory tail region
 GGML_API void *         ggmlop_cache_mempool_alloc(size_t size);  // returns ptr or NULL if full

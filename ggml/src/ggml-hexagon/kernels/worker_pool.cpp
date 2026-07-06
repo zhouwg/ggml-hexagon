@@ -55,8 +55,6 @@ extern "C"
 void worker_pool_constructor(void) __attribute__((constructor));
 void worker_pool_destructor(void) __attribute__((destructor));
 
-int ggmlop_get_thread_counts(void);
-
 #ifdef __cplusplus
 }
 #endif

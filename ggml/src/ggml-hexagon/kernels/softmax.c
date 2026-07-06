@@ -167,8 +167,8 @@ static void ggml_compute_forward_soft_max_f32(
     // sinks: one F32 value per head (ne02 dimension)
     const float * sk = src2 ? (const float *)src2->data : NULL;
 
-    if (ggmlop_get_thread_counts() > 1 && nrows >= ggmlop_get_thread_counts() * 2) {
-        int num_threads = ggmlop_get_thread_counts();
+    if (g_dsp_ctx->thread_counts > 1 && nrows >= g_dsp_ctx->thread_counts * 2) {
+        int num_threads = g_dsp_ctx->thread_counts;
         if (num_threads > nrows) num_threads = nrows;
 
         worker_synctoken_t synctoken;

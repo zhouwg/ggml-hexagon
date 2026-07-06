@@ -341,7 +341,7 @@ static void test_hmx_instruction_flow(void) {
     __asm__ __volatile__("" ::: "memory");
 
     // Acquire HMX lock
-    unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
+    unsigned int compute_res_ctx_id = g_dsp_ctx->compute_res_ctx_id;
     GGMLHEXAGON_LOG_INFO("compute_res_ctx_id=%u", compute_res_ctx_id);
 
     int lock_result = HAP_compute_res_hmx_lock(compute_res_ctx_id);
@@ -694,7 +694,7 @@ int ggmlop_dsp_test_hmx(remote_handle64 h, const dsptensor* src0, const dsptenso
     __asm__ __volatile__("" ::: "memory");
 
     // Acquire HMX lock (ALL VTCM initialization must be done BEFORE this)
-    unsigned int compute_res_ctx_id = ggmlop_get_compute_res_ctx_id();
+    unsigned int compute_res_ctx_id = g_dsp_ctx->compute_res_ctx_id;
     GGMLHEXAGON_LOG_INFO("compute_res_ctx_id=%u", compute_res_ctx_id);
 
     int lock_result = HAP_compute_res_hmx_lock(compute_res_ctx_id);

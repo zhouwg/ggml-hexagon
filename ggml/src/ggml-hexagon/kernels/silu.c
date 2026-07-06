@@ -202,7 +202,7 @@ int ggmlop_dsp_silu(remote_handle64 h, const ggml_tensor * src0, const ggml_tens
     ggml_get_opkey(GGML_OP_UNARY, src0, NULL, tempbuf, 256);
 
     int64_t begin_time = ggml_time_us();
-    if (ggmlop_get_thread_counts() > 1) {
+    if (g_dsp_ctx->thread_counts > 1) {
         ggmlop_dsp_silu_multithread(h, src0, dst);
     } else {
         ggmlop_dsp_silu_singlethread(h, src0, dst);

@@ -152,8 +152,8 @@ static void ggml_compute_forward_rms_norm_f32(
                           (long long)src0->ne[2], (long long)src0->ne[3],
                           (long long)nrows, eps);
 
-    if (ggmlop_get_thread_counts() > 1 && nrows >= ggmlop_get_thread_counts() * 2) {
-        int num_threads = ggmlop_get_thread_counts();
+    if (g_dsp_ctx->thread_counts > 1 && nrows >= g_dsp_ctx->thread_counts * 2) {
+        int num_threads = g_dsp_ctx->thread_counts;
         if (num_threads > nrows) num_threads = nrows;
 
         worker_synctoken_t synctoken;

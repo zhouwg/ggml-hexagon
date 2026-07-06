@@ -818,7 +818,7 @@ int ggmlop_dsp_flash_attn(remote_handle64 h,
     }
 
     // ---- 2. Per-worker VTCM scratch and DMA queues ----
-    unsigned int nth = (unsigned int) ggmlop_get_thread_counts();
+    unsigned int nth = (unsigned int) g_dsp_ctx->thread_counts;
     if (nth < 1) nth = 1;
     if (nth > MAX_NUM_WORKERS) nth = MAX_NUM_WORKERS;
     if ((uint32_t) nth > t.n_rows) nth = (unsigned int) t.n_rows;

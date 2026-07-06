@@ -6,10 +6,15 @@
 #include <stdlib.h>
 #include <remote.h>
 #include <AEEStdDef.h>
+#include <stddef.h>
 
 #ifdef  __cplusplus
 extern "C" {
 #endif
+
+// Forward declarations for types used in dsp_context
+struct hmx_queue;
+struct htp_context;
 
 typedef struct dsptensor dsptensor;
 
@@ -44,7 +49,6 @@ struct dsp_opbatch_req {
    dsp_op_desc* ops;
    int ops_len;
 };
-
 
 /*
  * Shared memory batch descriptor for ION-based multi-op offload.
@@ -94,6 +98,51 @@ typedef struct hex_batch_hdr {
 #define HEX_BATCH_ALIGN     128
 #define HEX_TENSOR_ALIGN    128
 #define HEX_OP_ALIGN        128
+
+// DSP session context: bundles all per-session state.
+// Allocated in ggmlop_dsp_open, freed in ggmlop_dsp_close.
+struct dsp_context {
+    // Configuration
+    int thread_counts;
+    int mulmat_algotype;
+    int offload_cgraph_type;
+    int dump_diag_info;
+
+    // Work data
+    void * work_data;
+    size_t work_size;
+    unsigned int work_mutex;  // qurt_mutex_t: protects work_data allocation
+
+    // VTCM
+    void * vtcm_base;
+    size_t vtcm_size;
+    unsigned int compute_res_ctx_id;
+    volatile int vtcm_needs_release;
+    volatile int vtcm_valid;
+
+    // Power
+    int power_ctx;
+    void * hexagon_power_ctx;
+
+    // HMX
+    int hmx_available;
+    struct hmx_queue * hmx_queue;
+
+    // ION
+    void * ion_dsp_base;
+    size_t ion_dsp_size;
+
+    // FP16 weight cache: uses ION shared memory tail region for caching
+    // converted FP16 weight tiles (avoids repeated Q4_0->FP16 conversion)
+    void * ion_cache_base;
+    size_t ion_cache_size;
+    size_t ion_cache_offset;
+
+    // htp_context for calling Qualcomm's execute_op.
+    struct htp_context * htp_ctx;
+};
+
+extern struct dsp_context *g_dsp_ctx;
 
 int ggmlop_dsp_add(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
 int ggmlop_dsp_sub(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;

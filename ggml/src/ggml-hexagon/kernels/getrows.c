@@ -104,7 +104,7 @@ int ggmlop_dsp_getrows(remote_handle64 h,
                           (long)dst->ne[2], (long)dst->ne[3],
                           (long)nr);
 
-    int num_threads = ggmlop_get_thread_counts();
+    int num_threads = g_dsp_ctx->thread_counts;
     if (num_threads > nr) num_threads = (int)nr;
     if (num_threads <= 0) num_threads = 1;
 

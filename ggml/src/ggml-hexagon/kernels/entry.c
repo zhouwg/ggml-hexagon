@@ -4,6 +4,7 @@
 #include <HAP_mem.h>
 #include <HAP_compute_res.h>
 #include <math.h>
+#include <qurt_mutex.h>
 
 #include "ggml-dsp.h"
 #include "ggml-ops.h"
@@ -12,168 +13,126 @@
 #include "../htp/matmul-ops.h"
 #include "../htp/flash-attn-ops.h"
 
-static int g_thread_counts                  = 1;
-static int g_mulmat_algotype                = 0;
-static int g_offload_cgraph_type            = 2;
-static int g_dump_diag_info                 = 0;
-static void * g_work_data                   = NULL;
-static size_t g_work_size                   = 0;
-
-static void * g_vtcm_base                   = NULL;
-static size_t g_vtcm_size                   = 0;
-static unsigned int g_compute_res_ctx_id    = 0;
-static int g_power_ctx                      = 0;
-static int g_hmx_available                  = 0;
-static struct hmx_queue * g_hmx_queue        = NULL;  // Async HMX queue (created when HMX is available)
-static volatile int g_vtcm_needs_release    = 0;  // For cache mode VTCM management
-static volatile int g_vtcm_valid            = 0;  // VTCM resource is currently valid/available
-
-// htp_context for calling Qualcomm's execute_op.
-// Shares our already-acquired VTCM/HMX resources; worker_pool and dma queues
-// are initialized in ggmlop_dsp_open.
-static struct htp_context g_htp_ctx;
-
-static void * g_hexagon_power_ctx           = NULL;
-static void * g_ion_dsp_base                = NULL;
-static size_t g_ion_dsp_size                = 0;     // ION total size (bytes)
-
-// FP16 weight cache: uses ION shared memory tail region for caching
-// converted FP16 weight tiles (avoids repeated Q4_0->FP16 conversion)
-// Cache region: [g_ion_cache_base, g_ion_dsp_base + g_ion_size)
-// Grows from cache_base forward (monotonic bump allocator)
-static void * g_ion_cache_base          = NULL;  // DSP VA of cache region start
-static size_t g_ion_cache_size          = 0;     // cache region size in bytes
-static size_t g_ion_cache_offset        = 0;     // monotonic allocation offset within cache
-
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
-int ggmlop_get_mulmat_algotype(void) {
-    return g_mulmat_algotype;
-}
-
-int ggmlop_get_thread_counts(void) {
-    return g_thread_counts;
-}
-
-int ggmlop_get_offload_cgraph_type(void) {
-    return g_offload_cgraph_type;
-}
-
-unsigned int ggmlop_get_compute_res_ctx_id(void) {
-    return g_compute_res_ctx_id;
-}
-
-int ggmlop_is_hmx_available(void) {
-    return g_hmx_available;
-}
-
-int ggmlop_is_dumpdiag_enabled(void) {
-    return g_dump_diag_info;
-}
-
-struct hmx_queue * ggmlop_get_hmx_queue(void) {
-    return g_hmx_queue;
-}
+struct dsp_context *g_dsp_ctx = NULL;
 
 bool ggmlop_is_ion_mode(void) {
-    return g_ion_dsp_base != NULL;
+    return g_dsp_ctx->ion_dsp_base != NULL;
 }
 
 void * ggmlop_get_work_data(size_t size) {
-    // All callers (mulmat dispatch, flash-attn driver) invoke this from the
-    // main thread before spawning workers, so the returned pointer stays
-    // valid during worker execution.
-    if (g_work_data == NULL || g_work_size < size) {
-        if (g_work_data != NULL) {
-            free(g_work_data);
+    qurt_mutex_lock((qurt_mutex_t *)&g_dsp_ctx->work_mutex);
+    if (g_dsp_ctx->work_data == NULL || g_dsp_ctx->work_size < size) {
+        if (g_dsp_ctx->work_data != NULL) {
+            free(g_dsp_ctx->work_data);
         }
-        size = (size > MAX_WORK_SIZE) ? MAX_WORK_SIZE : size;
-        g_work_data = memalign(128, size);
-        if (g_work_data != NULL) {
-            g_work_size = size;
+        if (size > MAX_WORK_SIZE) {
+            size = MAX_WORK_SIZE;
+        }
+        g_dsp_ctx->work_data = memalign(128, size);
+        if (g_dsp_ctx->work_data != NULL) {
+            g_dsp_ctx->work_size = size;
         }
     }
-    return g_work_data;
+    void * result = g_dsp_ctx->work_data;
+    qurt_mutex_unlock((qurt_mutex_t *)&g_dsp_ctx->work_mutex);
+    return result;
 }
 
 void * ggmlop_get_vtcm_pool(size_t * size) {
     if (size != NULL) {
-        *size = g_vtcm_size;
+        *size = g_dsp_ctx->vtcm_size;
     }
-    return g_vtcm_base;
+    return g_dsp_ctx->vtcm_base;
 }
 
 // Allocate from the ION-based FP16 weight cache region
-// Returns pointer to allocated region in ION shared memory, or NULL if full
 void * ggmlop_cache_mempool_alloc(size_t size) {
-    if (!g_ion_cache_base || size == 0) {
+    if (!g_dsp_ctx->ion_cache_base || size == 0) {
         return NULL;
     }
-    // Align to 128 bytes (cache line size)
     size = (size + 127) & ~(size_t)127;
-    if (g_ion_cache_offset + size > g_ion_cache_size) {
+    if (g_dsp_ctx->ion_cache_offset + size > g_dsp_ctx->ion_cache_size) {
         FARF(ALWAYS, "ION cache: full, cannot allocate %zu bytes (offset=%zu, size=%zu)",
-             size, g_ion_cache_offset, g_ion_cache_size);
+             size, g_dsp_ctx->ion_cache_offset, g_dsp_ctx->ion_cache_size);
         return NULL;
     }
-    void * ptr = (char *)g_ion_cache_base + g_ion_cache_offset;
-    g_ion_cache_offset += size;
+    void * ptr = (char *)g_dsp_ctx->ion_cache_base + g_dsp_ctx->ion_cache_offset;
+    g_dsp_ctx->ion_cache_offset += size;
     return ptr;
 }
 
-// Acquire VTCM for the current batch/op (cache mode).
-// Called once at batch entry (ggmlop_dsp_execute_batch) or at per-op entry
-// (ggmlop_dsp_execute_task). Per-op mulmat/flash_attn code no longer calls this.
-// If already valid, returns 0 immediately (cheap check).
-// If needs_release was flagged by the release callback, release first, then re-acquire.
-int ggmlop_ensure_vtcm_available(void) {
-    if (g_compute_res_ctx_id == 0) {
-        // compute_res acquire failed at init. VTCM is available only if the
-        // legacy HAP_request_VTCM fallback succeeded (g_vtcm_base != NULL).
-        // On unsigned PDs (e.g. domain 7) both paths fail and g_vtcm_base is NULL.
-        return (g_vtcm_base != NULL) ? 0 : -1;
-    }
+// VTCM release strategy:
+//   0 = lazy release: release only when release callback fires (default).
+//       Suitable when batches are small (1 op/batch) and overhead of
+//       per-batch acquire/release would dominate.
+//   1 = per-batch release: release after every batch (Qualcomm pattern).
+//       Suitable when batches are large (many ops/batch) and overhead
+//       is amortized. Use after all-ops-offload reduces batch count.
+#define DSP_VTCM_PER_BATCH_RELEASE 0
 
-    // Already valid - batch is running, keep using VTCM until batch boundary.
-    // The release callback only sets needs_release; the actual release happens
-    // in ggmlop_dsp_execute_batch after the batch loop (lazy release).
-    if (g_vtcm_valid) {
+// Per-batch VTCM acquire:
+// Called at batch entry. If VTCM is not valid, acquire it via cached API.
+// Drops priority so other sessions can preempt and send release callbacks.
+static void dsp_vtcm_acquire(void) {
+    if (!g_dsp_ctx->vtcm_valid) {
+        int err = HAP_compute_res_acquire_cached(g_dsp_ctx->compute_res_ctx_id, 1000000u);
+        if (err != 0) {
+            GGMLHEXAGON_LOG_ERROR("Failed to acquire VTCM: 0x%08x", (unsigned)err);
+            return;
+        }
+        g_dsp_ctx->vtcm_needs_release = 0;
+        g_dsp_ctx->vtcm_valid = 1;
+        HAP_compute_res_update_priority(g_dsp_ctx->compute_res_ctx_id,
+                                        qurt_thread_get_priority(qurt_thread_get_id()) + 10);
+        GGMLHEXAGON_LOG_INFO("VTCM acquired");
+    }
+}
+
+// Per-batch VTCM release.
+// When DSP_VTCM_PER_BATCH_RELEASE=1: always releases (Qualcomm pattern).
+// When DSP_VTCM_PER_BATCH_RELEASE=0: lazy release, only when the release
+// callback fired (holds VTCM across batches to avoid re-acquire overhead).
+static void dsp_vtcm_release(void) {
+#if DSP_VTCM_PER_BATCH_RELEASE
+    if (g_dsp_ctx->vtcm_valid) {
+        g_dsp_ctx->vtcm_valid = 0;
+        g_dsp_ctx->vtcm_needs_release = 0;
+        HAP_compute_res_release_cached(g_dsp_ctx->compute_res_ctx_id);
+        GGMLHEXAGON_LOG_INFO("VTCM released");
+    }
+#else
+    if (g_dsp_ctx->compute_res_ctx_id != 0 && g_dsp_ctx->vtcm_needs_release) {
+        g_dsp_ctx->vtcm_needs_release = 0;
+        g_dsp_ctx->vtcm_valid = 0;
+        HAP_compute_res_release_cached(g_dsp_ctx->compute_res_ctx_id);
+        GGMLHEXAGON_LOG_INFO("VTCM released (lazy, batch boundary)");
+    }
+#endif
+}
+
+// Legacy wrapper: kept for external callers (test-hmx.c, per-op path).
+// Acquires VTCM if not already valid. Returns 0 on success, -1 on failure.
+int ggmlop_ensure_vtcm_available(void) {
+    if (g_dsp_ctx->compute_res_ctx_id == 0) {
+        return (g_dsp_ctx->vtcm_base != NULL) ? 0 : -1;
+    }
+    if (g_dsp_ctx->vtcm_valid) {
         return 0;
     }
-
-    // First acquire or re-acquire after a lazy release at the previous batch boundary
-    if (g_vtcm_needs_release) {
-        GGMLHEXAGON_LOG_INFO("VTCM re-acquire (cache mode, batch boundary)");
-        g_vtcm_needs_release = 0;
-        HAP_compute_res_release_cached(g_compute_res_ctx_id);
-    } else {
-        GGMLHEXAGON_LOG_INFO("VTCM first acquire (cache mode)");
-    }
-
-    int err = HAP_compute_res_acquire_cached(g_compute_res_ctx_id, 1000000);
+    int err = HAP_compute_res_acquire_cached(g_dsp_ctx->compute_res_ctx_id, 1000000);
     if (err != 0) {
         GGMLHEXAGON_LOG_ERROR("Failed to acquire VTCM: 0x%08x", err);
         return -1;
     }
-    g_vtcm_valid = 1;
-    // Lower our priority so other sessions (e.g. QNN) can preempt and receive
-    // release callbacks. Matches Qualcomm htp/main.c vtcm_acquire.
-    HAP_compute_res_update_priority(g_compute_res_ctx_id,
+    g_dsp_ctx->vtcm_valid = 1;
+    g_dsp_ctx->vtcm_needs_release = 0;
+    HAP_compute_res_update_priority(g_dsp_ctx->compute_res_ctx_id,
                                     qurt_thread_get_priority(qurt_thread_get_id()) + 10);
     GGMLHEXAGON_LOG_INFO("VTCM acquired successfully");
     return 0;
-}
-
-// Release VTCM if the release callback flagged it (lazy release at batch boundary).
-// Called after ggmlop_dsp_execute_batch finishes its op loop.
-static void ggmlop_vtcm_lazy_release(void) {
-    if (g_compute_res_ctx_id != 0 && g_vtcm_needs_release) {
-        g_vtcm_needs_release = 0;
-        g_vtcm_valid = 0;
-        HAP_compute_res_release_cached(g_compute_res_ctx_id);
-        GGMLHEXAGON_LOG_INFO("VTCM released (lazy, batch boundary)");
-    }
 }
 
 static int power_on_hvx_hmx(void) {
@@ -183,7 +142,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_apptype;
     req.apptype = HAP_POWER_COMPUTE_CLIENT_CLASS;
-    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set apptype failed");
         return -1;
     }
@@ -212,7 +171,7 @@ static int power_on_hvx_hmx(void) {
     HAP_set_dcvs_v3_protected_bus_corners(&req, 1);
 #endif
 
-    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set DCVS failed");
         return -2;
     }
@@ -221,7 +180,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_HVX;
     req.hvx.power_up = 1;
-    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HVX failed");
         return -3;
     }
@@ -238,7 +197,7 @@ static int power_on_hvx_hmx(void) {
     req.hmx_v2.max_corner = HAP_DCVS_EXP_VCORNER_MAX;
     req.hmx_v2.perf_mode = HAP_CLK_PERF_HIGH;
     GGMLHEXAGON_LOG_INFO("Setting HMX clock with HMX_v2 for v75+ architecture");
-    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX_v2 failed, continuing without HMX");
         return -4;
     }
@@ -247,7 +206,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_HMX;
     req.hmx.power_up = 1;
-    if (HAP_power_set((void *)&g_power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX failed, continuing without HMX");
         return -4;
     }
@@ -260,18 +219,31 @@ static int power_on_hvx_hmx(void) {
 
 static int vtcm_release_callback(unsigned int rctx, void * state) {
     // Async notification only: flag that another session wants VTCM.
-    // Do NOT clear g_vtcm_valid here - the current batch keeps running
-    // and releases VTCM at the batch boundary (matches Qualcomm htp/main.c).
-    g_vtcm_needs_release = 1;
+    // Do NOT clear g_dsp_ctx->vtcm_valid here - the current batch keeps running
+    // and releases VTCM at the batch boundary.
+    g_dsp_ctx->vtcm_needs_release = 1;
     return 0;
 }
 
 int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
-    void * tptr = NULL;
+    struct dsp_context * ctx = NULL;
+
+    // Guard against double initialization
+    if (g_dsp_ctx != NULL) {
+        GGMLHEXAGON_LOG_ERROR("ggmlop_dsp_open: g_dsp_ctx already initialized");
+        return AEE_EITEMBUSY;
+    }
+
+    ctx = (struct dsp_context *)calloc(1, sizeof(struct dsp_context));
+    GGML_ASSERT(NULL != ctx);
+    ctx->thread_counts      = 1;
+    ctx->offload_cgraph_type = 2;
+    ctx->htp_ctx = (struct htp_context *)calloc(1, sizeof(struct htp_context));
+    GGML_ASSERT(NULL != ctx->htp_ctx);
+    qurt_mutex_init((qurt_mutex_t *)&ctx->work_mutex);
+    g_dsp_ctx = ctx;
+    *handle = (remote_handle64)ctx;
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
-    tptr = (void *)malloc(1);
-    GGML_ASSERT(NULL != tptr);
-    *handle = (remote_handle64)tptr;
 
     unsigned int api_version = qurt_api_version();
     FARF(ALWAYS, "qurt_api_version            = 0x%x", api_version);
@@ -285,15 +257,15 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     qurt_sysenv_max_hthreads_t mhwt;
     qurt_sysenv_get_max_hw_threads(&mhwt);
     FARF(ALWAYS, "qurt_hardware_thread_counts = %d", mhwt.max_hthreads);
-     g_thread_counts = mhwt.max_hthreads;
+     g_dsp_ctx->thread_counts = mhwt.max_hthreads;
 
     /* Step 1: Power up HVX and HMX */
     int power_result = power_on_hvx_hmx();
     if (power_result != 0) {
         GGMLHEXAGON_LOG_INFO("power_on_hvx_hmx failed (%d), continuing without HMX", power_result);
-        g_hmx_available = 0;
+        g_dsp_ctx->hmx_available = 0;
     } else {
-        g_hmx_available = 1;
+        g_dsp_ctx->hmx_available = 1;
     }
 
     /* Step 2: Query VTCM size and allocate resources */
@@ -310,13 +282,23 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
                                  result, vtcm_size_query, availBlockSize);
     printf("Compute resource query ctd, valid page sizes in total table: %d, valid page sizes in avail table: %d\n",
                                  totalBlock.page_list_len, availBlock.page_list_len);
-    printf("Compute resource query ctd, (Size, num pages); total (0x%x, %d) Avail (0x%x, %d, 0x%x, %d)\n",
-                                totalBlock.page_list[0].page_size,
-                                totalBlock.page_list[0].num_pages,
-                                availBlock.page_list[0].page_size,
-                                availBlock.page_list[0].num_pages,
-                                availBlock.page_list[1].page_size,
-                                availBlock.page_list[1].num_pages);
+    if (totalBlock.page_list_len >= 1 && availBlock.page_list_len >= 2) {
+        printf("Compute resource query ctd, (Size, num pages); total (0x%x, %d) Avail (0x%x, %d, 0x%x, %d)\n",
+                                    totalBlock.page_list[0].page_size,
+                                    totalBlock.page_list[0].num_pages,
+                                    availBlock.page_list[0].page_size,
+                                    availBlock.page_list[0].num_pages,
+                                    availBlock.page_list[1].page_size,
+                                    availBlock.page_list[1].num_pages);
+    } else if (totalBlock.page_list_len >= 1 && availBlock.page_list_len >= 1) {
+        printf("Compute resource query ctd, (Size, num pages); total (0x%x, %d) Avail (0x%x, %d)\n",
+                                    totalBlock.page_list[0].page_size,
+                                    totalBlock.page_list[0].num_pages,
+                                    availBlock.page_list[0].page_size,
+                                    availBlock.page_list[0].num_pages);
+    } else {
+        printf("Compute resource query ctd, no page list data available\n");
+    }
 
     /* Step 3: Acquire compute resources (including VTCM and HMX) */
     compute_res_attr_t attr;
@@ -328,8 +310,8 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     HAP_compute_res_attr_set_release_callback(&attr, vtcm_release_callback, NULL);  // Enable release callback for cache mode
     HAP_compute_res_attr_set_hmx_param(&attr, 1);
     // Allocate VTCM for scratch pads
-    g_compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
-    if (g_compute_res_ctx_id == 0) {
+    g_dsp_ctx->compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
+    if (g_dsp_ctx->compute_res_ctx_id == 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_compute_res_acquire failed, no VTCM available\n");
     } else {
         /* Using VTCM acquired via HAP_compute_res */
@@ -337,37 +319,37 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
         unsigned int vtcm_ptr_size = 0;
         if (HAP_compute_res_attr_get_vtcm_ptr_v2(&attr, &vtcm_ptr, &vtcm_ptr_size) != 0) {
             GGMLHEXAGON_LOG_INFO("HAP_compute_res_attr_get_vtcm_ptr_v2 failed\n");
-            HAP_compute_res_release(g_compute_res_ctx_id);
-            g_compute_res_ctx_id = 0;
+            HAP_compute_res_release(g_dsp_ctx->compute_res_ctx_id);
+            g_dsp_ctx->compute_res_ctx_id = 0;
         } else {
-            g_vtcm_base = vtcm_ptr;
-            g_vtcm_size = vtcm_ptr_size;
-            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_vtcm_size, g_vtcm_base);
+            g_dsp_ctx->vtcm_base = vtcm_ptr;
+            g_dsp_ctx->vtcm_size = vtcm_ptr_size;
+            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_dsp_ctx->vtcm_size, g_dsp_ctx->vtcm_base);
 
             //clear the VTCM region
-            // TEMPORARILY DISABLED FOR DEBUGGING - memset(g_vtcm_base, 0, g_vtcm_size);
+            // TEMPORARILY DISABLED FOR DEBUGGING - memset(g_dsp_ctx->vtcm_base, 0, g_dsp_ctx->vtcm_size);
             // NOTE: HMX lock is managed per-operation in mulmat.c, not here
-            //HAP_compute_res_hmx_lock(g_compute_res_ctx_id);
+            //HAP_compute_res_hmx_lock(g_dsp_ctx->compute_res_ctx_id);
         }
     }
 
     /* Step 3.5: Create async HMX queue for pipeline overlap (DMA/HVX/HMX) */
-    if (g_hmx_available && g_compute_res_ctx_id != 0) {
-        if (g_hmx_queue != NULL) {
+    if (g_dsp_ctx->hmx_available && g_dsp_ctx->compute_res_ctx_id != 0) {
+        if (g_dsp_ctx->hmx_queue != NULL) {
             GGMLHEXAGON_LOG_INFO("hmx_queue already exists, deleting old one\n");
-            hmx_queue_delete(g_hmx_queue);
-            g_hmx_queue = NULL;
+            hmx_queue_delete(g_dsp_ctx->hmx_queue);
+            g_dsp_ctx->hmx_queue = NULL;
         }
-        g_hmx_queue = hmx_queue_create(16, g_compute_res_ctx_id);
-        if (g_hmx_queue) {
+        g_dsp_ctx->hmx_queue = hmx_queue_create(16, g_dsp_ctx->compute_res_ctx_id);
+        if (g_dsp_ctx->hmx_queue) {
             GGMLHEXAGON_LOG_INFO("async HMX queue created (capacity %u, rctx %u)\n",
-                                 hmx_queue_capacity(g_hmx_queue), g_compute_res_ctx_id);
+                                 hmx_queue_capacity(g_dsp_ctx->hmx_queue), g_dsp_ctx->compute_res_ctx_id);
         } else {
             GGMLHEXAGON_LOG_INFO("hmx_queue_create failed, HMX path will run synchronously\n");
         }
     } else {
         GGMLHEXAGON_LOG_INFO("HMX not available (hmx=%d, rctx=%u), skipping hmx_queue creation\n",
-                             g_hmx_available, g_compute_res_ctx_id);
+                             g_dsp_ctx->hmx_available, g_dsp_ctx->compute_res_ctx_id);
     }
 
     /* Step 4: probe DSP memory for information only (no allocation) */
@@ -406,45 +388,52 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
 }
 
 int ggmlop_dsp_close(remote_handle64 handle) {
-    if (handle)
-        free((void*)handle);
+    struct dsp_context * ctx = (struct dsp_context *)handle;
+    if (!ctx) return 0;
 
-    if (g_work_data != NULL) {
-        free(g_work_data);
-        g_work_data = NULL;
-        g_work_size = 0;
+    if (ctx->work_data != NULL) {
+        free(ctx->work_data);
+        ctx->work_data = NULL;
+        ctx->work_size = 0;
     }
 
     // Cleanup htp_context resources (worker_pool + dma queues)
-    if (g_htp_ctx.worker_pool) {
-        worker_pool_release(&g_htp_ctx.worker_pool);
-        g_htp_ctx.worker_pool = NULL;
-    }
-    for (int i = 0; i < HTP_MAX_NTHREADS; i++) {
-        if (g_htp_ctx.dma[i]) {
-            dma_queue_delete(g_htp_ctx.dma[i]);
-            g_htp_ctx.dma[i] = NULL;
+    if (ctx->htp_ctx) {
+        if (ctx->htp_ctx->worker_pool) {
+            worker_pool_release(&ctx->htp_ctx->worker_pool);
+            ctx->htp_ctx->worker_pool = NULL;
         }
+        for (int i = 0; i < HTP_MAX_NTHREADS; i++) {
+            if (ctx->htp_ctx->dma[i]) {
+                dma_queue_delete(ctx->htp_ctx->dma[i]);
+                ctx->htp_ctx->dma[i] = NULL;
+            }
+        }
+        free(ctx->htp_ctx);
+        ctx->htp_ctx = NULL;
     }
 
-    if (g_hmx_queue != NULL) {
-        hmx_queue_delete(g_hmx_queue);
-        g_hmx_queue = NULL;
+    if (ctx->hmx_queue != NULL) {
+        hmx_queue_delete(ctx->hmx_queue);
+        ctx->hmx_queue = NULL;
         GGMLHEXAGON_LOG_INFO("released async HMX queue");
     }
 
-    if (g_compute_res_ctx_id != 0) {
-        HAP_compute_res_release_cached(g_compute_res_ctx_id);
+    if (ctx->compute_res_ctx_id != 0) {
+        HAP_compute_res_release_cached(ctx->compute_res_ctx_id);
         // NOTE: HMX lock is managed per-operation in mulmat.c, not here
-        // HAP_compute_res_hmx_unlock(g_compute_res_ctx_id);
+        // HAP_compute_res_hmx_unlock(ctx->compute_res_ctx_id);
 
-        HAP_compute_res_release(g_compute_res_ctx_id);
-        g_compute_res_ctx_id = 0;
-        g_vtcm_base = NULL;
-        g_vtcm_size = 0;
+        HAP_compute_res_release(ctx->compute_res_ctx_id);
+        ctx->compute_res_ctx_id = 0;
+        ctx->vtcm_base = NULL;
+        ctx->vtcm_size = 0;
         GGMLHEXAGON_LOG_INFO("released compute resources");
     }
 
+    g_dsp_ctx = NULL;
+    qurt_mutex_destroy((qurt_mutex_t *)&ctx->work_mutex);
+    free(ctx);
     return 0;
 }
 
@@ -519,7 +508,7 @@ AEEResult hap_probe_dsp(remote_handle64 h) {
      *
      * returns: void* ptr representing a unique context for the client
      */
-    context_ptr = g_hexagon_power_ctx;
+    context_ptr = g_dsp_ctx->hexagon_power_ctx;
 
     /*
      * HAP_power_get : Queries the DSP for current performance levels
@@ -615,21 +604,21 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     GGMLHEXAGON_LOG_INFO("user specified thread_counts %d", thread_counts);
-    if (thread_counts <= g_thread_counts) {
-        g_thread_counts = thread_counts;
+    if (thread_counts <= g_dsp_ctx->thread_counts) {
+        g_dsp_ctx->thread_counts = thread_counts;
     }
 
-    g_mulmat_algotype = mulmat_algo;
-    GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=HVX multithread,31=sgemm,32=HMX,33=VTCM multithread)", g_mulmat_algotype);
-    g_offload_cgraph_type = offload_cgraph_type;
+    g_dsp_ctx->mulmat_algotype = mulmat_algo;
+    GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=HVX multithread,31=sgemm,32=HMX,33=VTCM multithread)", g_dsp_ctx->mulmat_algotype);
+    g_dsp_ctx->offload_cgraph_type = offload_cgraph_type;
     GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
-    g_dump_diag_info      = diag_info;
+    g_dsp_ctx->dump_diag_info      = diag_info;
 
     printf("\n");
-    printf("real thread_counts:             %d\n", g_thread_counts);
-    printf("mulmat_algotype:                %d\n", g_mulmat_algotype);
+    printf("real thread_counts:             %d\n", g_dsp_ctx->thread_counts);
+    printf("mulmat_algotype:                %d\n", g_dsp_ctx->mulmat_algotype);
     printf("offload_cgraph_type:            %d\n", offload_cgraph_type);
-    printf("dump_diag_info:                 %d\n\n", g_dump_diag_info);
+    printf("dump_diag_info:                 %d\n\n", g_dsp_ctx->dump_diag_info);
 
     // diag_info is now used for dump_diag_info (log control), so force HVX on
     ggml_type_traits_dsp_init(1);
@@ -637,32 +626,32 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     // Initialize htp_context for calling Qualcomm's execute_op.
     // Shares our already-acquired VTCM and HMX queue.
-    if (g_thread_counts >= 1) {
-        memset(&g_htp_ctx, 0, sizeof(g_htp_ctx));
-        g_htp_ctx.vtcm_base      = (uint8_t *)g_vtcm_base;
-        g_htp_ctx.vtcm_size      = g_vtcm_size;
-        g_htp_ctx.vtcm_rctx      = g_compute_res_ctx_id;
-        g_htp_ctx.hmx_queue      = g_hmx_queue;
-        g_htp_ctx.n_threads      = (uint32_t)g_thread_counts;
-        g_htp_ctx.hmx_enabled    = g_hmx_available ? true : false;
+    if (g_dsp_ctx->thread_counts >= 1) {
+        memset(g_dsp_ctx->htp_ctx, 0, sizeof(*g_dsp_ctx->htp_ctx));
+        g_dsp_ctx->htp_ctx->vtcm_base      = (uint8_t *)g_dsp_ctx->vtcm_base;
+        g_dsp_ctx->htp_ctx->vtcm_size      = g_dsp_ctx->vtcm_size;
+        g_dsp_ctx->htp_ctx->vtcm_rctx      = g_dsp_ctx->compute_res_ctx_id;
+        g_dsp_ctx->htp_ctx->hmx_queue      = g_dsp_ctx->hmx_queue;
+        g_dsp_ctx->htp_ctx->n_threads      = (uint32_t)g_dsp_ctx->thread_counts;
+        g_dsp_ctx->htp_ctx->hmx_enabled    = g_dsp_ctx->hmx_available ? true : false;
 
-        AEEResult wp = worker_pool_init(&g_htp_ctx.worker_pool, (uint32_t)g_thread_counts);
-        FARF(ALWAYS, "htp_ctx worker_pool_init returned %d (n_threads=%d)", wp, g_thread_counts);
+        AEEResult wp = worker_pool_init(&g_dsp_ctx->htp_ctx->worker_pool, (uint32_t)g_dsp_ctx->thread_counts);
+        FARF(ALWAYS, "htp_ctx worker_pool_init returned %d (n_threads=%d)", wp, g_dsp_ctx->thread_counts);
 
-        for (int i = 0; i < g_thread_counts; i++) {
-            g_htp_ctx.dma[i] = dma_queue_create(256);
+        for (int i = 0; i < g_dsp_ctx->thread_counts; i++) {
+            g_dsp_ctx->htp_ctx->dma[i] = dma_queue_create(256);
         }
-        FARF(ALWAYS, "htp_ctx dma_queue created x%d", g_thread_counts);
+        FARF(ALWAYS, "htp_ctx dma_queue created x%d", g_dsp_ctx->thread_counts);
     }
 
-    g_hexagon_power_ctx = (void *)(handle);
+    g_dsp_ctx->hexagon_power_ctx = (void *)(handle);
 
     // Test VTCM memory read/write (must ensure VTCM is available in cache mode)
-    if (g_vtcm_base != NULL) {
+    if (g_dsp_ctx->vtcm_base != NULL) {
         // Ensure VTCM resource is available before accessing
         if (ggmlop_ensure_vtcm_available() == 0) {
-            uint8_t *weight = (uint8_t *)g_vtcm_base;
-            uint8_t *active = (uint8_t *)g_vtcm_base + 256;
+            uint8_t *weight = (uint8_t *)g_dsp_ctx->vtcm_base;
+            uint8_t *active = (uint8_t *)g_dsp_ctx->vtcm_base + 256;
             // Write test patterns
             memset(weight, 0xaa, 128);
             memset(active, 0xbb, 128);
@@ -702,14 +691,14 @@ AEEResult ggmlop_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t s
 #endif
 
     if (va == (void *)-1) {
-        g_ion_dsp_base = NULL;
+        g_dsp_ctx->ion_dsp_base = NULL;
         GGMLHEXAGON_LOG_ERROR("[ION-REG] HAP_mmap2 FAILED: returned -1 (fd=%d, size=%llu)", fd, (unsigned long long)size);
         return AEE_EFAILED;
     }
 
-    g_ion_dsp_base = va;
-    g_ion_dsp_size = (size_t)size;
-    GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB)", va, fd, g_ion_dsp_size / (1024*1024));
+    g_dsp_ctx->ion_dsp_base = va;
+    g_dsp_ctx->ion_dsp_size = (size_t)size;
+    GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB)", va, fd, g_dsp_ctx->ion_dsp_size / (1024*1024));
 
     // FP16 weight cache region will be set up via NONE op with cache metadata
     // (see GGML_OP_NONE handling in ggmlop_dsp_execute_task)
@@ -914,7 +903,7 @@ static void build_htp_octx(
     struct htp_tensor dst_ht[HTP_OP_MAX_OUTPUTS]) {
 
     memset(octx, 0, sizeof(*octx));
-    octx->ctx = &g_htp_ctx;
+    octx->ctx = g_dsp_ctx->htp_ctx;
     octx->op  = htp_op;
     // Mirror proc_op_req: unconditional copy (op_params is always provided)
     memcpy(octx->op_params, op_params, sizeof(octx->op_params));
@@ -941,7 +930,7 @@ static void build_htp_octx(
         }
     }
 
-    octx->n_threads = (uint32_t)g_thread_counts;
+    octx->n_threads = (uint32_t)g_dsp_ctx->thread_counts;
 }
 
 // Try HMX precompute (simple 2D path). Mirrors ggml_hexagon_precompute_hmx_mm_params
@@ -984,7 +973,7 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
     const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
     const bool     pipeline          = htp_mm_hmx_pipeline(ne11);
     const int      n_threads         = (int) octx->n_threads;
-    const size_t   vtcm_budget       = g_vtcm_size;
+    const size_t   vtcm_budget       = g_dsp_ctx->vtcm_size;
 
     size_t best_mblocks       = SIZE_MAX;
     int    best_act_threads   = 0;
@@ -1077,7 +1066,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
     kparams->n_prefetch  = 16;
 
     // Try HMX first (mirrors ggml_hexagon_precompute_matmul_params: HMX-first, HVX-fallback)
-    if (g_hmx_available && build_mm_hmx_params(octx, kparams)) {
+    if (g_dsp_ctx->hmx_available && build_mm_hmx_params(octx, kparams)) {
         goto mm_finalize;
     }
 
@@ -1093,7 +1082,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
             dst->nb[1], src0->nb[1], src1->nb[1], 16,
             &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
 
-        if (!is_batched && !is_permuted && vtcm_size <= g_vtcm_size) {
+        if (!is_batched && !is_permuted && vtcm_size <= g_dsp_ctx->vtcm_size) {
             kparams->kernel_type    = HTP_MM_KERNEL_HVX_F32_F32_VTCM;
             kparams->src1_row_size  = hex_round_up(ne10 * 4, 128);
         } else {
@@ -1114,7 +1103,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
             dst->nb[1], src0->nb[1], src1->nb[1], 16,
             &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size);
 
-        if (!is_batched && !is_permuted && vtcm_size <= g_vtcm_size) {
+        if (!is_batched && !is_permuted && vtcm_size <= g_dsp_ctx->vtcm_size) {
             kparams->kernel_type    = HTP_MM_KERNEL_HVX_F16_F16_VTCM;
             kparams->src1_row_size  = hex_round_up(ne10 * 2, 128);
         } else {
@@ -1159,12 +1148,12 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
                     kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
                     dst->nb[1], src0->nb[1], src1->nb[1], d,
                     &vs0, &vs1, &vd);
-                if (total_size <= g_vtcm_size) {
+                if (total_size <= g_dsp_ctx->vtcm_size) {
                     best_n_prefetch = d;
                     break;
                 }
             }
-            if (best_n_prefetch == 2 && total_size > g_vtcm_size) {
+            if (best_n_prefetch == 2 && total_size > g_dsp_ctx->vtcm_size) {
                 total_size = htp_mm_hvx_get_vtcm_sizes(
                     kparams->kernel_type, wtype, ne10, src1_nrows, octx->n_threads,
                     dst->nb[1], src0->nb[1], src1->nb[1], 2,
@@ -1172,7 +1161,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
             }
             kparams->n_prefetch = (int32_t) best_n_prefetch;
 
-            if (total_size <= g_vtcm_size) {
+            if (total_size <= g_dsp_ctx->vtcm_size) {
                 kparams->vtcm_size      = (int32_t) total_size;
                 kparams->vtcm_src0_size = (int32_t) vs0;
                 kparams->vtcm_src1_size = (int32_t) vs1;
@@ -1213,7 +1202,7 @@ mm_finalize:
 
 // Build htp_fa_kernel_params on DSP side for FLASH_ATTN_EXT.
 // Mirrors ggml_hexagon_precompute_flash_attn_params on AP side, using
-// DSP-side globals (g_vtcm_size, g_thread_counts, g_hmx_available).
+// DSP-side globals (g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts, g_dsp_ctx->hmx_available).
 static int build_fa_kernel_params(struct htp_ops_context * octx) {
     const struct htp_tensor * q  = octx->src[0];
     const struct htp_tensor * k  = octx->src[1];
@@ -1223,7 +1212,7 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     if (!q || !k || !v || !dst) return -1;
     FARF(ALWAYS, "build_fa: DK=%u DV=%u neq1=%u nek1=%u G=%u ktype=%d vtype=%d hmx=%d",
          q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2]/k->ne[2],
-         k->type, v->type, g_hmx_available);
+         k->type, v->type, g_dsp_ctx->hmx_available);
 
     struct htp_fa_kernel_params * kparams =
         (struct htp_fa_kernel_params *) octx->kernel_params;
@@ -1261,7 +1250,7 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
 
     // HMX eligibility: k/v F16, DK/DV divisible by 64, enough tokens.
     bool hmx_eligible = false;
-    if (g_hmx_available && k->type == HTP_TYPE_F16 && v->type == HTP_TYPE_F16) {
+    if (g_dsp_ctx->hmx_available && k->type == HTP_TYPE_F16 && v->type == HTP_TYPE_F16) {
         if (DK % 64 == 0 && DV % 64 == 0 && !(DK <= 128 && neq1 < 5)) {
             hmx_eligible = true;
         }
@@ -1270,16 +1259,16 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     if (hmx_eligible) {
         size_t Br = 0, Bc = 0;
         int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
-                                         g_vtcm_size, g_thread_counts);
+                                         g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts);
         if (ret == 0) {
             kparams->kernel_type = HTP_FA_KERNEL_HMX;
             kparams->Br          = (uint16_t)Br;
             kparams->Bc          = (uint16_t)Bc;
             kparams->n_kv_blocks = (uint16_t)((nek1 + Bc - 1) / Bc);
-            kparams->n_threads   = (kparams->n_kv_blocks >= 3 && g_thread_counts >= 2)
-                                    ? (uint8_t)g_thread_counts : 1;
+            kparams->n_threads   = (kparams->n_kv_blocks >= 3 && g_dsp_ctx->thread_counts >= 2)
+                                    ? (uint8_t)g_dsp_ctx->thread_counts : 1;
             kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
-            kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && g_thread_counts >= 2) ? 1 : 0;
+            kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && g_dsp_ctx->thread_counts >= 2) ? 1 : 0;
             kparams->vtcm_size       = (uint32_t)hmx_fa_compute_vtcm_usage(
                 G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0);
 
@@ -1304,9 +1293,9 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     kparams->Br             = 1;
     kparams->Bc             = 64;
     kparams->n_kv_blocks    = (uint16_t)((k->ne[1] + 64 - 1) / 64);
-    kparams->n_threads      = (uint8_t)g_thread_counts;
+    kparams->n_threads      = (uint8_t)g_dsp_ctx->thread_counts;
     kparams->vtcm_size      = (uint32_t)hvx_fa_compute_vtcm_usage(
-        DK, DV, kparams->is_q_fp32 != 0, mask != NULL, g_thread_counts);
+        DK, DV, kparams->is_q_fp32 != 0, mask != NULL, g_dsp_ctx->thread_counts);
 
     kparams->u.hvx.size_q_row_padded = hex_round_up(q->ne[0] * (kparams->is_q_fp32 ? 4 : 2), 128);
     kparams->u.hvx.size_k_row_padded = hex_round_up(k->ne[0] * 2, 128);
@@ -1322,7 +1311,7 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
         kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
     }
     kparams->qrows           = q->ne[1] * q->ne[2] * q->ne[3];
-    kparams->qrows_per_thread = (kparams->qrows + g_thread_counts - 1) / g_thread_counts;
+    kparams->qrows_per_thread = (kparams->qrows + g_dsp_ctx->thread_counts - 1) / g_dsp_ctx->thread_counts;
     return 0;
 }
 // end translation layer }
@@ -1346,19 +1335,19 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
     //            same as QCOM's htp_iface_mmap() in htp/main.c.
     if (ggml_op == GGML_OP_NONE) {
         if (src0 && src0->data && src1 && src1->data) {
-            if (2 != g_offload_cgraph_type) {
+            if (2 != g_dsp_ctx->offload_cgraph_type) {
                 // src0: ION pool base; src1: metadata [fd, size_lo, size_hi, size_mb]
                 uint32_t * meta = (uint32_t *)src1->data;
                 int32_t fd = (int32_t)meta[0];
                 uint64_t size = ((uint64_t)(uint32_t)meta[2] << 32) | (uint64_t)(uint32_t)meta[1];
                 int32_t size_mb = (int32_t)meta[3];
-                g_ion_dsp_base = src0->data;
+                g_dsp_ctx->ion_dsp_base = src0->data;
                 GGMLHEXAGON_LOG_INFO("offload_cgraph_type=%d, registered ION DSP base: %p, data_len=%llu, fd=%d, size=%llubytes(%dMB)",
-                                 g_offload_cgraph_type,
-                                 g_ion_dsp_base, size, fd, (unsigned long long)size, size_mb);
+                                 g_dsp_ctx->offload_cgraph_type,
+                                 g_dsp_ctx->ion_dsp_base, size, fd, (unsigned long long)size, size_mb);
             }
         } else {
-            g_ion_dsp_base = NULL;
+            g_dsp_ctx->ion_dsp_base = NULL;
             GGMLHEXAGON_LOG_ERROR("GGML_OP_NONE: no src0 or src1 data");
         }
         return AEE_SUCCESS;
@@ -1373,7 +1362,7 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
 
     /* Dual-channel dispatch: mulmat_algotype == 29 uses Qualcomm execute_op,
      * other values use self-built kernels (ggmlop_dsp_*). */
-    if ((g_mulmat_algotype != 29) || (g_offload_cgraph_type != 2)) {
+    if ((g_dsp_ctx->mulmat_algotype != 29) || (g_dsp_ctx->offload_cgraph_type != 2)) {
         switch (ggml_op) {
             case GGML_OP_ADD:      ggmlop_dsp_add(h, src0, src1, dst); break;
             case GGML_OP_SUB:      ggmlop_dsp_sub(h, src0, src1, dst); break;
@@ -1443,16 +1432,16 @@ int ggmlop_dsp_execute_task(remote_handle64 h, int32 ggml_op, const dsptensor* s
  * Probe mode: when batch_size == 0, performs bidirectional ION memory test.
  */
 AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
-    if (g_ion_dsp_base == NULL) {
+    if (g_dsp_ctx->ion_dsp_base == NULL) {
         GGMLHEXAGON_LOG_ERROR("ION base not registered");
         return AEE_EBADPARM;
     }
 
-    const char * base = (const char *)g_ion_dsp_base;
+    const char * base = (const char *)g_dsp_ctx->ion_dsp_base;
 
     /* Probe mode: verify bidirectional ION access */
     if (batch_size == 0) {
-        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] testing ION R/W at base=%p", g_ion_dsp_base);
+        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] testing ION R/W at base=%p", g_dsp_ctx->ion_dsp_base);
 
         // Step 1: Read what AP wrote (AP->DSP direction)
         // Invalidate DSP cache before reading
@@ -1473,17 +1462,17 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     /* Cache setup mode: batch_size == 0xFFFF, batch_offset = cache_offset in ION */
     if (batch_size == 0xFFFF) {
         uint32_t cache_offset = batch_offset;
-        if (cache_offset > 0 && g_ion_dsp_base != NULL && g_ion_dsp_size > 0) {
-            g_ion_cache_base = (char *)g_ion_dsp_base + cache_offset;
-            g_ion_cache_size = g_ion_dsp_size - (size_t)cache_offset;
-            g_ion_cache_offset = 0;
+        if (cache_offset > 0 && g_dsp_ctx->ion_dsp_base != NULL && g_dsp_ctx->ion_dsp_size > 0) {
+            g_dsp_ctx->ion_cache_base = (char *)g_dsp_ctx->ion_dsp_base + cache_offset;
+            g_dsp_ctx->ion_cache_size = g_dsp_ctx->ion_dsp_size - (size_t)cache_offset;
+            g_dsp_ctx->ion_cache_offset = 0;
             GGMLHEXAGON_LOG_INFO("[DSP-CACHE] FP16 weight cache: base=%p, offset=0x%x, size=%zu MB",
-                                 g_ion_cache_base, cache_offset, g_ion_cache_size / (1024*1024));
+                                 g_dsp_ctx->ion_cache_base, cache_offset, g_dsp_ctx->ion_cache_size / (1024*1024));
         } else {
-            g_ion_cache_base = NULL;
-            g_ion_cache_size = 0;
+            g_dsp_ctx->ion_cache_base = NULL;
+            g_dsp_ctx->ion_cache_size = 0;
             GGMLHEXAGON_LOG_WARN("[DSP-CACHE] no cache region (cache_offset=%u, ion_size=%zu)",
-                                 cache_offset, g_ion_dsp_size);
+                                 cache_offset, g_dsp_ctx->ion_dsp_size);
         }
         return AEE_SUCCESS;
     }
@@ -1491,7 +1480,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     /* Cache reset mode: batch_size == 0xFFFE, clear FP16 weight cache */
     if (batch_size == 0xFFFE) {
         ggmlop_dsp_fp16_cache_reset();
-        g_ion_cache_offset = 0;
+        g_dsp_ctx->ion_cache_offset = 0;
         GGMLHEXAGON_LOG_INFO("[DSP-CACHE] FP16 weight cache reset");
         return AEE_SUCCESS;
     }
@@ -1514,10 +1503,11 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     const hex_op_desc * ops = (const hex_op_desc *)((const char *)hdr + hdr->ops_offset);
     const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
 
-    /* Per-batch VTCM acquire (matches Qualcomm htp/main.c opbatch pattern):
-     * acquire once here, all ops in the batch share it, release at batch
-     * boundary. Per-op mulmat/flash_attn no longer call ensure themselves. */
-    if (ggmlop_ensure_vtcm_available() != 0) {
+    /* Per-batch VTCM acquire:
+     * acquire at batch start, release at batch end. Every batch does
+     * acquire+release to be cooperative with other DSP sessions. */
+    dsp_vtcm_acquire();
+    if (!g_dsp_ctx->vtcm_valid) {
         GGMLHEXAGON_LOG_ERROR("VTCM acquire failed at batch entry, aborting batch");
         return AEE_EFAILED;
     }
@@ -1550,7 +1540,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         src0_dt.data     = (void *)(base + t0->data_offset);
         src0_dt.data_len = t0->data_len;
 
-        if (1 == g_dump_diag_info) {
+        if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (BEFORE dcinva) */
             if (src0_dt.data && src0_dt.data_len >= 16) {
                 const float * fv = (const float *)src0_dt.data;
@@ -1571,7 +1561,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             src1_dt_buf.data_len = t1->data_len;
             src1_dt_ptr = &src1_dt_buf;
 
-            if (1 == g_dump_diag_info) {
+            if (1 == g_dsp_ctx->dump_diag_info) {
                 if (src1_dt_buf.data && src1_dt_buf.data_len >= 16 && src1_dt_buf.type == 0) {
                     const float * fv = (const float *)src1_dt_buf.data;
                     GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src1 off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f] ne=[%d,%d,%d,%d]",
@@ -1644,7 +1634,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
         }
 
-        if (1 == g_dump_diag_info) {
+        if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).
              * Compare with PRE-INVAL values to detect stale cache lines. */
             if (src0_dt.data && src0_dt.data_len >= 16) {
@@ -1661,7 +1651,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
         /* Dual-channel dispatch: mulmat_algotype == 29 uses Qualcomm execute_op,
          * other values use self-built kernels (ggmlop_dsp_*). */
-        if (g_mulmat_algotype != 29) {
+        if (g_dsp_ctx->mulmat_algotype != 29) {
             int op_ret = 0;
             switch (op->opcode) {
                 case GGML_OP_ADD:      op_ret = ggmlop_dsp_add(h, &src0_dt, src1_dt_ptr, &dst_dt_buf[0]); break;
@@ -1819,7 +1809,7 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             }
         }
 
-        if (1 == g_dump_diag_info) {
+        if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from each dst output */
             for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
                 if (dst_dt_ptrs[k] && dst_dt_buf[k].data && dst_dt_buf[k].data_len >= 16) {
@@ -1881,10 +1871,10 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     }
     __asm__ __volatile__("" ::: "memory");
 
-    /* Lazy VTCM release: if the release callback flagged us during the batch,
-     * release now so other sessions (QNN/another GGML session) can use VTCM.
-     * If not flagged, keep it cached for the next batch (avoids re-acquire). */
-    ggmlop_vtcm_lazy_release();
+    /* Per-batch VTCM release: controlled by DSP_VTCM_PER_BATCH_RELEASE.
+     * 0 (default): lazy release, only when callback fires.
+     * 1: always release (Qualcomm pattern, for large-batch mode). */
+    dsp_vtcm_release();
 
     return AEE_SUCCESS;
 }

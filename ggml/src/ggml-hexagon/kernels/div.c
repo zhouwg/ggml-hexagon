@@ -269,7 +269,7 @@ int ggmlop_dsp_div(remote_handle64 h, const ggml_tensor * src0, const ggml_tenso
     ggml_get_opkey(GGML_OP_DIV, src0, src1, tempbuf, 256);
 
     int64_t begin_time = ggml_time_us();
-    if (ggmlop_get_thread_counts() > 1) {
+    if (g_dsp_ctx->thread_counts > 1) {
         ggmlop_dsp_div_multithread(h, src0, src1, dst);
     } else {
         ggmlop_dsp_div_singlethread(h, src0, src1, dst);
