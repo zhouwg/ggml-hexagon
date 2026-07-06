@@ -681,7 +681,7 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     hap_probe_dsp(handle);
 
-    //set_power_boost(handle, 1);  //not needed
+    set_power_boost(handle, 1);
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return AEE_SUCCESS;
@@ -1524,6 +1524,13 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
     GGMLHEXAGON_LOG_INFO("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
+    /* Bulk dst flush: collect all dst ranges during the loop, then merge
+     * and flush once after all ops complete. This avoids redundant
+     * dccleaninva calls when multiple ops share the same dst tensor or
+     * have adjacent dst ranges. Max 4 dsts per op. */
+    struct { void *data; size_t len; } dst_flush_ranges[HTP_OP_MAX_OUTPUTS * 256];
+    uint32_t n_dst_ranges = 0;
+
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
@@ -1623,15 +1630,19 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Always invalidate, even for weights: ION region reuse means the
-         *   same address may hold different data from a previous allocation
          * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
          *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
          *   stale DSP cache lines and clobber the fresh DRAM data. */
         ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
-        if (src2_dt_ptr) ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
-        if (src3_dt_ptr) ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+        if (src1_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
+        }
+        if (src2_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
+        }
+        if (src3_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+        }
 
         if (1 == g_dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).
@@ -1678,8 +1689,12 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
                 return AEE_EFAILED;
             }
 
-            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
-            ggmlop_dsp_cache_flush_range(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
+            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, collecting dst range", i);
+            if (n_dst_ranges < HTP_OP_MAX_OUTPUTS * 256) {
+                dst_flush_ranges[n_dst_ranges].data = dst_dt_buf[0].data;
+                dst_flush_ranges[n_dst_ranges].len  = dst_dt_buf[0].data_len;
+                n_dst_ranges++;
+            }
             continue;
         }
 
@@ -1793,13 +1808,14 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             return AEE_EFAILED;
         }
 
-        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
+        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, collecting dst ranges", i);
 
-        /* Flush DSP cache after writing dst (so AP can read from DRAM).
-         * For multi-output ops (QKV/FFN fusion), flush all non-NULL dsts. */
+        /* Collect dst ranges for bulk flush after the loop */
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
-            if (dst_dt_ptrs[k]) {
-                ggmlop_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+            if (dst_dt_ptrs[k] && n_dst_ranges < HTP_OP_MAX_OUTPUTS * 256) {
+                dst_flush_ranges[n_dst_ranges].data = dst_dt_buf[k].data;
+                dst_flush_ranges[n_dst_ranges].len  = dst_dt_buf[k].data_len;
+                n_dst_ranges++;
             }
         }
 
@@ -1815,7 +1831,47 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         }
     }
 
-    GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done", hdr->n_ops);
+    GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done, bulk flushing %u dst ranges", hdr->n_ops, n_dst_ranges);
+
+    /* Bulk flush: merge overlapping/adjacent dst ranges and flush once per
+     * contiguous region. This avoids per-op dccleaninva overhead when ops
+     * share the same output tensor or write to adjacent ION regions. */
+    if (n_dst_ranges > 0) {
+        /* Sort by starting address */
+        for (uint32_t j = 0; j < n_dst_ranges; j++) {
+            for (uint32_t k = j + 1; k < n_dst_ranges; k++) {
+                if (dst_flush_ranges[j].data > dst_flush_ranges[k].data) {
+                    void * tmp_data = dst_flush_ranges[j].data;
+                    size_t tmp_len  = dst_flush_ranges[j].len;
+                    dst_flush_ranges[j].data = dst_flush_ranges[k].data;
+                    dst_flush_ranges[j].len  = dst_flush_ranges[k].len;
+                    dst_flush_ranges[k].data = tmp_data;
+                    dst_flush_ranges[k].len  = tmp_len;
+                }
+            }
+        }
+        /* Merge and flush */
+        void * merge_start = dst_flush_ranges[0].data;
+        size_t merge_end   = (size_t)merge_start + dst_flush_ranges[0].len;
+        uint32_t n_flushed = 0;
+        for (uint32_t j = 1; j <= n_dst_ranges; j++) {
+            size_t next_start = (j < n_dst_ranges) ? (size_t)dst_flush_ranges[j].data : merge_end + 128;
+            if (next_start <= merge_end + 64) {
+                /* Overlap or adjacent (within 64B cache line): merge */
+                size_t next_end = (j < n_dst_ranges) ? next_start + dst_flush_ranges[j].len : merge_end;
+                if (next_end > merge_end) merge_end = next_end;
+            } else {
+                /* Gap: flush current merged range */
+                ggmlop_dsp_cache_flush_range(merge_start, merge_end - (size_t)merge_start);
+                n_flushed++;
+                if (j < n_dst_ranges) {
+                    merge_start = dst_flush_ranges[j].data;
+                    merge_end   = (size_t)merge_start + dst_flush_ranges[j].len;
+                }
+            }
+        }
+        GGMLHEXAGON_LOG_INFO("ion-batch: bulk flush done, %u ranges -> %u flushes", n_dst_ranges, n_flushed);
+    }
 
     __asm__ __volatile__("" ::: "memory");
     if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
