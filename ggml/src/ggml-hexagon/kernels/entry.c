@@ -1050,6 +1050,16 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
 
     struct htp_mm_kernel_params * kparams =
         (struct htp_mm_kernel_params *) octx->kernel_params;
+
+    // If AP side already precomputed kernel params (kernel_type != 0),
+    // skip DSP-side recomputation. The AP side uses the same HMX-first
+    // then HVX-fallback policy (ggml_hexagon_precompute_matmul_params)
+    // as this function, and may have precomputed HMX chunk sizes that
+    // the DSP-side build_mm_hmx_params would otherwise recompute.
+    if (kparams->kernel_type != 0) {
+        return 0;
+    }
+
     memset(kparams, 0, sizeof(*kparams));
 
     const int wtype = src0->type;

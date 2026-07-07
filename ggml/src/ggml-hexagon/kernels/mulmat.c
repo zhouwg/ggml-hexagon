@@ -2983,6 +2983,7 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
     const int cache_enabled = src0->op_params[0];
     fp16_weight_cache_entry_t * cache_entry = NULL;
     int cache_is_hit = 0;
+    int cache_failed = 0;  // set when cache allocation fails, skip retries
 
     if (cache_enabled) {
         cache_entry = fp16_weight_cache_lookup(src0->data);
@@ -3022,8 +3023,8 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
             };
             weight_dequant_fn(&wparams);
 
-            // Write converted FP16 tiles to ION cache region
-            if (cache_enabled && !cache_is_hit && !cache_entry) {
+            // Write converted FP16 tiles to ION cache region (skip if cache alloc previously failed)
+            if (cache_enabled && !cache_is_hit && !cache_entry && !cache_failed) {
                 // First chunk: allocate cache and copy this chunk
                 const size_t M_padded_cache = ((size_t)M + HMX_FP16_TILE_N_COLS - 1) / HMX_FP16_TILE_N_COLS * HMX_FP16_TILE_N_COLS;
                 const uint32_t total_fp16_size = (uint32_t)((M_padded_cache / HMX_FP16_TILE_N_COLS) * n_dot_tiles * HMX_FP16_TILE_SIZE);
@@ -3034,6 +3035,8 @@ int ggmlop_dsp_mulmat_hmx_sync(remote_handle64 h, const struct dsptensor * src0,
                 if (cache_entry) {
                     memcpy((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, vtcm_weight, chunk_cache_size);
                     ggmlop_dsp_cache_flush_range((uint8_t *)cache_entry->fp16_ptr + chunk_cache_offset, chunk_cache_size);
+                } else {
+                    cache_failed = 1;  // skip retries on subsequent chunks
                 }
             } else if (cache_enabled && !cache_is_hit && cache_entry) {
                 // Subsequent chunks: just copy to already-allocated cache
