@@ -371,7 +371,6 @@
         "0": "HVX + multithread (self-built path)",
         "29": "Qualcomm execute_op path (full op coverage; delegates to ../htp/*.c)",
         "30": "HMX sync + x4x2 repack (self-built path)",
-        "31": "sgemm (llamafile-style, self-built path)",
         "32": "HMX pipeline (self-built path)",
         "33": "VTCM + multithread (self-built path)"
       },

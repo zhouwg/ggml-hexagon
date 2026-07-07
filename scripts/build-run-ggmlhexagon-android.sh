@@ -789,9 +789,9 @@ function run_test-ops()
 function check_mulmat_algotype
 {
     printf "mulmat_algotype ${mulmat_algotype} \n"
-    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 31 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]] && [[ ${mulmat_algotype} != 29 ]]; then
+    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]] && [[ ${mulmat_algotype} != 29 ]]; then
         printf "invalid mulmat algotype\n"
-        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 29, 30, 31, 32, 33 \n"
+        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 29, 30, 32, 33 \n"
         exit 1
     fi
 }

@@ -609,7 +609,7 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
     }
 
     g_dsp_ctx->mulmat_algotype = mulmat_algo;
-    GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=HVX multithread,31=sgemm,32=HMX,33=VTCM multithread)", g_dsp_ctx->mulmat_algotype);
+    GGMLHEXAGON_LOG_INFO("mulmat_algotype set to %d (0=HVX multithread, 32=HMX pipeline, 30=HMX sync, 33=VTCM multithread)", g_dsp_ctx->mulmat_algotype);
     g_dsp_ctx->offload_cgraph_type = offload_cgraph_type;
     GGMLHEXAGON_LOG_INFO("switch option %d", diag_info);
     g_dsp_ctx->dump_diag_info      = diag_info;

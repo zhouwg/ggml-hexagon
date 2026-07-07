@@ -304,6 +304,7 @@ struct hexagon_appcfg_t {
     int ion_sync_mode;          // 0=both(DC CVAC+ion_sync, default), 1=ion_sync only, 2=DC CVAC only
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
+    int gemv_offload;           // 1=offload GEMV (N=1) to DSP (default, current behavior), 0=keep GEMV on CPU (for debugging)
 
     const char * cfgfilename;
     const char * runtime_libpath;
@@ -324,6 +325,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .ion_sync_mode          = 0,
         .enable_opfusion        = 1,
         .fa_select              = 2,
+        .gemv_offload           = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
@@ -920,6 +922,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "ion_sync_mode", g_hexagon_appcfg.ion_sync_mode, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_opfusion", g_hexagon_appcfg.enable_opfusion, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "fa_select", g_hexagon_appcfg.fa_select, 2);
+    hexagoncfg_instance.get_intvalue("cdsp", "gemv_offload", g_hexagon_appcfg.gemv_offload, 1);
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
 
@@ -1556,7 +1559,6 @@ static const char * ggmlhexagon_get_mulmat_algotype_desc(int algotype) {
         case 0:  return "HVX multithread (default)";
         case 29: return "Qualcomm execute_op (tile-based repack)";
         case 30: return "HMX sync (x4x2 repack)";
-        case 31: return "sgemm (llamafile-style)";
         case 32: return "HMX pipeline (standard layout)";
         case 33: return "HVX multithread + VTCM";
         default: return "unknown";
@@ -3436,6 +3438,12 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
             GGMLHEXAGON_LOG_DEBUG("MUL_MAT quantized N=%lld <= %d, keep on CPU\n", (long long)n, g_hexagon_appcfg.mulmat_min_n);
             return false;
         }
+    }
+
+    // GEMV offload debugging: when gemv_offload=0, keep N=1 MUL_MAT on CPU
+    if (g_hexagon_appcfg.mulmat_algotype == 29 && g_hexagon_appcfg.gemv_offload == 0 && n == 1) {
+        GGMLHEXAGON_LOG_DEBUG("MUL_MAT N=1 (GEMV): gemv_offload=0, keep on CPU\n");
+        return false;
     }
 
     switch (src0->type) {
