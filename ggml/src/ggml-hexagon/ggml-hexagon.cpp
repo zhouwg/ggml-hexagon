@@ -546,30 +546,29 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
     }
 }
 
-// Dedicated log channel for op-fusion stats. Unlike ggmlhexagon_log_internal:
-//   - always emits regardless of dump_debug_info (op-fusion is a core feature
-//     path, not debug noise)
+// Always-emit log channel. Used by GGMLHEXAGON_LOG_ERROR and
+// GGMLHEXAGON_LOG_ALWAYS (both bypass the log-level filter).
+// Unlike ggmlhexagon_log_internal:
 //   - on Android writes ONLY to logcat (via __android_log_print), never to
-//     stdout, so per-batch stats won't spam the llama-cli console
-//   - on non-Android hosts falls back to stdout to preserve usability
+//     stdout, so per-batch error/always messages won't spam the llama-cli console
+//   - on non-Android hosts falls back to stdout
 static void ggmlhexagon_log_always_internal(const char * file, const char * func, int line, const char * format, ...) {
-    static std::mutex opfusion_log_mutex;
-    static char s_opfusion_log_buf[GGMLHEXAGON_LOGBUF_LEN];
+    static std::mutex s_log_mutex;
+    static char s_log_buf[GGMLHEXAGON_LOGBUF_LEN];
 
     GGML_UNUSED(file);
 
     {
-        std::lock_guard<std::mutex> lock(opfusion_log_mutex);
+        std::lock_guard<std::mutex> lock(s_log_mutex);
         va_list args;
         va_start(args, format);
-        int len_prefix = snprintf(s_opfusion_log_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
-        int len = vsnprintf(s_opfusion_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
+        int len_prefix = snprintf(s_log_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+        int len = vsnprintf(s_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
-            __android_log_print(ANDROID_LOG_INFO, PROJECT_NAME, "%s\n", s_opfusion_log_buf);
+            __android_log_print(ANDROID_LOG_INFO, PROJECT_NAME, "%s\n", s_log_buf);
 #else
-            //for Snapdragon based WoA(Windows on ARM) device or Linux
-            printf("%s\n", s_opfusion_log_buf);
+            printf("%s\n", s_log_buf);
 #endif
         }
         va_end(args);
@@ -596,7 +595,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
 
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     ggmlhexagon_get_timestring(timestamp);
-    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // only support F32, F16, Q4_0 in FastRPC per-op mode
         GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", "F32, F16, Q4_0");
     } else {
         GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
@@ -607,12 +606,20 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("mulmat algo type on CDSP:         %d(%s)", algotype, ggmlhexagon_get_mulmat_algotype_desc(algotype));
     GGMLHEXAGON_LOG_VERBOSE("mulmat min N for DSP offload:     %d", g_hexagon_appcfg.mulmat_min_n);
     GGMLHEXAGON_LOG_VERBOSE("offload cgraph type:              %d", g_hexagon_appcfg.offload_cgraph_type);
+    GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
-    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // FastRPC per-op mode
+    if (NULL != ctx) {
+        GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hmx:                 %d", ctx->has_hmx);
+    }
+    if (2 != g_hexagon_appcfg.offload_cgraph_type) { // only support MUL_MAT in FastRPC per-op mode
         GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", "MUL_MAT");
     } else {
-        GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
+        if (g_hexagon_appcfg.mulmat_algotype == 29) { // 29 = Qualcomm execute_op, all ops are enabled
+            GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", "ALL");
+        } else {
+            GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", g_hexagon_appcfg.enabled_ops.c_str());
+        }
     }
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
@@ -771,8 +778,8 @@ public:
                 }
                 trim(key);
                 trim(value);
-                GGMLHEXAGON_LOG_VERBOSE("key %s value %s\n", key.c_str(), value.c_str());
-                GGMLHEXAGON_LOG_VERBOSE("key %s new value %s\n", key.c_str(), newvalue.c_str());
+                GGMLHEXAGON_LOG_ALWAYS("key %s value %s\n", key.c_str(), value.c_str());
+                GGMLHEXAGON_LOG_ALWAYS("key %s new value %s\n", key.c_str(), newvalue.c_str());
                 backupline = key + " = " + newvalue;
             }
             filedata += backupline;
@@ -917,9 +924,9 @@ static void ggmlhexagon_load_cfg() {
 
     memcpy(g_hexagon_appcfg.version, version.c_str(), strlen(version.c_str()));
 
-    GGMLHEXAGON_LOG_VERBOSE("load hexagon appcfg from %s", cfg_filename.c_str());
-    GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
-    GGMLHEXAGON_LOG_VERBOSE("runtime libpath=%s", g_hexagon_appcfg.runtime_libpath);
+    GGMLHEXAGON_LOG_ALWAYS("load hexagon appcfg from %s", cfg_filename.c_str());
+    GGMLHEXAGON_LOG_ALWAYS("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
+    GGMLHEXAGON_LOG_ALWAYS("runtime libpath=%s", g_hexagon_appcfg.runtime_libpath);
 
     // env var GGML_HEXAGON_NDEV overrides cfg value (for automation/testing)
     const char * str_ndev = getenv("GGML_HEXAGON_NDEV");
@@ -958,9 +965,9 @@ void ggml_backend_hexagon_set_mulmat_algotype(int new_mulmat_algotype) {
         return;
     }
     std::string cfg_filename = std::string(g_hexagon_appcfg.runtime_libpath) + std::string(g_hexagon_appcfg.cfgfilename);
-    GGMLHEXAGON_LOG_VERBOSE("load hexagon appcfg from %s", cfg_filename.c_str());
+    GGMLHEXAGON_LOG_ALWAYS("load hexagon appcfg from %s", cfg_filename.c_str());
     hexagon_appcfg hexagoncfg_instance;
-    GGMLHEXAGON_LOG_VERBOSE("set_hexagon_cfg with new_mulmat_algotype %d", new_mulmat_algotype);
+    GGMLHEXAGON_LOG_ALWAYS("set_hexagon_cfg with new_mulmat_algotype %d", new_mulmat_algotype);
     hexagoncfg_instance.modify_hexagon_config(cfg_filename, new_mulmat_algotype);
     hexagoncfg_instance.load(cfg_filename);
     hexagoncfg_instance.dump([](const std::string & section, const std::string & key, const std::string value) {
@@ -983,8 +990,8 @@ static bool ggmlhexagon_check_valid_appcfg() {
         g_hexagon_appcfg.offload_cgraph_type = 2;
     }
 
-    if (g_hexagon_appcfg.offload_cgraph_type != 2) {
-        if (g_hexagon_appcfg.mulmat_algotype == 29) {
+    if (g_hexagon_appcfg.offload_cgraph_type != 2) { // is not ION-based op-batch
+        if (g_hexagon_appcfg.mulmat_algotype == 29) { // 29 = Qualcomm execute_op
             GGMLHEXAGON_LOG_WARN("mulmat_algotype can't be 29 when offload_cgraph_type !=2");
             g_hexagon_appcfg.mulmat_algotype = 32;
         }
@@ -1059,10 +1066,19 @@ static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
     return false;
 }
 
-// Check if an op is allowed by the enabled_ops config filter
-// Returns true if the op is in the enabled list, or if the list is empty (all ops allowed)
+// Check if an op is allowed by the enabled_ops config filter.
+// Returns true when:
+//   - the op is a metadata op (NONE, NOOP)
+//   - mulmat_algotype == 29 (Qualcomm execute_op forces all ops)
+//   - enabled_ops is empty or contains "all" or the op name
 static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
     if (ggmlhexagon_is_metadata_op(op)) {
+        return true;
+    }
+    if (g_hexagon_appcfg.mulmat_algotype == 29) { // 29 = Qualcomm execute_op
+        if (!g_hexagon_appcfg.enabled_ops.empty()) {
+            GGMLHEXAGON_LOG_DEBUG("enabled_ops config ignored: mulmat_algotype=29 forces all ops");
+        }
         return true;
     }
     if (g_hexagon_appcfg.enabled_ops.empty()) {
@@ -1683,7 +1699,7 @@ static void ggmlhexagon_set_rpc_latency(remote_handle64 handle, int qos, int lat
             GGMLHEXAGON_LOG_WARN("failed with error 0x%x", hexagon_error);
             goto bail;
         } else {
-            GGMLHEXAGON_LOG_VERBOSE("set rpc qos %d (DSP default latency)\n", qos);
+            GGMLHEXAGON_LOG_VERBOSE("set rpc qos %d (DSP default latency)", qos);
         }
     } else {
         hexagon_error = AEE_EUNSUPPORTEDAPI;
@@ -3177,7 +3193,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                                        : (size_t)m * (size_t)k / 2;
             const size_t src1_est    = (size_t)k * (size_t)n * 16;
             if (src0_bytes + src1_est >= vtcm_budget) {
-                GGMLHEXAGON_LOG_DEBUG("MUL_MAT quantized VTCM too small: src0=%zu + src1_est=%zu, budget=%zu\n", src0_bytes, src1_est, vtcm_budget);
+                GGMLHEXAGON_LOG_ALWAYS("MUL_MAT quantized VTCM too small: src0=%zu + src1_est=%zu, budget=%zu\n", src0_bytes, src1_est, vtcm_budget);
                 return false;
             }
 
@@ -4842,7 +4858,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         if (n_rms_norm_mul + n_mul_mat_add + n_mul_mat_qkv + n_mul_mat_ffn > 0) {
-            GGMLHEXAGON_LOG_ALWAYS("op-fusion: %zu ops -> %zu ops (%zu RMS_NORM_MUL, %zu MUL_MAT_ADD, %zu MUL_MAT_QKV, %zu MUL_MAT_FFN)",
+            GGMLHEXAGON_LOG_DEBUG("op-fusion: %zu ops -> %zu ops (%zu RMS_NORM_MUL, %zu MUL_MAT_ADD, %zu MUL_MAT_QKV, %zu MUL_MAT_FFN)",
                                     hex_ops.size(), fused_ops.size(),
                                     n_rms_norm_mul, n_mul_mat_add, n_mul_mat_qkv, n_mul_mat_ffn);
             hex_ops = std::move(fused_ops);
@@ -4859,7 +4875,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->cached_graph.tensor_src = tensor_src;
         ctx->cached_graph.hex_ops    = hex_ops;
         ctx->cached_graph.weight_indices = weight_indices;
-        GGMLHEXAGON_LOG_ALWAYS("graph-cache: MISS uid=%llu, cached %u ops, %u tensors",
+        GGMLHEXAGON_LOG_DEBUG("graph-cache: MISS uid=%llu, cached %u ops, %u tensors",
                               (unsigned long long)cgraph->uid, n_ops, n_tensors);
     }
     }  // end of Phase 1/2/2.5 (else block)
@@ -4990,7 +5006,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
     static std::unordered_map<const void *, uint32_t> g_x4x2_ion_offsets;
     static std::unordered_map<const void *, uint32_t> g_tiled_ion_offsets;
-    if (g_hexagon_appcfg.mulmat_algotype == 30) {
+    if (g_hexagon_appcfg.mulmat_algotype == 30) { // 30 = HMX sync + x4x2 repack
         static std::unordered_set<const void *> g_x4x2_repacked;
         // Clear stale entries from previous graph_compute call.
         // ION regions may have been freed and reused by alloc_buffer,
@@ -5053,7 +5069,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 }
             }
         }
-    } else if (g_hexagon_appcfg.mulmat_algotype == 29) {
+    } else if (g_hexagon_appcfg.mulmat_algotype == 29) { // 29 = Qualcomm execute_op
         // Tile-based repack for Qualcomm HMX kernels (hvx_mm_2d_repacked_*).
         // Qualcomm's execute_op expects Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4 weights in
         // tile-based layout (padded to 32x32 tiles).
@@ -5196,7 +5212,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // to request DSP-side caching (only when cache region is configured)
         // Only applies to mulmat_algotype=32 (HMX with FP16 cache)
         bool is_quant_weight = weight_indices.count(i) && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
-        if (is_quant_weight && ctx->rpc_mempool_cache_offset > 0 && g_hexagon_appcfg.mulmat_algotype == 32) {
+        if (is_quant_weight && ctx->rpc_mempool_cache_offset > 0 && g_hexagon_appcfg.mulmat_algotype == 32) { // 32 = HMX pipeline
             const int32_t M = t->ne[1];  // weight columns
             const int32_t K = t->ne[0];  // inner dimension
             if (K % 32 == 0 && M > 0) {
@@ -5206,7 +5222,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         // x4x2: mark tensor descriptor as x4x2 format and use repacked ION offset
         // (repack done in Phase 4.5, data is in ION mirror or separate ION region)
-        if (is_quant_weight && g_hexagon_appcfg.mulmat_algotype == 30 && t->type == GGML_TYPE_Q4_0) {
+        if (is_quant_weight && g_hexagon_appcfg.mulmat_algotype == 30 && t->type == GGML_TYPE_Q4_0) { // 30 = HMX sync + x4x2 repack
             const int32_t K = t->ne[0];
             if (K % 256 == 0 && K > 0) {
                 td->type = 200;  // GGML_TYPE_Q4_0x4x2
@@ -5220,7 +5236,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         // tiled: update descriptor to match tile-based repacked layout
         // (repack done in Phase 4.5 into a separate ION region)
-        if (is_quant_weight && g_hexagon_appcfg.mulmat_algotype == 29) {
+        if (is_quant_weight && g_hexagon_appcfg.mulmat_algotype == 29) { // 29 = Qualcomm execute_op
             auto it = g_tiled_ion_offsets.find(t->data);
             if (it != g_tiled_ion_offsets.end()) {
                 const int32_t ne0_p = (int32_t)hex_round_up((uint32_t)t->ne[0], 32);

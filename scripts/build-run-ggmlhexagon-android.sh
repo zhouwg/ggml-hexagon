@@ -26,7 +26,7 @@ HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)
 
 VERBOSE=OFF
 VERBOSE=ON
-default_mulmat_algotype=32
+default_mulmat_algotype=29
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
