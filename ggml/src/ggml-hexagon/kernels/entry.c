@@ -71,7 +71,7 @@ void * ggmlop_cache_mempool_alloc(size_t size) {
 //   1 = per-batch release: release after every batch (Qualcomm pattern).
 //       Suitable when batches are large (many ops/batch) and overhead
 //       is amortized. Use after all-ops-offload reduces batch count.
-#define DSP_VTCM_PER_BATCH_RELEASE 0
+#define DSP_VTCM_PER_BATCH_RELEASE 1
 
 // Per-batch VTCM acquire:
 // Called at batch entry. If VTCM is not valid, acquire it via cached API.
@@ -1634,15 +1634,23 @@ AEEResult ggmlop_dsp_execute_batch_bulkflush(remote_handle64 h, uint32_t batch_o
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
          * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
          *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
-         *   stale DSP cache lines and clobber the fresh DRAM data. */
-        ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) {
+         *   stale DSP cache lines and clobber the fresh DRAM data.
+         * - SKIP dcinva for weights (flags==2): repack weights live in
+         *   stable ION regions that are written once at model load and never
+         *   modified. Re-invalidating them every op wastes 1-50us per call
+         *   and adds up to 5-10ms/token over 17 sub-graphs * 24 ops. The
+         *   DSP L2 cache content for these offsets is always the same
+         *   weight bytes, so the read is correct even without invalidation. */
+        if (src0_dt.flags != 2) {
+            ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
+        }
+        if (src1_dt_ptr && src1_dt_buf.flags != 2) {
             ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
         }
-        if (src2_dt_ptr) {
+        if (src2_dt_ptr && src2_dt_buf.flags != 2) {
             ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
         }
-        if (src3_dt_ptr) {
+        if (src3_dt_ptr && src3_dt_buf.flags != 2) {
             ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
         }
 
@@ -2079,15 +2087,15 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Always invalidate, even for weights: ION region reuse means the
-         *   same address may hold different data from a previous allocation
+         * - SKIP dcinva for weights (flags==2): repack weights live in stable
+         *   ION regions written once at model load and never modified.
          * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
          *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
          *   stale DSP cache lines and clobber the fresh DRAM data. */
-        ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
-        if (src2_dt_ptr) ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
-        if (src3_dt_ptr) ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+        if (src0_dt.flags != 2) ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
+        if (src1_dt_ptr && src1_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
+        if (src2_dt_ptr && src2_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
+        if (src3_dt_ptr && src3_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).
