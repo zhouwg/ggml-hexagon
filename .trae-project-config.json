@@ -75,7 +75,7 @@
     },
     "commit_actions": {
       "agent_allowed": ["git status", "git diff", "git log"],
-      "agent_forbidden": ["git add", "git checkout", "git commit", "git push", "gh pr create"],
+      "agent_forbidden": ["git add", "git switch", "git branch -D", "git reset", "git restore", "git clean", "git checkout", "git commit", "git push", "gh pr create"],
       "reason": "Commits and pushes must be explicitly performed by the user. Automated PR submissions may result in contributor ban."
     }
   },
