@@ -21,7 +21,9 @@ REMOTE_PATH=/data/local/tmp
 LOCAL_BUILD_DIR=/tmp/ggmlhexagon-android
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
-TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+#path of toolchain, for purpose of share same toolchain in multiple instance of ggml-hexagon
+#TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+TOOLCHAIN_PATH=/home/zhouwg/develop/ggml-hexagon/prebuilts
 
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
@@ -73,12 +75,18 @@ GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
+#737 MiB
+GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
+
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
-PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
+#PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
+PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
+#unified command-line parameters used during inference testing for fair performance comparison of PP and TG across Qualcomm's ggml-hexagon and JZ's ggml-hexagon
+#running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on"
 
 ######## part-3: utilities and functions ########
 
@@ -362,11 +370,7 @@ function prepare_ggmlhtp()
 {
     echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
 case "$HTP_ARCH_VERSION" in
-    v75)
-        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
-    ;;
-
-    v79)
+    v73 | v75 | v79 | v81)
         adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
     ;;
 
