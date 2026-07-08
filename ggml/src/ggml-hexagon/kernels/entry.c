@@ -16,6 +16,26 @@
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
+// Per-op timing profiler: cumulative us per HTP op kind, indexed by octx->op.
+// Bumped by execute_op() in entry.c, dumped via FARF every N batches inside
+// ggmlop_dsp_execute_batch(). Off by default; enable with -DHEX_OP_PROF=1
+// to avoid disturbing normal log levels.
+#ifndef HEX_OP_PROF_BUCKETS
+#define HEX_OP_PROF_BUCKETS  64
+#endif
+#ifndef HEX_OP_PROF_DUMP_INTERVAL
+#define HEX_OP_PROF_DUMP_INTERVAL 100
+#endif
+static uint64_t g_op_prof_dur_us[HEX_OP_PROF_BUCKETS];
+static uint64_t g_op_prof_count  [HEX_OP_PROF_BUCKETS];
+// Per-call min/max: min is init to UINT64_MAX so the first real call always
+// sets it; max is init to 0 for the symmetric reason. init_op_prof_min()
+// below applies the min init lazily (called from dump_op_prof) so the
+// arrays stay in BSS as plain zero-init globals.
+static uint64_t g_op_prof_min_us[HEX_OP_PROF_BUCKETS];
+static uint64_t g_op_prof_max_us[HEX_OP_PROF_BUCKETS];
+static uint32_t g_op_prof_batch_count;
+
 struct dsp_context *g_dsp_ctx = NULL;
 
 bool ggmlop_is_ion_mode(void) {
@@ -713,22 +733,27 @@ AEEResult ggmlop_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t s
 // htp-ctx.h). We only need this dispatch wrapper + a translation layer.
 // ===========================================================================
 static int execute_op(struct htp_ops_context * octx) {
+    // Per-op profiler: bracket every op kind with ggml_time_us() so the
+    // g_op_prof_* accumulators reflect real kernel time on the DSP side.
+    // Aggregated / dumped by ggmlop_dsp_execute_batch() every N batches.
+    const uint64_t t0 = ggml_time_us();
+    int ret;
     switch (octx->op) {
         case HTP_OP_MUL_MAT:
         case HTP_OP_MUL_MAT_ADD:
-            return op_matmul(octx);
+            ret = op_matmul(octx); break;
         case HTP_OP_MUL_MAT_ID:
-            return op_matmul_id(octx);
+            ret = op_matmul_id(octx); break;
         case HTP_OP_MUL_MAT_QKV:
-            return op_matmul_qkv(octx);
+            ret = op_matmul_qkv(octx); break;
         case HTP_OP_MUL_MAT_FFN:
-            return op_matmul_ffn(octx);
+            ret = op_matmul_ffn(octx); break;
         case HTP_OP_MUL:
         case HTP_OP_ADD:
         case HTP_OP_SUB:
         case HTP_OP_DIV:
         case HTP_OP_ADD_ID:
-            return op_binary(octx);
+            ret = op_binary(octx); break;
         case HTP_OP_NORM:
         case HTP_OP_RMS_NORM:
         case HTP_OP_RMS_NORM_MUL:
@@ -741,54 +766,167 @@ static int execute_op(struct htp_ops_context * octx) {
         case HTP_OP_UNARY_EXP:
         case HTP_OP_UNARY_TANH:
         case HTP_OP_L2_NORM:
-            return op_unary(octx);
+            ret = op_unary(octx); break;
         case HTP_OP_UNARY_SILU:
         case HTP_OP_UNARY_GELU:
         case HTP_OP_GLU_SWIGLU:
         case HTP_OP_GLU_SWIGLU_OAI:
         case HTP_OP_GLU_GEGLU:
-            return op_activations(octx);
+            ret = op_activations(octx); break;
         case HTP_OP_SOFTMAX:
-            return op_softmax(octx);
+            ret = op_softmax(octx); break;
         case HTP_OP_ROPE:
-            return op_rope(octx);
+            ret = op_rope(octx); break;
         case HTP_OP_FLASH_ATTN_EXT:
-            return op_flash_attn_ext(octx);
+            ret = op_flash_attn_ext(octx); break;
         case HTP_OP_SET_ROWS:
-            return op_set_rows(octx);
+            ret = op_set_rows(octx); break;
         case HTP_OP_GET_ROWS:
-            return op_get_rows(octx);
+            ret = op_get_rows(octx); break;
         case HTP_OP_SUM_ROWS:
-            return op_sum_rows(octx);
+            ret = op_sum_rows(octx); break;
         case HTP_OP_CPY:
-            return op_cpy(octx);
+            ret = op_cpy(octx); break;
         case HTP_OP_REPEAT:
-            return op_repeat(octx);
+            ret = op_repeat(octx); break;
         case HTP_OP_ARGSORT:
-            return op_argsort(octx);
+            ret = op_argsort(octx); break;
         case HTP_OP_SSM_CONV:
-            return op_ssm_conv(octx);
+            ret = op_ssm_conv(octx); break;
         case HTP_OP_CUMSUM:
-            return op_cumsum(octx);
+            ret = op_cumsum(octx); break;
         case HTP_OP_FILL:
-            return op_fill(octx);
+            ret = op_fill(octx); break;
         case HTP_OP_DIAG:
-            return op_diag(octx);
+            ret = op_diag(octx); break;
         case HTP_OP_SOLVE_TRI:
-            return op_solve_tri(octx);
+            ret = op_solve_tri(octx); break;
         case HTP_OP_PAD:
-            return op_pad(octx);
+            ret = op_pad(octx); break;
         case HTP_OP_CONCAT:
-            return op_concat(octx);
+            ret = op_concat(octx); break;
         case HTP_OP_GATED_DELTA_NET:
-            return op_gated_delta_net(octx);
+            ret = op_gated_delta_net(octx); break;
         case HTP_OP_TRI:
-            return op_tri(octx);
+            ret = op_tri(octx); break;
         case HTP_OP_INVALID:
-            break;
+            ret = -1; break;
+        default:
+            FARF(ERROR, "Unknown Op %u", octx->op);
+            ret = -1; break;
     }
-    FARF(ERROR, "Unknown Op %u", octx->op);
-    return -1;
+    {
+        const uint64_t dt = ggml_time_us() - t0;
+        const unsigned int op = (unsigned int) octx->op;
+        if (op < HEX_OP_PROF_BUCKETS) {
+            g_op_prof_dur_us[op] += dt;
+            g_op_prof_count  [op] += 1;
+            if (dt > g_op_prof_max_us[op]) g_op_prof_max_us[op] = dt;
+            // min is left at UINT64_MAX by init_op_prof_min() until the first
+            // call lands; once any op has been seen we compare normally.
+            if (dt < g_op_prof_min_us[op]) g_op_prof_min_us[op] = dt;
+        }
+    }
+    return ret;
+}
+
+// Dump per-op timing accumulators via FARF. Best-effort: maps known HTP op
+// codes to short names so the log is readable; unknown indices are emitted
+// as plain numeric IDs. Only buckets that have at least one call are printed,
+// so a single 1-line entry per op kind keeps log volume manageable.
+static const char * htp_op_short_name(unsigned int op) {
+    switch (op) {
+        case HTP_OP_MUL_MAT:         return "MUL_MAT";
+        case HTP_OP_MUL_MAT_ADD:     return "MUL_MAT_ADD";
+        case HTP_OP_MUL_MAT_ID:      return "MUL_MAT_ID";
+        case HTP_OP_MUL_MAT_QKV:     return "MUL_MAT_QKV";
+        case HTP_OP_MUL_MAT_FFN:     return "MUL_MAT_FFN";
+        case HTP_OP_MUL:             return "MUL";
+        case HTP_OP_ADD:             return "ADD";
+        case HTP_OP_SUB:             return "SUB";
+        case HTP_OP_DIV:             return "DIV";
+        case HTP_OP_ADD_ID:          return "ADD_ID";
+        case HTP_OP_NORM:            return "NORM";
+        case HTP_OP_RMS_NORM:        return "RMS_NORM";
+        case HTP_OP_RMS_NORM_MUL:    return "RMS_NORM_MUL";
+        case HTP_OP_SCALE:           return "SCALE";
+        case HTP_OP_SQR:             return "SQR";
+        case HTP_OP_SQRT:            return "SQRT";
+        case HTP_OP_L2_NORM:         return "L2_NORM";
+        case HTP_OP_UNARY_SOFTPLUS:  return "UNARY_SOFTPLUS";
+        case HTP_OP_UNARY_SIGMOID:   return "UNARY_SIGMOID";
+        case HTP_OP_UNARY_NEG:       return "UNARY_NEG";
+        case HTP_OP_UNARY_EXP:       return "UNARY_EXP";
+        case HTP_OP_UNARY_TANH:      return "UNARY_TANH";
+        case HTP_OP_UNARY_SILU:      return "UNARY_SILU";
+        case HTP_OP_UNARY_GELU:      return "UNARY_GELU";
+        case HTP_OP_GLU_SWIGLU:      return "GLU_SWIGLU";
+        case HTP_OP_GLU_SWIGLU_OAI:  return "GLU_SWIGLU_OAI";
+        case HTP_OP_GLU_GEGLU:       return "GLU_GEGLU";
+        case HTP_OP_SOFTMAX:         return "SOFTMAX";
+        case HTP_OP_ROPE:            return "ROPE";
+        case HTP_OP_FLASH_ATTN_EXT:  return "FLASH_ATTN_EXT";
+        case HTP_OP_SET_ROWS:        return "SET_ROWS";
+        case HTP_OP_GET_ROWS:        return "GET_ROWS";
+        case HTP_OP_SUM_ROWS:        return "SUM_ROWS";
+        case HTP_OP_CPY:             return "CPY";
+        case HTP_OP_REPEAT:          return "REPEAT";
+        case HTP_OP_ARGSORT:         return "ARGSORT";
+        case HTP_OP_SSM_CONV:        return "SSM_CONV";
+        case HTP_OP_CUMSUM:          return "CUMSUM";
+        case HTP_OP_FILL:            return "FILL";
+        case HTP_OP_DIAG:            return "DIAG";
+        case HTP_OP_SOLVE_TRI:       return "SOLVE_TRI";
+        case HTP_OP_PAD:             return "PAD";
+        case HTP_OP_CONCAT:          return "CONCAT";
+        case HTP_OP_GATED_DELTA_NET: return "GATED_DELTA_NET";
+        case HTP_OP_TRI:             return "TRI";
+        case HTP_OP_INVALID:         return "INVALID";
+        default:                     return NULL;
+    }
+}
+
+// One-shot init for the per-op profiler: stamp min to UINT64_MAX so the
+// first real call always sets it. Called lazily from dump_op_prof so we
+// don't need a separate init hook in ggmlop_dsp_open. Idempotent.
+static void init_op_prof_min(void) {
+    static int done = 0;
+    if (done) return;
+    for (unsigned int i = 0; i < HEX_OP_PROF_BUCKETS; i++) {
+        g_op_prof_min_us[i] = UINT64_MAX;
+    }
+    done = 1;
+}
+
+static void dump_op_prof(const char * tag) {
+    init_op_prof_min();
+    for (unsigned int i = 0; i < HEX_OP_PROF_BUCKETS; i++) {
+        if (g_op_prof_count[i] == 0) continue;
+        const char * name = htp_op_short_name(i);
+        const uint64_t avg = g_op_prof_dur_us[i] / g_op_prof_count[i];
+        // Pre-format numeric fields via snprintf so the field width is honored
+        // (Hexagon FARF does not implement the width modifier in %9llu, so the
+        // values would print left-justified otherwise). Widths leave headroom:
+        //   cum   -> 10 chars (up to 9_999_999_999 us ~ 2.7h of DSP time)
+        //   count ->  7 chars (up to       9_999_999 calls)
+        //   avg   ->  5 chars (per-op cost is bounded by graph structure)
+        //   min   ->  5 chars
+        //   max   ->  6 chars (handles up to 999_999 us, well above any
+        //                     realistic per-op stall in this profiler)
+        char cum_s[16], cnt_s[16], avg_s[16], min_s[16], max_s[16];
+        snprintf(cum_s, sizeof(cum_s), "%10llu", (unsigned long long)g_op_prof_dur_us[i]);
+        snprintf(cnt_s, sizeof(cnt_s), "%7llu",  (unsigned long long)g_op_prof_count[i]);
+        snprintf(avg_s, sizeof(avg_s), "%5llu",  (unsigned long long)avg);
+        snprintf(min_s, sizeof(min_s), "%5llu",  (unsigned long long)g_op_prof_min_us[i]);
+        snprintf(max_s, sizeof(max_s), "%6llu",  (unsigned long long)g_op_prof_max_us[i]);
+        if (name) {
+            FARF(ALWAYS, "[OP-PROF] %-11s op=%-16s cum=%s us count=%s avg=%s min=%s max=%s us",
+                 tag, name, cum_s, cnt_s, avg_s, min_s, max_s);
+        } else {
+            FARF(ALWAYS, "[OP-PROF] %-11s op=%-3u cum=%s us count=%s avg=%s min=%s max=%s us",
+                 tag, i, cum_s, cnt_s, avg_s, min_s, max_s);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2300,6 +2438,15 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
      * release now so other sessions (QNN/another GGML session) can use VTCM.
      * If not flagged, keep it cached for the next batch (avoids re-acquire). */
     dsp_vtcm_release();
+
+    /* Per-op profiler: print accumulated cum/count/avg every N batches so
+     * log volume stays bounded (one multi-line dump per interval, not per op). */
+    g_op_prof_batch_count++;
+    if ((g_op_prof_batch_count % HEX_OP_PROF_DUMP_INTERVAL) == 0) {
+        char tag[32];
+        snprintf(tag, sizeof(tag), "batch#%u", g_op_prof_batch_count);
+        dump_op_prof(tag);
+    }
 
     return AEE_SUCCESS;
 }
