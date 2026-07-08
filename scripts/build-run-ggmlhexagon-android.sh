@@ -29,7 +29,7 @@ ANDROID_PLATFORM=android-34
 ANDROID_NDK_VERSION=r28
 ANDROID_NDK_NAME=android-ndk-${ANDROID_NDK_VERSION}
 ANDROID_NDK_FULLNAME=${ANDROID_NDK_NAME}-linux.zip
-ANDROID_NDK=${PROJECT_ROOT_PATH}/prebuilts/${ANDROID_NDK_NAME}
+ANDROID_NDK=${TOOLCHAIN_PATH}/${ANDROID_NDK_NAME}
 
 # --- Define NDK paths based on the absolute SDK path ---
 NDK_TOOLCHAIN_SYSROOT_INCLUDE_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include"
@@ -38,7 +38,7 @@ NDK_TOOLCHAIN_SYSROOT_ARM64_LIB_PATH="${ANDROID_NDK}/toolchains/llvm/prebuilt/li
 #OpenCL Headers can be found at:
 #https://https://github.com/KhronosGroup/OpenCL-Headers
 OPENCL_SDK_URL=https://github.com/KhronosGroup/OpenCL-Headers
-OPENCL_SDK_PATH=${PROJECT_ROOT_PATH}/prebuilts/OpenCL_SDK
+OPENCL_SDK_PATH=${TOOLCHAIN_PATH}/OpenCL_SDK
 OPENCL_HEADERS_PATH=${OPENCL_SDK_PATH}/OpenCL-Headers
 
 #fully Qualcomm Hexagon SDK can be found at https://developer.qualcomm.com/software/hexagon-dsp-sdk/tools.
@@ -78,8 +78,7 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 PROMPT_STRING="introduce the movie Once Upon a Time in America briefly.\n"
 
-#running_params=" -ngl 99 -t 6 -n 256 --no-warmup -fa 1 "
-running_params=" -ngl 99 -t 6 -n 256 --no-warmup "
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
 
 ######## part-3: utilities and functions ########
 
@@ -672,6 +671,7 @@ function show_usage()
     echo "Usage:"
     echo "  $0 help"
     echo "  $0 print_oplist"
+    echo "  $0 update_ggml_libs"
     echo "  $0 build"
     echo "  $0 build_debug (enable debug log for developers on ARM-AP side and cDSP side)"
     echo -e "\n"
@@ -710,6 +710,9 @@ elif [ $# == 1 ]; then
         exit 1
     elif [ "$1" == "print_oplist" ]; then
         print_oplist
+        exit 1
+    elif [ "$1" == "update_ggml_libs" ]; then
+        update_ggml_libs
         exit 1
     elif [ "$1" == "build" ]; then
         build_ggml_hexagon
