@@ -2087,15 +2087,22 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
 
         /* Cache maintenance for non-coherent ION memory:
          * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - SKIP dcinva for weights (flags==2): repack weights live in stable
-         *   ION regions written once at model load and never modified.
          * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
          *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
-         *   stale DSP cache lines and clobber the fresh DRAM data. */
-        if (src0_dt.flags != 2) ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr && src1_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
-        if (src2_dt_ptr && src2_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
-        if (src3_dt_ptr && src3_dt_buf.flags != 2) ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+         *   stale DSP cache lines and clobber the fresh DRAM data.
+         * - Unconditional invalidate (no flags==2 skip): the ubatch>=64
+         *   regression at flags==2 was traced to stale L2 lines getting
+         *   clobbered by activation writes; cost is 1-50us/op, safety first. */
+        ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
+        if (src1_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
+        }
+        if (src2_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
+        }
+        if (src3_dt_ptr) {
+            ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
+        }
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).

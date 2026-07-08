@@ -3341,8 +3341,12 @@ finalize:
     kparams->div_r3       = init_fastdiv_values(ne03 > 0 ? (uint32_t)(ne13 / ne03) : 1);
     kparams->div_ne11     = init_fastdiv_values((uint32_t) ne11);
 
-    // Store the computed params for subsequent identical calls (TG hot path).
-    ctx->mm_params_cache[cache_key] = *kparams;
+    // Intended for TG hot path (skip precompute on repeated calls). Disabled:
+    // cache key (src0->data ^ ne11) collides on ION region reuse, returning
+    // stale params. Observed: qwen3 ubatch=64 produced coherent but wrong text
+    // (not caught by <unused> check). Trade-off: TG re-runs precompute/token.
+    // TODO: include ggml_tensor* in key, or track gen counter on ION region.
+    // ctx->mm_params_cache[cache_key] = *kparams;
 }
 
 // =================================================================================================
@@ -5630,6 +5634,45 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         uint32_t data_len;
     };
     std::vector<ion_mirror> mirrors;
+
+#if 0
+    // ---- VERIFY (temporary): dump cgraph structure for first 30 calls ----
+    // Helps diagnose ubatch-related correctness issues by exposing the
+    // actual shape contract that the cgraph provides to Phase 4/4.5/6.
+    static int s_verify_call_count = 0;
+    if (s_verify_call_count < 30) {
+        int vc = s_verify_call_count;
+        GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] n_tensors=%u n_ops=%u cgraph_n_nodes=%d",
+                               vc, n_tensors, n_ops, cgraph->n_nodes);
+        for (uint32_t i = 0; i < n_tensors && i < 64; i++) {
+            ggml_tensor * t = tensor_src[i];
+            if (!t) continue;
+            const char * dp = (const char *)t->data;
+            const char * loc = (dp && dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) ? "ION" : "HEAP";
+            GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] tsrc[%u] type=%d ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%zu loc=%s",
+                                   vc, i, (int)t->type,
+                                   t->ne[0], t->ne[1], t->ne[2], t->ne[3],
+                                   t->nb[0], t->nb[1], t->nb[2], t->nb[3],
+                                   (size_t)ggml_nbytes(t), loc);
+        }
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            ggml_tensor * node = cgraph->nodes[i];
+            if (!node) continue;
+            char srcbuf[320] = {0};
+            int  spos = 0;
+            for (int j = 0; j < GGML_MAX_SRC && node->src[j]; j++) {
+                ggml_tensor * s = node->src[j];
+                spos += snprintf(srcbuf + spos, sizeof(srcbuf) - spos,
+                                 "src%d=[%lld,%lld,%lld,%lld] ", j,
+                                 s->ne[0], s->ne[1], s->ne[2], s->ne[3]);
+            }
+            GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] node[%d] op=%s ne=[%lld,%lld,%lld,%lld] %s",
+                                   vc, i, ggml_op_name(node->op),
+                                   node->ne[0], node->ne[1], node->ne[2], node->ne[3], srcbuf);
+        }
+        s_verify_call_count++;
+    }
+#endif
 
     // Step 1: Collect unique data pointers and max sizes
     struct buffer_mirror_info {
