@@ -678,10 +678,15 @@ function prepare_run_on_phone()
 
     adb shell chmod +x ${REMOTE_PATH}/${program}
 
-    #configuration for cDSP's logcat
+    # configuration for cDSP's logcat
+    # FARF bits: 0x01=LOW 0x02=MEDIUM 0x04=HIGH 0x08=ERROR 0x10=FATAL
+    # 0x1f = ALL (default; chatty: HAP_compute_res logs ~6x per RPC, 26K+/test)
+    # 0x1c = HIGH+ERROR+FATAL (drop LOW+MEDIUM verbose spam; keep diag)
+    # 0x18 = ERROR+FATAL  (only errors)
+    # 0x00 = silent
     adb shell "rm /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
-    adb shell "echo 0x1f > /data/local/tmp/${program}.farf"
+    adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
     #observe cDSP's log with debug build:./scripts/build-run-android.sh build_debug
     #adb logcat  | grep -iE "CDSP0"
 }
