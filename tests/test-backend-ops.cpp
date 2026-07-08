@@ -45,7 +45,6 @@
 #include <vector>
 #include <unordered_map>
 
-#define GGML_USE_HEXAGON 1
 #ifdef GGML_USE_HEXAGON
 #include "ggml-hexagon.h"
 #endif

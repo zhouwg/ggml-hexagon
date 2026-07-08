@@ -86,8 +86,7 @@ HTP_ARCH_VERSIONS="v79"
 #1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 
-#610 MB, download manually
-GGUF_MODEL_NAME=/sdcard/Qwen3-0.6B-Q8_0.gguf
+GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
@@ -99,7 +98,7 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
-#   qwen3   -> Qwen3-0.6B-Q8_0.gguf
+#   qwen3   -> Qwen3.5-2B-Q4_0.gguf
 #   gemma4  -> gemma-4-E2B-it-Q4_0.gguf
 #   qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf
 #   llama3  -> llama-3.2-1B-Q4_0.gguf
@@ -107,7 +106,8 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
-        qwen3)  echo "/sdcard/Qwen3-0.6B-Q8_0.gguf" ;;
+        qwen3)  echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3-mtp)  echo "/sdcard/Qwen3.5-2B-MTP-Q4_0.gguf" ;;
         gemma4) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
         qwen1)  echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
         llama3) echo "/sdcard/llama-3.2-1B-Q4_0.gguf" ;;
@@ -454,6 +454,23 @@ function build_arm64_qcom
 }
 
 
+#build CPU-only reference (no ggml-hexagon, no DSP) for correctness cross-check
+#Usage: build_armcpu
+#Output: out/ggmlhexagon-android-cpu/bin/ with libllama.so, libggml-base.so,
+#        libggml-cpu.so, llama-completion. No libggml-hexagon.so, no DSP skel.
+#Pushes only CPU libs to ${REMOTE_PATH}, overwriting JZ's llama-completion.
+#Run plain 'build' to restore the JZ hexagon build on device.
+function build_armcpu()
+{
+    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_cpu
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=OFF -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=OFF -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    cd ${LOCAL_BUILD_DIR}
+    make -j${HOST_CPU_COUNTS}
+    show_pwd
+}
+
+
 function remove_temp_dir()
 {
     if [ -d ${LOCAL_BUILD_DIR} ]; then
@@ -762,6 +779,131 @@ function run_llamacli_all()
 }
 
 
+function run_ubatchtest()
+{
+    # Sweep --ubatch-size values for a given model + algotype.
+    # Each iteration streams adb output in real-time to terminal + combined log
+    # via tee, and also to a temp file for post-stream parsing.
+    # Usage: run_ubatchtest [model_alias] [algotype] [ubatch_sizes_csv]
+    #   model_alias    default: gemma4
+    #   algotype       default: ${default_mulmat_algotype}
+    #   ubatch_sizes   default: 32,64,128,512,1024 (comma-separated)
+    local model_alias="gemma4"
+    local algotype=${default_mulmat_algotype}
+    local ubatch_sizes=(32 64 128 512 1024)
+    local save_params="${running_params}"
+
+    if [ $# -ge 1 ] && [ "$1" != "help" ] && [ "$1" != "-h" ]; then
+        if [ -n "$(resolve_model_name "$1")" ]; then
+            model_alias="$1"
+        else
+            echo "ERROR: unknown model alias '$1'. Valid: qwen3, gemma4, qwen1, llama3"
+            return 1
+        fi
+    fi
+    if [ $# -ge 2 ]; then
+        algotype=$2
+    fi
+    if [ $# -ge 3 ] && [ -n "$3" ]; then
+        IFS=',' read -ra ubatch_sizes <<< "$3"
+    fi
+
+    local model_path=$(resolve_model_name "${model_alias}")
+    [ -z "${model_path}" ] && { echo "ERROR: bad model"; return 1; }
+
+    mulmat_algotype=${algotype}
+
+    # ensure libs are on phone (idempotent)
+    prepare_run_on_phone llama-completion
+
+    local stamp=$(date +%y%m%d-%H%M%S)
+    local combined_log="ubatchtest_${model_alias}_a${algotype}_${stamp}.log"
+
+    echo "==================================================" | tee "${combined_log}"
+    echo "  ubatch sweep: model=${model_alias} algotype=${algotype}" | tee -a "${combined_log}"
+    echo "  sizes: ${ubatch_sizes[*]}" | tee -a "${combined_log}"
+    echo "  combined log: ${combined_log}" | tee -a "${combined_log}"
+    echo "==================================================" | tee -a "${combined_log}"
+
+    # per-ubatch metrics, accumulated in-memory
+    declare -A pp_tps tg_tps tot_ms graphs unused_cnt
+    local total=${#ubatch_sizes[@]}
+    local count=0
+
+    # temp file for parsing: stream via tee so user sees output in real-time,
+    # then read the temp file after the stream ends to extract metrics
+    local tmpf
+    tmpf=$(mktemp /tmp/ubatchtest.XXXXXX.log)
+    # shellcheck disable=SC2064
+    trap "rm -f '${tmpf}'" RETURN
+
+    # ---------- Phase 1: raw runs (stream to terminal + combined + temp) ----------
+    for ub in "${ubatch_sizes[@]}"; do
+        count=$(( count + 1 ))
+        echo "" | tee -a "${combined_log}"
+        echo "--- [${count}/${total}] ubatch=${ub} ---" | tee -a "${combined_log}"
+
+        # override --ubatch-size: strip old, append new
+        local new_params
+        new_params=$(echo "${save_params}" | sed -E 's/--ubatch-size[[:space:]]+[0-9]+//')
+        new_params="${new_params} --ubatch-size ${ub}"
+        running_params="${new_params}"
+
+        # print the actual command for reproducibility (captured by tee)
+        echo "CMD: cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" | tee -a "${combined_log}"
+
+        # stream adb output in real-time: terminal <- tmpf <- combined_log
+        # First tee writes to tmpf (full capture for later parsing) and forwards to stdout.
+        # Second tee appends to combined_log and forwards to stdout.
+        # Both tees must keep their stdout -> terminal sees the stream live.
+        # Do NOT redirect the second tee's stdout to /dev/null: that would
+        # swallow the terminal stream (the bug we just fixed).
+        adb shell "cd ${REMOTE_PATH} \
+                  && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+                  && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" 2>&1 \
+            | tee "${tmpf}" \
+            | tee -a "${combined_log}"
+
+        # parse from temp file (after stream ends; full content available)
+        # Anchor to "common_perf_print:" prefix to avoid matching model output
+        pp_tps[$ub]=$(grep "common_perf_print:.*prompt eval time" "${tmpf}" | tail -1 \
+            | grep -oE '[0-9.]+ tokens per second' | head -1 | awk '{print $1}')
+        tg_tps[$ub]=$(grep "common_perf_print:.*eval time" "${tmpf}" | grep "runs" | tail -1 \
+            | grep -oE '[0-9.]+ tokens per second' | head -1 | awk '{print $1}')
+        tot_ms[$ub]=$(grep "common_perf_print:.*total time" "${tmpf}" | tail -1 \
+            | sed -E 's/.*=\s*([0-9.]+) ms.*/\1/')
+        unused_cnt[$ub]=$(grep -c '<unused' "${tmpf}")
+        # line format: "...I common_perf_print:    graphs reused =        253"
+        # field 5="reused", field 6="=", field 7="253" -> want $(i+2)
+        graphs[$ub]=$(awk '/common_perf_print:.*graphs reused/ { for (i=1; i<=NF; i++) if ($i == "reused") { print $(i+2); exit } }' "${tmpf}")
+
+        # truncate temp for next iteration (so grep on next ubatch is clean)
+        : > "${tmpf}"
+    done
+
+    # trap will clean up tmpf on function return
+    running_params="${save_params}"
+
+    # ---------- Phase 2: print summary from in-memory arrays ----------
+    echo "" | tee -a "${combined_log}"
+    echo "==================================================" | tee -a "${combined_log}"
+    echo "  SUMMARY (parsed in-place during phase 1)" | tee -a "${combined_log}"
+    echo "==================================================" | tee -a "${combined_log}"
+    printf "%-7s  %-8s  %-8s  %-10s  %-7s  %-7s\n" \
+        "ubatch" "PP_tps" "TG_tps" "total_ms" "unused" "graphs" | tee -a "${combined_log}"
+
+    for ub in "${ubatch_sizes[@]}"; do
+        printf "%-7s  %-8s  %-8s  %-10s  %-7s  %-7s\n" \
+            "${ub}" "${pp_tps[$ub]:-N/A}" "${tg_tps[$ub]:-N/A}" "${tot_ms[$ub]:-N/A}" \
+            "${unused_cnt[$ub]:-0}" "${graphs[$ub]:-N/A}" | tee -a "${combined_log}"
+    done
+
+    echo "==================================================" | tee -a "${combined_log}"
+    echo "  done. combined log: ${combined_log}" | tee -a "${combined_log}"
+    echo "==================================================" | tee -a "${combined_log}"
+}
+
+
 function run_threadsafety()
 {
     prepare_run_on_phone test-thread-safety
@@ -933,6 +1075,7 @@ function show_usage()
     echo "  $0 build (build JZ's ggml-hexagon backend)"
     echo "  $0 build_debug (build JZ's ggml-hexagon backend in debug mode)"
     echo "  $0 build_qcom (build Qualcomm's ggml-hexagon backend for performance comparison)"
+    echo "  $0 build_armcpu (build CPU-only reference for correctness cross-check; overwrites llama-completion on device)"
     echo "  $0 clean"
     echo -e "\n"
     echo "  $0 run_testops    [mulmat_algotype]"
@@ -940,7 +1083,7 @@ function show_usage()
     echo -e "\n"
     echo "  $0 run_llamacli   [model_alias] [mulmat_algotype]"
     echo "  Model aliases for run_llamacli:"
-    echo "    qwen3   -> Qwen3-0.6B-Q8_0.gguf"
+    echo "    qwen3   -> Qwen3.5-2B-Q4_0.gguf"
     echo "    gemma4  -> gemma-4-E2B-it-Q4_0.gguf"
     echo "    qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf"
     echo "    llama3  -> llama-3.2-1B-Q4_0.gguf"
@@ -953,6 +1096,15 @@ function show_usage()
     echo "  $0 run_llamacli_all            # batch test 4 models x 2 algotypes (29,33) = 8 tests"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%y%m%d-%H%M%S).txt"
+    echo -e "\n"
+    echo "  $0 run_ubatchtest  [model_alias] [algotype] [ubatch_csv]"
+    echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
+    echo "    model_alias:  gemma4 (default) | qwen3 | qwen1 | llama3"
+    echo "    algotype:     29 (default) | 33 | 32"
+    echo "    ubatch_csv:   32,64,128,512,1024 (default)"
+    echo "    Examples:"
+    echo "      $0 run_ubatchtest                       # gemma4 + a29 + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3 33 32,128,512   # qwen3 + a33 + 32/128/512"
     echo -e "\n"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
@@ -996,6 +1148,9 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "build_qcom" ]; then
         build_ggml_hexagon_qcom
         exit 0
+    elif [ "$1" == "build_armcpu" ]; then
+        build_armcpu
+        exit 0
     elif [ "$1" == "clean" ]; then
         remove_temp_dir
         exit 0
@@ -1013,6 +1168,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_llamacli_all" ]; then
         run_llamacli_all
+        exit 0
+    elif [ "$1" == "run_ubatchtest" ]; then
+        run_ubatchtest
         exit 0
     else
         show_usage
@@ -1058,6 +1216,9 @@ elif [ $# == 2 ]; then
         mulmat_algotype=${default_mulmat_algotype}
         run_threadsafety
         exit 0
+    elif [ "$1" == "run_ubatchtest" ]; then
+        run_ubatchtest "$2"
+        exit 0
     else
         show_usage
         exit 1
@@ -1084,6 +1245,17 @@ elif [ $# == 3 ]; then
         mulmat_algotype=$3
         check_mulmat_algotype
         run_llamacli "$2"
+        exit 0
+    elif [ "$1" == "run_ubatchtest" ]; then
+        run_ubatchtest "$2" "$3"
+        exit 0
+    else
+        show_usage
+        exit 1
+    fi
+elif [ $# == 4 ]; then
+    if [ "$1" == "run_ubatchtest" ]; then
+        run_ubatchtest "$2" "$3" "$4"
         exit 0
     else
         show_usage
