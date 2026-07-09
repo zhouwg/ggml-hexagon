@@ -76,11 +76,10 @@ function(build_htp_skel V)
     set(HTP_SKELS ${HTP_SKELS} PARENT_SCOPE)
 endfunction()
 
-#build_htp_skel(v73)
+build_htp_skel(v73)
 build_htp_skel(v75)
 build_htp_skel(v79)
-#HEXAGON SDK 6.3.0.0 is required for v81 but skipped in this project due to Qualcomm's IPR policy(Product Kit License Agreement)
-#build_htp_skel(v81)
+build_htp_skel(v81)
 
 # Install Hexagon skels required at runtime
 install(FILES ${HTP_SKELS} TYPE LIB)
