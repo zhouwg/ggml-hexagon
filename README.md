@@ -602,3 +602,28 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
 - [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+
+
+## Branches
+
+- master
+  https://github.com/zhouwg/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
+- self-build
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build, the default branch in this llama.cpp-derived project, the official ggml-hexagon backend can be found in this branch.
+- self-build-jz
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the development branch of jz's ggml-hexagon backend in this llama.cpp-derived project, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
+
+## Why jz's ggml-hexagon backend is still meaningful?
+- The implementation of the prebuilt libggmldsp-skel.so is complicated&dirty(I ported a fully ggml-dsp to Qualcomm's NPU side and supports fully quantized&none-quantized mulmat op, theoretically supports all ggml ops), so the open-source code of libggmldsp-skel.so can be found in JZ's ggml-hexagon.
+- [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
+- Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a concise&efficient solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native/pure FastRPC mechanism</b>, this concise solution will also reduce FastRPC overhead observably. Now we know [how to use Qualcomm's HMX(Hexagon Matrix eXtension) instructions in ggml correctly](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/ggml/src/ggml-hexagon/kernels/test-hmx.c), we can find that the performance of PP(Prompt Processing) in Qualcomm's official ggml-hexagon backend is <b>much faster</b> than the performance of PP in JZ's ggml-hexagonbackend <b>at the moment</b>, but I have confidence that the performance of PP&TG in JZ's ggml-hexagon will be faster in the future, AI experts and domain tech experts' help/effort based on branch self-build-jz is greatly welcomed.
+- AI large model company can use the self-build-jz branch for real testing instead of just running benchmarks if any AI large model company thinks their AI model is really good.
+
+
+## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
+
+Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)
+
+## How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon
+
+Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)

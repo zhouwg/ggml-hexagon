@@ -10,7 +10,7 @@
 #
 # 2. build&verify llama.cpp + Qualcomm's ggml-hexagon backend(libggml-htp.so) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
 #
 # Jeff Zhou - zhouwg2000@gmail.com
 # GitHub:   - https://github.com/zhouwg/ggml-hexagon
@@ -34,7 +34,7 @@ REMOTE_PATH=/data/local/tmp
 #path of built artifacts
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
-#path of toolchain, for purpose of share same toolchain in multiple instance of JZ's ggml-hexagon
+#path of toolchain, for purpose of share same toolchain in multiple instance of ggml-hexagon
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
 #TOOLCHAIN_PATH=/home/zhouwg/develop/ggml-hexagon/prebuilts
 
@@ -64,6 +64,7 @@ HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}
 HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSION}
 
 #supported htp arch version:
+#v73 --- Snapdragon 8 Gen2
 #v75 --- Snapdragon 8 Gen3
 #v79 --- Snapdragon 8 Elite(aka 8 Gen4)
 #v81 --- Snapdragon 8 Elite Gen5(aka 8 Gen5)
@@ -77,7 +78,7 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSI
 HTP_ARCH_VERSION=v79
 HTP_ARCH_VERSION_a=V79
 #all DSP skel versions to build and deploy (AP-side lib built once with HTP_ARCH_VERSION, extra DSP skels built via make)
-#HTP_ARCH_VERSIONS="v75 v79 v81"
+#HTP_ARCH_VERSIONS="v73 v75 v79 v81"
 HTP_ARCH_VERSIONS="v79"
 
 ######## part-2: prompt and LLM models ########
@@ -86,11 +87,13 @@ HTP_ARCH_VERSIONS="v79"
 #1.12 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
 
+#1.2 GiB
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
 #1.2 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 
+#737 MiB
 GGUF_MODEL_NAME=/sdcard/llama-3.2-1B-Q4_0.gguf
 
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
@@ -98,36 +101,29 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
-#   qwen3   -> Qwen3.5-2B-Q4_0.gguf
-#   gemma4  -> gemma-4-E2B-it-Q4_0.gguf
-#   qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf
-#   llama3  -> llama-3.2-1B-Q4_0.gguf
-#   (default) -> gemma-4-E2B-it-Q4_0.gguf
+#   qwen3       -> Qwen3.5-2B-Q4_0.gguf
+#   qwen3-mtp   -> Qwen3.5-2B-MTP-Q4_0.gguf
+#   gemma4      -> gemma-4-E2B-it-Q4_0.gguf
+#   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
+#   llama3      -> llama-3.2-1B-Q4_0.gguf
+#   (default)   -> gemma-4-E2B-it-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
-        qwen3)  echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3)      echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
         qwen3-mtp)  echo "/sdcard/Qwen3.5-2B-MTP-Q4_0.gguf" ;;
-        gemma4) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
-        qwen1)  echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
-        llama3) echo "/sdcard/llama-3.2-1B-Q4_0.gguf" ;;
-        *)      echo "" ; return 1 ;;
+        gemma4)     echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        qwen1)      echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
+        llama3)     echo "/sdcard/llama-3.2-1B-Q4_0.gguf" ;;
+        *)          echo "" ; return 1 ;;
     esac
 }
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
+#unified command-line parameters used during inference testing for fair performance comparison of PP and TG across Qualcomm's ggml-hexagon and JZ's ggml-hexagon
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-#running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
-# Qualcomm recommended (docs/backend/snapdragon/developer.md): --ctx-size 8192
-# Note: -ctk q8_0 -ctv q8_0 causes garbled output with our FLASH_ATTN_EXT
-# --ubatch-size 32 caps PP batch so MUL_MAT passes mulmat_min_n=30 check at
-# graph compute time (actual n=32 > 30). Graph build calls supports_op with
-# max ubatch=512; VTCM fit is decided later by ggml_hexagon_ion_precompute_mm_params
-# (4-level fallback: tiled -> n_prefetch 16/8/4/2 -> flat DDR kernel). Raise
-# if PP throughput matters (n=64/128/256 also pass; n<=30 stays on CPU).
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 32 --poll 1000 --no-warmup --no-mmap -fa on"
-#running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --device Hexagon-cDSP0,Hexagon-cDSP1"
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on"
 
 ######## part-3: utilities and functions ########
 
@@ -383,6 +379,7 @@ function build_extra_dsp_skels()
 }
 
 
+#build JZ's ggml-hexagon backend for performance comparison
 function build_arm64
 {
     build_idl
@@ -403,6 +400,7 @@ function build_arm64
 }
 
 
+#build JZ's ggml-hexagon backend in debug mode
 function build_arm64_debug
 {
     build_idl
@@ -454,12 +452,7 @@ function build_arm64_qcom
 }
 
 
-#build CPU-only reference (no ggml-hexagon, no DSP) for correctness cross-check
-#Usage: build_armcpu
-#Output: out/ggmlhexagon-android-cpu/bin/ with libllama.so, libggml-base.so,
-#        libggml-cpu.so, llama-completion. No libggml-hexagon.so, no DSP skel.
-#Pushes only CPU libs to ${REMOTE_PATH}, overwriting JZ's llama-completion.
-#Run plain 'build' to restore the JZ hexagon build on device.
+#build Android CPU-only reference (no ggml-hexagon) for correctness check and troubleshooting trick issues
 function build_armcpu()
 {
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_cpu
@@ -527,11 +520,7 @@ function prepare_ggmlhtp()
 {
     echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
 case "$HTP_ARCH_VERSION" in
-    v75)
-        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
-    ;;
-
-    v79)
+    v73 | v75 | v79 | v81)
         adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
     ;;
 
@@ -751,9 +740,8 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("gemma4" "qwen3" "qwen1" "llama3")
-    #local algotypes=(29 30 32)
-    local algotypes=(29 33)
+    local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    local algotypes=(29 32)
 
     local total=$(( ${#models[@]} * ${#algotypes[@]} ))
     local count=0
@@ -781,13 +769,11 @@ function run_llamacli_all()
 
 function run_ubatchtest()
 {
-    # Sweep --ubatch-size values for a given model + algotype.
-    # Each iteration streams adb output in real-time to terminal + combined log
-    # via tee, and also to a temp file for post-stream parsing.
+    # Update ubatch-size values for a given model + algotype.
     # Usage: run_ubatchtest [model_alias] [algotype] [ubatch_sizes_csv]
     #   model_alias    default: gemma4
     #   algotype       default: ${default_mulmat_algotype}
-    #   ubatch_sizes   default: 32,64,128,512,1024 (comma-separated)
+    #   ubatch_sizes   default: 32,64,128,512,1024
     local model_alias="gemma4"
     local algotype=${default_mulmat_algotype}
     local ubatch_sizes=(32 64 128 512 1024)
@@ -813,10 +799,10 @@ function run_ubatchtest()
 
     mulmat_algotype=${algotype}
 
-    # ensure libs are on phone (idempotent)
+    # ensure libs are on phone
     prepare_run_on_phone llama-completion
 
-    local stamp=$(date +%y%m%d-%H%M%S)
+    local stamp=$(date +%Y%m%d-%H%M%S)
     local combined_log="ubatchtest_${model_alias}_a${algotype}_${stamp}.log"
 
     echo "==================================================" | tee "${combined_log}"
@@ -1066,49 +1052,50 @@ echo ${oplist}
 
 function show_usage()
 {
-    echo -e "\n\n\n"
+    echo -e "\n"
     echo "Usage:"
     echo "  $0 help"
     echo "  $0 print_oplist"
     echo "  $0 update_ggml_libs"
-    echo -e "\n"
-    echo "  $0 build (build JZ's ggml-hexagon backend)"
-    echo "  $0 build_debug (build JZ's ggml-hexagon backend in debug mode)"
-    echo "  $0 build_qcom (build Qualcomm's ggml-hexagon backend for performance comparison)"
-    echo "  $0 build_armcpu (build CPU-only reference for correctness cross-check; overwrites llama-completion on device)"
+
+    echo "  $0 build        (build JZ's ggml-hexagon backend)"
+    echo "  $0 build_debug  (build JZ's ggml-hexagon backend in debug mode)"
+    echo "  $0 build_qcom   (build Qualcomm's ggml-hexagon backend for performance comparison)"
+    echo "  $0 build_armcpu (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
-    echo -e "\n"
+
     echo "  $0 run_testops    [mulmat_algotype]"
+    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
+    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
     echo "  $0 run_llamabench [mulmat_algotype]"
+
+    echo "  $0 run_llamacli_all     (batch test 5 models x 2 algotypes (29,32) = 10 tests)"
+    echo "    Log capture example:"
+    echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
+
     echo "  $0 run_llamacli   [model_alias] [mulmat_algotype]"
     echo "  Model aliases for run_llamacli:"
-    echo "    qwen3   -> Qwen3.5-2B-Q4_0.gguf"
-    echo "    gemma4  -> gemma-4-E2B-it-Q4_0.gguf"
-    echo "    qwen1   -> qwen1_5-1_8b-chat-q4_0.gguf"
-    echo "    llama3  -> llama-3.2-1B-Q4_0.gguf"
-    echo "    (default) -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
+    echo "    qwen3-mtp     -> Qwen3.5-2B-MTP-Q4_0.gguf"
+    echo "    gemma4        -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
+    echo "    llama3        -> llama-3.2-1B-Q4_0.gguf"
+    echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli qwen3        # test qwen3 with default algotype"
     echo "    $0 run_llamacli qwen3 32     # test qwen3 with algotype=32 (HMX pipeline)"
     echo "    $0 run_llamacli gemma4 29    # test gemma4 with algotype=29 (Qualcomm execute_op)"
     echo -e "\n"
-    echo "  $0 run_llamacli_all            # batch test 4 models x 2 algotypes (29,33) = 8 tests"
-    echo "    Log capture example:"
-    echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%y%m%d-%H%M%S).txt"
-    echo -e "\n"
+
     echo "  $0 run_ubatchtest  [model_alias] [algotype] [ubatch_csv]"
     echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
     echo "    model_alias:  gemma4 (default) | qwen3 | qwen1 | llama3"
-    echo "    algotype:     29 (default) | 33 | 32"
+    echo "    algotype:     29 (default) | 32"
     echo "    ubatch_csv:   32,64,128,512,1024 (default)"
     echo "    Examples:"
     echo "      $0 run_ubatchtest                       # gemma4 + a29 + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3 33 32,128,512   # qwen3 + a33 + 32/128/512"
-    echo -e "\n"
-    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
-    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
-    echo -e "\n\n\n"
+    echo "      $0 run_ubatchtest qwen3 32 32,128,512   # qwen3  + a32 + 32/128/512"
 }
 
 

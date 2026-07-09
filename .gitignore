@@ -154,11 +154,7 @@ a.out.*
 AGENTS.local.md
 .pi/SYSTEM.md
 
-# for ggml-backend-jz
-prebuilts/QNN_SDK/
-prebuilts/Hexagon_SDK/
-prebuilts/OpenCL_SDK/
-prebuilts/Vulkan_SDK/
+# for jz's ggml-hexagon
 prebuilts/
 CMakeUserPresets.json
 ggml/src/ggml-hexagon/kernels/ggmlop.h
@@ -166,7 +162,12 @@ ggml/src/ggml-hexagon/kernels/ggmlop_skel.c
 ggml/src/ggml-hexagon/kernels/ggmlop_stub.c
 x86-build/
 refs/
-*.me
+.ccache/
 .ccache_qcom/
+.ccache_cpu/
 tags
+*.me
 *.bk
+log*.txt
+log*.log
+ubatchtest_*.log
