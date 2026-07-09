@@ -55,6 +55,40 @@ static uint64_t g_op_prof_min_us[HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_max_us[HEX_OP_PROF_BUCKETS];
 static uint32_t g_op_prof_batch_count;
 
+// Per-weight-region first-touch invalidate tracking.
+// Repack weights (flags==2) live in stable ION regions that AP writes
+// once at model load and never touches again, so DSP can cache them in
+// L2 for the entire session after a single first-touch invalidate.
+// The bitmap is indexed by (ION_ptr >> 6) so each bit covers one 64B
+// cache line. 16K bits = 1024 unique 64B-aligned weight cache lines
+// worth of tracking (~2KB). False positives only lead to one extra
+// "skip" (skip = "L2 has fresh data"), which is always safe for
+// read-only repack weights.
+#define WEIGHT_INVAL_MAP_BITS  16384
+static uint64_t g_weight_inval_seen[(WEIGHT_INVAL_MAP_BITS + 63) / 64];
+
+static inline uint32_t weight_inval_slot(const void * ptr) {
+    uintptr_t v = (uintptr_t)ptr;
+    v >>= 6;  // 64B cache line granularity
+    return (uint32_t)(v & (WEIGHT_INVAL_MAP_BITS - 1));
+}
+
+static inline bool weight_inval_check_and_mark(const void * ptr) {
+    uint32_t slot = weight_inval_slot(ptr);
+    uint32_t word = slot >> 6;
+    uint32_t bit  = slot & 63;
+    uint64_t mask = (uint64_t)1 << bit;
+    bool already = (g_weight_inval_seen[word] & mask) != 0;
+    g_weight_inval_seen[word] |= mask;
+    return already;  // true => already seen, can skip invalidate
+}
+
+static inline void weight_inval_reset_all(void) {
+    for (uint32_t i = 0; i < sizeof(g_weight_inval_seen)/sizeof(g_weight_inval_seen[0]); i++) {
+        g_weight_inval_seen[i] = 0;
+    }
+}
+
 struct dsp_context *g_dsp_ctx = NULL;
 
 bool ggmlop_is_ion_mode(void) {
@@ -282,6 +316,11 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     qurt_mutex_init((qurt_mutex_t *)&ctx->work_mutex);
     g_dsp_ctx = ctx;
     *handle = (remote_handle64)ctx;
+    // Reset first-touch invalidate bitmap so a fresh session starts with
+    // no weight regions marked. The bitmap is session-scoped: AP will
+    // re-mirror weights at model load and their ION offsets are stable
+    // for the lifetime of this session.
+    weight_inval_reset_all();
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
 
     unsigned int api_version = qurt_api_version();
@@ -2247,19 +2286,32 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
          * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
          *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
          *   stale DSP cache lines and clobber the fresh DRAM data.
-         * - Unconditional invalidate (no flags==2 skip): the ubatch>=64
-         *   regression at flags==2 was traced to stale L2 lines getting
-         *   clobbered by activation writes; cost is 1-50us/op, safety first. */
-        ggmlop_dsp_cache_inval_range(src0_dt.data, src0_dt.data_len);
-        if (src1_dt_ptr) {
-            ggmlop_dsp_cache_inval_range(src1_dt_buf.data, src1_dt_buf.data_len);
-        }
-        if (src2_dt_ptr) {
-            ggmlop_dsp_cache_inval_range(src2_dt_buf.data, src2_dt_buf.data_len);
-        }
-        if (src3_dt_ptr) {
-            ggmlop_dsp_cache_inval_range(src3_dt_buf.data, src3_dt_buf.data_len);
-        }
+         * - Repack weights (flags==2): first-touch invalidate only. After the
+         *   first invalidate, the L2 line is fresh and never changes (AP
+         *   does not rewrite weights), so subsequent ops can skip. A bitmap
+         *   keyed by ION ptr tracks which (data,len) regions have been
+         *   invalidated this session. ubatch>=64 stays correct because
+         *   activation paths (flags!=2) still invalidate every op.
+         * - Activations (flags!=2): always invalidate. AP may rewrite the
+         *   same ION offset between sub-graphs (in-place KV/scores), and
+         *   DSP's own prior dst writes don't go to DRAM, so L2 cannot
+         *   safely skip without per-region gen tracking (future work). */
+#define INVAL_SRC_IF_NEEDED(dt_ptr, dt_buf) do {                                 \
+    if (dt_ptr) {                                                                \
+        if ((dt_buf).flags == 2) {                                               \
+            if (!weight_inval_check_and_mark((dt_buf).data)) {                  \
+                ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);  \
+            }                                                                    \
+        } else {                                                                 \
+            ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);      \
+        }                                                                        \
+    }                                                                            \
+} while (0)
+        INVAL_SRC_IF_NEEDED(&src0_dt, src0_dt);
+        INVAL_SRC_IF_NEEDED(src1_dt_ptr, src1_dt_buf);
+        INVAL_SRC_IF_NEEDED(src2_dt_ptr, src2_dt_buf);
+        INVAL_SRC_IF_NEEDED(src3_dt_ptr, src3_dt_buf);
+#undef INVAL_SRC_IF_NEEDED
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from src0 data (AFTER dcinva).
