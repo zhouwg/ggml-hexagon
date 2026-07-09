@@ -622,38 +622,8 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 
 ## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
 
-```
-$ git checkout self-build-jz
-$ ./scripts/build-run-android.sh build
-$ ./scripts/build-run-android.sh run_testops
-$ ./scripts/build-run-android.sh run_llamabench
-$ ./scripts/build-run-android.sh run_llamacli
+Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)
 
-```
+## How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon
 
-
-the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build) and <b>can't be reproduced</b> in (remote) branch self-build-jz because local branch self-build-jz is under active development.
-
-<img width="1912" height="869" alt="Screenshot from 2026-06-29 22-49-31" src="https://github.com/user-attachments/assets/4a9cfb8f-20d6-455c-a9a4-99647c820868" />
-
-## How to build the official ggml-hexagon backend for Snapdragon-based Android device
-
-[The official approach to build llama.cpp + ggml-hexagon for a Snapdragon-based Android device](https://github.com/zhouwg/ggml-hexagon/blob/master/docs/backend/snapdragon/README.md) is using the toolchain Docker image (see github.com/snapdragon-toolchain). I don't think it's a straight way, the simple way in this llama.cpp-derived project:
-
-```
-$ git checkout self-build
-$ ./scripts/build-run-android.sh build
-$ ./scripts/build-run-android.sh run_testops
-$ ./scripts/build-run-android.sh run_llamabench
-$ ./scripts/build-run-android.sh run_llamacli
-
-```
-
-the following screenshot <b>can be reproduced</b> in branch self-build.
-
-<img width="1727" height="599" alt="Screenshot from 2026-06-30 12-45-57" src="https://github.com/user-attachments/assets/93ab11e3-5b1c-4af1-8636-af5513ab9c7b" />
-
-
-the following screenshot was created on 2026-06-29 in local branch self-build-jz(via build_qcom)and <b>can be reproduced</b> in branch self-build-jz. I have to say that Qualcomm has a world-class engineering team and has a lot of world-class tech experts, the PP performance of Qualcomm's ggml-hexagon is really awesome.
-
-<img width="1688" height="595" alt="Screenshot from 2026-06-29 17-12-12" src="https://github.com/user-attachments/assets/52b54fa7-9b46-47da-b6c2-41e81940c4f5" />
+Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)
