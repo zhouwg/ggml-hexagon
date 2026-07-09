@@ -89,6 +89,138 @@ static inline void weight_inval_reset_all(void) {
     }
 }
 
+/* DSP-side cache optimization: prior_dst tracking (bit 1) + bulk flush (bit 2).
+ *
+ * Both are gated by g_dsp_ctx->dsp_cache_mode and operate on per-batch state.
+ * They use simple range lists (no hash bitmap) to avoid the ptr-based hash
+ * collision bug from the earlier commit that caused qwen3 garbled output.
+ *
+ * - bit 1 (skip dcinva for prior dst): when the next op's src range is fully
+ *   contained in a dst range of an earlier op in the same batch, skip dcinva
+ *   because the L2 "modified" line is fresh (DSP's own write). The per-op
+ *   dst tracker populates the prior_dst list only when bit 2 is on, so
+ *   bit 1 alone is a no-op (a cfg comment in ggml-hexagon.cfg covers this).
+ * - bit 2 (bulk dst flush at batch end): collect all dst ranges during the
+ *   op loop, sort + merge adjacent/overlapping ranges at batch end, then
+ *   call ggmlop_dsp_cache_flush_range() once per merged region. Replaces
+ *   per-op flush with fewer but larger flushes. prior_dst is also updated
+ *   when bit 2 is on, regardless of bit 1.
+ *
+ * State is reset at the start of every batch (next batch sees empty lists).
+ * Both lists are sized for the worst case: 256 ops/batch * 4 dst/op.
+ * Hexagon batch path is single-threaded (one FastRPC call drives one batch),
+ * so static globals are safe.
+ *
+ * bit 0 (first-touch weight bitmap) is a separate mechanism; see
+ * weight_inval_check_and_mark() and INVAL_SRC_IF_NEEDED(). It is session-
+ * scoped (bitmap never reset) because repack weights are stable ION regions
+ * written once at model load.
+ */
+#define DSP_OPT_MAX_BATCH_DSTS  (256 * 4)  /* 256 ops * HTP_OP_MAX_OUTPUTS */
+
+typedef struct {
+    void * base;
+    size_t len;
+} dsp_dst_range_t;
+
+static dsp_dst_range_t g_prior_dst_ranges[DSP_OPT_MAX_BATCH_DSTS];
+static int             g_prior_dst_count;
+
+static dsp_dst_range_t g_bulk_flush_ranges[DSP_OPT_MAX_BATCH_DSTS];
+static int             g_bulk_flush_count;
+
+/* True iff [q_base, q_base+q_len) is fully contained in [r_base, r_base+r_len). */
+static inline bool dsp_range_contains(const void * r_base, size_t r_len,
+                                      const void * q_base, size_t q_len) {
+    if (!r_base || !q_base || q_len == 0) return false;
+    uintptr_t rb = (uintptr_t)r_base;
+    uintptr_t re = rb + r_len;
+    uintptr_t qb = (uintptr_t)q_base;
+    uintptr_t qe = qb + q_len;
+    return (qb >= rb) && (qe <= re);
+}
+
+static inline bool prior_dst_contains_src(const void * base, size_t len) {
+    if (!base) return false;
+    for (int i = 0; i < g_prior_dst_count; i++) {
+        if (dsp_range_contains(g_prior_dst_ranges[i].base, g_prior_dst_ranges[i].len,
+                               base, len)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline void prior_dst_add(void * base, size_t len) {
+    if (!base || len == 0) return;
+    if (g_prior_dst_count >= DSP_OPT_MAX_BATCH_DSTS) return;  /* overflow guard */
+    g_prior_dst_ranges[g_prior_dst_count].base = base;
+    g_prior_dst_ranges[g_prior_dst_count].len  = len;
+    g_prior_dst_count++;
+}
+
+static inline void bulk_flush_add(void * base, size_t len) {
+    if (!base || len == 0) return;
+    if (g_bulk_flush_count >= DSP_OPT_MAX_BATCH_DSTS) {
+        /* Overflow: fall back to immediate per-range flush for THIS dst only
+         * (degraded perf, but correctness preserved). */
+        ggmlop_dsp_cache_flush_range(base, len);
+        return;
+    }
+    g_bulk_flush_ranges[g_bulk_flush_count].base = base;
+    g_bulk_flush_ranges[g_bulk_flush_count].len  = len;
+    g_bulk_flush_count++;
+}
+
+static inline void prior_dst_reset_all(void) {
+    g_prior_dst_count = 0;
+}
+
+static inline void bulk_flush_reset_all(void) {
+    g_bulk_flush_count = 0;
+}
+
+/* Insertion sort (small N typical for batch dst list: 30-50 dsts).
+ * Avoids libc qsort dependency and works on 32-bit pointers. */
+static inline void bulk_flush_sort(void) {
+    for (int i = 1; i < g_bulk_flush_count; i++) {
+        dsp_dst_range_t cur = g_bulk_flush_ranges[i];
+        int j = i - 1;
+        while (j >= 0 &&
+               (uintptr_t)g_bulk_flush_ranges[j].base > (uintptr_t)cur.base) {
+            g_bulk_flush_ranges[j + 1] = g_bulk_flush_ranges[j];
+            j--;
+        }
+        g_bulk_flush_ranges[j + 1] = cur;
+    }
+}
+
+/* Walk sorted list, merge adjacent/overlapping ranges, flush each merged
+ * region once. Overlap defined as next_start <= cur_end (1B threshold:
+ * touching ranges merge). Flushes in sorted order to preserve ION ordering. */
+static inline void bulk_flush_all(void) {
+    if (g_bulk_flush_count == 0) return;
+    bulk_flush_sort();
+    void * cur_base = g_bulk_flush_ranges[0].base;
+    uintptr_t cur_end = (uintptr_t)cur_base + g_bulk_flush_ranges[0].len;
+    int i = 1;
+    while (i < g_bulk_flush_count) {
+        void * next_base = g_bulk_flush_ranges[i].base;
+        uintptr_t next_end = (uintptr_t)next_base + g_bulk_flush_ranges[i].len;
+        if ((uintptr_t)next_base <= cur_end) {
+            /* Overlap or adjacent: extend current region */
+            if (next_end > cur_end) cur_end = next_end;
+        } else {
+            /* Gap: flush [cur_base, cur_end) and start new region */
+            ggmlop_dsp_cache_flush_range(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+            cur_base = next_base;
+            cur_end  = next_end;
+        }
+        i++;
+    }
+    ggmlop_dsp_cache_flush_range(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+}
+
 struct dsp_context *g_dsp_ctx = NULL;
 
 bool ggmlop_is_ion_mode(void) {
@@ -321,6 +453,12 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     // re-mirror weights at model load and their ION offsets are stable
     // for the lifetime of this session.
     weight_inval_reset_all();
+    // Default to 0: no DSP-side cache optimizations beyond the baseline
+    // first-touch weight bitmap. AP will push the configured bitmask via
+    // execute_batch(0xFFFC) right after ggmlop_dsp_open returns. Until then,
+    // every code path that consults dsp_cache_mode sees 0 and behaves like
+    // baseline 29c1cf196.
+    g_dsp_ctx->dsp_cache_mode = 0;
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
 
     unsigned int api_version = qurt_api_version();
@@ -748,7 +886,7 @@ AEEResult ggmlop_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 of
 
     hap_probe_dsp(handle);
 
-    set_power_boost(handle, 1);
+    // set_power_boost(handle, 1);   // disabled: continuous boost triggers SoC thermal throttling, hurts long-run stability
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
     return AEE_SUCCESS;
@@ -1693,6 +1831,28 @@ AEEResult ggmlop_dsp_execute_batch_bulkflush(remote_handle64 h, uint32_t batch_o
         return AEE_SUCCESS;
     }
 
+    /* dsp_cache_mode config mode: batch_size == 0xFFFC, batch_offset = bitmask.
+     * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
+     *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
+     *               dcinva for repack weights (flags==2) once invalidated.
+     *   bit 1 (0x2): skip dcinva for prior dst     - INVAL_SRC_IF_NEEDED skips
+     *               dcinva for activations (flags!=2) when [base,base+len) is
+     *               fully contained in a dst range that DSP wrote earlier in
+     *               this batch. Only effective when bit 2 is also on (the
+     *               per-op dst tracker populates the prior_dst list).
+     *   bit 2 (0x4): bulk dst flush at batch end  - per-op flush is suppressed;
+     *               dst ranges are collected/sort/merged/flushed once after
+     *               the per-op loop. */
+    if (batch_size == 0xFFFC) {
+        g_dsp_ctx->dsp_cache_mode = batch_offset;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d)",
+                             g_dsp_ctx->dsp_cache_mode,
+                             (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
+                             (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
+                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0);
+        return AEE_SUCCESS;
+    }
+
     /* Normal batch execution */
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
@@ -2156,6 +2316,28 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         return AEE_SUCCESS;
     }
 
+    /* dsp_cache_mode config mode: batch_size == 0xFFFC, batch_offset = bitmask.
+     * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
+     *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
+     *               dcinva for repack weights (flags==2) once invalidated.
+     *   bit 1 (0x2): skip dcinva for prior dst     - INVAL_SRC_IF_NEEDED skips
+     *               dcinva for activations (flags!=2) when [base,base+len) is
+     *               fully contained in a dst range that DSP wrote earlier in
+     *               this batch. Only effective when bit 2 is also on (the
+     *               per-op dst tracker populates the prior_dst list).
+     *   bit 2 (0x4): bulk dst flush at batch end  - per-op flush is suppressed;
+     *               dst ranges are collected/sort/merged/flushed once after
+     *               the per-op loop. */
+    if (batch_size == 0xFFFC) {
+        g_dsp_ctx->dsp_cache_mode = batch_offset;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d)",
+                             g_dsp_ctx->dsp_cache_mode,
+                             (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
+                             (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
+                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0);
+        return AEE_SUCCESS;
+    }
+
     /* Normal batch execution */
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
@@ -2183,6 +2365,20 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     }
 
     GGMLHEXAGON_LOG_INFO("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+
+    /* Reset per-batch dst trackers.
+     *  - prior_dst_ranges is consulted by bit 1; the per-op dst tracker
+     *    populates it when bit 2 is on. Resetting on bit 1 OR bit 2 keeps
+     *    the list clean even if bit 1 is enabled without bit 2.
+     *  - bulk_flush_ranges is populated only when bit 2 is on, but the
+     *    list itself is harmless when empty (bulk_flush_all() early-returns
+     *    if count==0). */
+    if (g_dsp_ctx->dsp_cache_mode & (0x2 | 0x4)) {
+        prior_dst_reset_all();
+    }
+    if (g_dsp_ctx->dsp_cache_mode & 0x4) {
+        bulk_flush_reset_all();
+    }
 
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
@@ -2281,31 +2477,50 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             dst_dt_ptrs[k] = &dst_dt_buf[k];
         }
 
-        /* Cache maintenance for non-coherent ION memory:
-         * - Invalidate DSP cache before reading src (AP wrote data into ION)
-         * - Use dcinva (invalidate only), not dccleaninva: AP already flushed
-         *   fresh src to DRAM via DC CVAC, so dccleaninva would write back
-         *   stale DSP cache lines and clobber the fresh DRAM data.
-         * - Repack weights (flags==2): first-touch invalidate only. After the
-         *   first invalidate, the L2 line is fresh and never changes (AP
-         *   does not rewrite weights), so subsequent ops can skip. A bitmap
-         *   keyed by ION ptr tracks which (data,len) regions have been
-         *   invalidated this session. ubatch>=64 stays correct because
-         *   activation paths (flags!=2) still invalidate every op.
-         * - Activations (flags!=2): always invalidate. AP may rewrite the
-         *   same ION offset between sub-graphs (in-place KV/scores), and
-         *   DSP's own prior dst writes don't go to DRAM, so L2 cannot
-         *   safely skip without per-region gen tracking (future work). */
-#define INVAL_SRC_IF_NEEDED(dt_ptr, dt_buf) do {                                 \
-    if (dt_ptr) {                                                                \
-        if ((dt_buf).flags == 2) {                                               \
-            if (!weight_inval_check_and_mark((dt_buf).data)) {                  \
-                ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);  \
-            }                                                                    \
-        } else {                                                                 \
-            ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);      \
-        }                                                                        \
-    }                                                                            \
+        /* Cache maintenance for non-coherent ION memory.
+         *
+         * The three optimizations are independent bit-gated by g_dsp_ctx->dsp_cache_mode:
+         *   bit 0 (0x1): first-touch weight bitmap (flags==2)
+         *   bit 1 (0x2): skip dcinva for prior dst     (flags!=2)
+         *   bit 2 (0x4): bulk dst flush at batch end   (per-op flush is suppressed)
+         *
+         * When bit 0 is OFF, weights (flags==2) are unconditionally invalidated -
+         * same behavior as baseline pre-commit-1.
+         * When bit 1 is OFF, activations (flags!=2) are unconditionally invalidated.
+         * When bit 2 is OFF, per-op dst flush runs (baseline), and prior_dst
+         * tracking is not performed - meaning bit 1 alone has no effect because
+         * the prior_dst list stays empty.
+         *
+         * bits 0 / 1 / 2 do NOT conflict with each other; flipping any subset is safe. */
+#define INVAL_SRC_IF_NEEDED(dt_ptr, dt_buf) do {                                       \
+    if (dt_ptr) {                                                                      \
+        if ((dt_buf).flags == 2) {                                                     \
+            /* bit 0: first-touch weight bitmap.                                       \
+             *  ON  : use bitmap; skip dcinva if this weight range was invalidated     \
+             *         earlier in this session. L2 line is fresh because weights are  \
+             *         written once at model load and never re-touched.                 \
+             *  OFF : always dcinva (baseline). */                                     \
+            if ((g_dsp_ctx->dsp_cache_mode & 0x1) &&                                   \
+                weight_inval_check_and_mark((dt_buf).data)) {                          \
+                /* already invalidated this session */                                 \
+            } else {                                                                   \
+                ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);        \
+            }                                                                          \
+        } else {                                                                       \
+            /* bit 1: skip dcinva for prior dst.                                       \
+             *  ON  : if [data, data+len) is fully contained in any dst range DSP     \
+             *         wrote earlier in THIS batch, the L2 "modified" line is fresh;  \
+             *         skip dcinva. The per-op dst tracker is populated only when    \
+             *         bit 2 is also on, so bit 1 without bit 2 is a no-op.            \
+             *  OFF : always dcinva (baseline). */                                     \
+            if ((g_dsp_ctx->dsp_cache_mode & 0x2) &&                                   \
+                prior_dst_contains_src((dt_buf).data, (dt_buf).data_len)) {            \
+                /* DSP wrote this range as dst earlier in batch */                     \
+            } else {                                                                   \
+                ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);        \
+            }                                                                          \
+        }                                                                              \
+    }                                                                                  \
 } while (0)
         INVAL_SRC_IF_NEEDED(&src0_dt, src0_dt);
         INVAL_SRC_IF_NEEDED(src1_dt_ptr, src1_dt_buf);
@@ -2358,8 +2573,20 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
                 return AEE_EFAILED;
             }
 
-            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
-            ggmlop_dsp_cache_flush_range(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
+            GGMLHEXAGON_LOG_INFO("ion-batch: op %u done", i);
+            /* bit 2: bulk dst flush at batch end.
+             *  ON  : skip per-op flush; collect [data, len) into bulk_flush_ranges
+             *         and prior_dst_ranges. bulk_flush_all() is called once after
+             *         the per-op loop (see below). prior_dst is also populated
+             *         unconditionally when bit 2 is on, so a later op's src can
+             *         skip dcinva (relies on bit 1 too).
+             *  OFF : per-op flush (baseline). */
+            if (g_dsp_ctx->dsp_cache_mode & 0x4) {
+                prior_dst_add(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
+                bulk_flush_add(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
+            } else {
+                ggmlop_dsp_cache_flush_range(dst_dt_buf[0].data, dst_dt_buf[0].data_len);
+            }
             continue;
         }
 
@@ -2473,13 +2700,22 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
             return AEE_EFAILED;
         }
 
-        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done, flushing %zuB", i, dst_dt_buf[0].data_len);
+        GGMLHEXAGON_LOG_INFO("ion-batch: op %u done", i);
 
-        /* Flush DSP cache after writing dst (so AP can read from DRAM).
-         * For multi-output ops (QKV/FFN fusion), flush all non-NULL dsts. */
+        /* bit 2: bulk dst flush at batch end.
+         *  ON  : skip per-op flush for every non-NULL dst; collect into
+         *         bulk_flush_ranges + prior_dst_ranges. bulk_flush_all() runs
+         *         once after the per-op loop. Multi-output ops (QKV/FFN
+         *         fusion) flush all non-NULL dsts in a single batched call.
+         *  OFF : per-op flush (baseline, one flush per non-NULL dst per op). */
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
             if (dst_dt_ptrs[k]) {
-                ggmlop_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                if (g_dsp_ctx->dsp_cache_mode & 0x4) {
+                    prior_dst_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                    bulk_flush_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                } else {
+                    ggmlop_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                }
             }
         }
 
@@ -2496,6 +2732,13 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
     }
 
     GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done", hdr->n_ops);
+
+    /* bit 2: bulk dst flush. Sort + merge collected ranges, then flush once
+     * per merged region. Flushes happen here (after all ops in the batch
+     * finished) so AP reads see fresh DRAM. */
+    if (g_dsp_ctx->dsp_cache_mode & 0x4) {
+        bulk_flush_all();
+    }
 
     __asm__ __volatile__("" ::: "memory");
     if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {

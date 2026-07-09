@@ -402,6 +402,13 @@ struct hexagon_appcfg_t {
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int gemv_offload;           // 1=offload GEMV (N=1) to DSP (default, current behavior), 0=keep GEMV on CPU (for debugging)
+    int dsp_cache_mode;         // DSP-side entry.c cache optimization bitmask, pushed to DSP at init via
+                                //   execute_batch(0xFFFC) special mode (no IDL change). All three bits
+                                //   are wired into ggmlop_dsp_execute_batch(); dsp_cache_mode=0 is
+                                //   behaviorally identical to baseline 29c1cf196.
+                                //   bit 0 (0x1): first-touch weight bitmap
+                                //   bit 1 (0x2): skip dcinva for prior dst
+                                //   bit 2 (0x4): bulk dst flush at batch end
 
     const char * cfgfilename;
     const char * runtime_libpath;
@@ -423,6 +430,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .enable_opfusion        = 1,
         .fa_select              = 2,
         .gemv_offload           = 1,
+        .dsp_cache_mode         = 7,  // default: all three DSP-side cache opts on
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
@@ -702,9 +710,12 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("thread_counts on CDSP:            %d", g_hexagon_appcfg.thread_counts);
     int algotype = g_hexagon_appcfg.mulmat_algotype;
     GGMLHEXAGON_LOG_VERBOSE("mulmat algo type on CDSP:         %d(%s)", algotype, ggmlhexagon_get_mulmat_algotype_desc(algotype));
-    GGMLHEXAGON_LOG_VERBOSE("mulmat min N for DSP offload:     %d", g_hexagon_appcfg.mulmat_min_n);
+    if (algotype != 29) {  // algotype=29 forces all MUL_MAT to DSP; mulmat_min_n only applies to other algotypes
+        GGMLHEXAGON_LOG_VERBOSE("mulmat min N for DSP offload:     %d", g_hexagon_appcfg.mulmat_min_n);
+    }
     GGMLHEXAGON_LOG_VERBOSE("offload cgraph type:              %d", g_hexagon_appcfg.offload_cgraph_type);
     GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
+    GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
     if (NULL != ctx) {
@@ -1103,6 +1114,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "enable_opfusion", g_hexagon_appcfg.enable_opfusion, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "fa_select", g_hexagon_appcfg.fa_select, 2);
     hexagoncfg_instance.get_intvalue("cdsp", "gemv_offload", g_hexagon_appcfg.gemv_offload, 1);
+    hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 7);
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
 
@@ -2507,6 +2519,26 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
             GGMLHEXAGON_LOG_INFO("failed to init rpc mempool");
             goto bail;
+        }
+        // Push DSP-side cache optimization bitmask via execute_batch(0xFFFC)
+        // special mode (no IDL change). batch_offset = bitmask, batch_size = mode tag.
+        // All three bits are wired into ggmlop_dsp_execute_batch(); see the
+        // dsp_cache_mode comment in hexagon_appcfg_t.
+        //
+        // Note: must run AFTER ggmlhexagon_init_rpcmempool(). The DSP-side
+        // 0xFFFC handler in entry.c asserts ion_dsp_base != NULL; without the
+        // mempool registered first it returns AEE_EBADPARM (0x8000040e) and
+        // the bitmask is silently dropped.
+        {
+            const uint32_t opts = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0x7u;
+            int opts_err = ggmlop_dsp_execute_batch(ctx->ggmlop_handle, opts, 0xFFFC);
+            if (AEE_SUCCESS != opts_err) {
+                GGMLHEXAGON_LOG_WARN("set dsp_cache_mode=0x%x failed: 0x%x (DSP-side optimizations disabled)",
+                                     opts, opts_err);
+                g_hexagon_appcfg.dsp_cache_mode = 0;  // fall back to baseline
+            } else {
+                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x pushed to DSP (bit0=first-touch-weight, bit1=skip-prior-dst, bit2=bulk-dst-flush)", opts);
+            }
         }
     } else {
         GGMLHEXAGON_LOG_INFO("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,

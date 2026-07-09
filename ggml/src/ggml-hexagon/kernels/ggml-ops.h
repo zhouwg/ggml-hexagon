@@ -138,6 +138,16 @@ struct dsp_context {
     size_t ion_cache_size;
     size_t ion_cache_offset;
 
+    // DSP-side entry.c cache optimization bitmask. Pushed by AP at init via
+    // execute_batch(0xFFFC) special mode (no IDL change). All three bits are
+    // wired into ggmlop_dsp_execute_batch(); dsp_cache_mode=0 is behaviorally
+    // identical to baseline 29c1cf196.
+    //   bit 0 (0x1): first-touch weight bitmap    - skip dcinva for repack weights (flags==2) after first access
+    //   bit 1 (0x2): skip dcinva for prior dst     - DSP's own dst writes stay in L2; next op's src read skips dcinva
+    //   bit 2 (0x4): bulk dst flush at batch end   - collect/sort/merge dst ranges, flush once per region
+    //   bit 3..31  : reserved for future use
+    uint32_t dsp_cache_mode;
+
     // htp_context for calling Qualcomm's execute_op.
     struct htp_context * htp_ctx;
 };
