@@ -88,6 +88,40 @@
 #include "htp/matmul-ops.h"
 #include "htp/flash-attn-ops.h"
 
+// Adapters for the old htp_mm_hvx vtcm_sizes API that was replaced by
+// htp_mm_hvx_vtcm_layout_build in upstream htp/matmul-ops.h.
+static inline size_t htp_mm_hvx_get_vtcm_sizes(
+    int kernel_type, int wtype, uint32_t ne10, uint32_t src1_nrows,
+    uint32_t n_threads,
+    size_t dst_row_size, size_t src0_row_size, size_t src1_row_size,
+    uint32_t n_prefetch,
+    size_t * vtcm_src0_size, size_t * vtcm_src1_size, size_t * vtcm_dst_size
+) {
+    struct htp_mm_hvx_vtcm_layout L;
+    htp_mm_hvx_vtcm_layout_build(&L, kernel_type, wtype, ne10, src1_nrows, n_threads,
+                                 dst_row_size, src0_row_size, src1_row_size, n_prefetch,
+                                 false, false, false);
+    *vtcm_src0_size = L.src0_bytes;
+    *vtcm_src1_size = L.src1_bytes;
+    *vtcm_dst_size  = L.dst_bytes;
+    return L.total_bytes;
+}
+
+static inline size_t htp_mm_hvx_id_get_vtcm_sizes(
+    int wtype, uint32_t ne10, uint32_t src1_nrows, uint32_t n_threads,
+    size_t src0_row_size, uint32_t n_prefetch,
+    size_t * vtcm_src0_size, size_t * vtcm_src1_size, size_t * vtcm_dst_size
+) {
+    struct htp_mm_hvx_vtcm_layout L;
+    htp_mm_hvx_vtcm_layout_build(&L, 0, wtype, ne10, src1_nrows, n_threads,
+                                 0, src0_row_size, 0, n_prefetch,
+                                 true, false, false);
+    *vtcm_src0_size = L.src0_bytes;
+    *vtcm_src1_size = L.src1_bytes;
+    *vtcm_dst_size  = L.dst_bytes;
+    return L.total_bytes;
+}
+
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
 // =================================================================================================
@@ -761,36 +795,42 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     if (ctx->perf_hist_count > 0) {
         int64_t mn, p50, p95, mx;
         const int n = ctx->perf_hist_count;
-        GGMLHEXAGON_LOG_VERBOSE("---- per-call distribution over last %d calls (us) ----", n);
-        #define DUMP_PHASE_HIST(NAME, ARR) do { \
+        GGMLHEXAGON_LOG_ALWAYS("---- per-call distribution over last %d calls (us) ----", n);
+
+        #define DUMP_PHASE_HIST(NAME, ARR, IS_FORGROUND_LOG) do { \
             ggmlhexagon_compute_hist_stats((ARR), n, mn, p50, p95, mx); \
-            GGMLHEXAGON_LOG_VERBOSE("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
-                (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
+            if (IS_FORGROUND_LOG) { \
+                GGMLHEXAGON_LOG_VERBOSE("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
+                    (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
+            } else { \
+                GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
+                    (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
+            } \
         } while (0)
-        DUMP_PHASE_HIST("p1",   ctx->p1_hist);
-        DUMP_PHASE_HIST("p2",   ctx->p2_hist);
-        DUMP_PHASE_HIST("p2.5", ctx->p25_hist);
-        DUMP_PHASE_HIST("p3",   ctx->p3_hist);
-        DUMP_PHASE_HIST("p4",   ctx->p4_hist);
-        DUMP_PHASE_HIST("p4.5", ctx->p45_hist);
-        DUMP_PHASE_HIST("p5",   ctx->p5_hist);
-        DUMP_PHASE_HIST("p6",   ctx->p6_hist);
-        DUMP_PHASE_HIST("p6.5", ctx->p65_hist);
-        DUMP_PHASE_HIST("p7",   ctx->p7_hist);
-        DUMP_PHASE_HIST("p7.5", ctx->p75_hist);
-        DUMP_PHASE_HIST("p8",   ctx->p8_hist);
-        DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist);
-        DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist);
-        DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist);
-        DUMP_PHASE_HIST("graph", ctx->graph_us_hist);
-        DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist);
+        DUMP_PHASE_HIST("p1",   ctx->p1_hist,   false);
+        DUMP_PHASE_HIST("p2",   ctx->p2_hist,   false);
+        DUMP_PHASE_HIST("p2.5", ctx->p25_hist,  false);
+        DUMP_PHASE_HIST("p3",   ctx->p3_hist,   false);
+        DUMP_PHASE_HIST("p4",   ctx->p4_hist,   false);
+        DUMP_PHASE_HIST("p4.5", ctx->p45_hist,  false);
+        DUMP_PHASE_HIST("p5",   ctx->p5_hist,   false);
+        DUMP_PHASE_HIST("p6",   ctx->p6_hist,   false);
+        DUMP_PHASE_HIST("p6.5", ctx->p65_hist,  false);
+        DUMP_PHASE_HIST("p7",   ctx->p7_hist,   false);
+        DUMP_PHASE_HIST("p7.5", ctx->p75_hist,  false);
+        DUMP_PHASE_HIST("p8",   ctx->p8_hist,   false);
+        DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist, true);
+        DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist, true);
+        DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist, true);
+        DUMP_PHASE_HIST("graph", ctx->graph_us_hist, true);
+        DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist, true);
         #undef DUMP_PHASE_HIST
         // n_nodes / n_ops are int32_t in ctx, use the i32 variant
         ggmlhexagon_compute_hist_stats_i32(ctx->n_nodes_hist, n, mn, p50, p95, mx);
-        GGMLHEXAGON_LOG_VERBOSE("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
+        GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
             "n_node", (long long)mn, (long long)p50, (long long)p95, (long long)mx);
         ggmlhexagon_compute_hist_stats_i32(ctx->n_ops_hist, n, mn, p50, p95, mx);
-        GGMLHEXAGON_LOG_VERBOSE("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
+        GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
             "n_ops",  (long long)mn, (long long)p50, (long long)p95, (long long)mx);
     }
 }
@@ -2601,10 +2641,10 @@ static bool ggml_hexagon_compute_fa_params(
     kparams->u.hvx.size_v_row_padded = hex_round_up((uint32_t)(v->ne[0] * 2), 128);
     kparams->u.hvx.src0_div21     = init_fastdiv_values((uint32_t)(q->ne[2] * q->ne[1]));
     kparams->u.hvx.src0_div1      = init_fastdiv_values((uint32_t) q->ne[1]);
-    kparams->u.hvx.broadcast_rk2   = init_fastdiv_values((uint32_t)(q->ne[2] / k->ne[2]));
-    kparams->u.hvx.broadcast_rk3   = init_fastdiv_values((uint32_t)(q->ne[3] / k->ne[3]));
-    kparams->u.hvx.broadcast_rv2   = init_fastdiv_values((uint32_t)(q->ne[2] / v->ne[2]));
-    kparams->u.hvx.broadcast_rv3   = init_fastdiv_values((uint32_t)(q->ne[3] / v->ne[3]));
+    kparams->broadcast_rk2   = init_fastdiv_values((uint32_t)(q->ne[2] / k->ne[2]));
+    kparams->broadcast_rk3   = init_fastdiv_values((uint32_t)(q->ne[3] / k->ne[3]));
+    kparams->broadcast_rv2   = init_fastdiv_values((uint32_t)(q->ne[2] / v->ne[2]));
+    kparams->broadcast_rv3   = init_fastdiv_values((uint32_t)(q->ne[3] / v->ne[3]));
     if (mask) {
         kparams->src3_div2 = init_fastdiv_values((uint32_t) mask->ne[2]);
         kparams->src3_div3 = init_fastdiv_values((uint32_t) mask->ne[3]);

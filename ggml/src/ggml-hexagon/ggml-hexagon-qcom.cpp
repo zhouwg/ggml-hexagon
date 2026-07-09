@@ -4337,4 +4337,11 @@ ggml_backend_reg_t ggml_backend_hexagon_reg(void) {
     return &reg;
 }
 
+int ggml_backend_hexagon_get_mulmat_algotype() {
+    return 29;
+}
+
+void ggml_backend_hexagon_set_mulmat_algotype(int new_mulmat_algotype) {
+}
+
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)

@@ -13,6 +13,25 @@
 #include "../htp/matmul-ops.h"
 #include "../htp/flash-attn-ops.h"
 
+// Adapters for the old htp_mm_hvx vtcm_sizes API that was replaced by
+// htp_mm_hvx_vtcm_layout_build in upstream htp/matmul-ops.h.
+static inline size_t htp_mm_hvx_get_vtcm_sizes(
+    int kernel_type, int wtype, uint32_t ne10, uint32_t src1_nrows,
+    uint32_t n_threads,
+    size_t dst_row_size, size_t src0_row_size, size_t src1_row_size,
+    uint32_t n_prefetch,
+    size_t * vtcm_src0_size, size_t * vtcm_src1_size, size_t * vtcm_dst_size
+) {
+    struct htp_mm_hvx_vtcm_layout L;
+    htp_mm_hvx_vtcm_layout_build(&L, kernel_type, wtype, ne10, src1_nrows, n_threads,
+                                 dst_row_size, src0_row_size, src1_row_size, n_prefetch,
+                                 false, false, false);
+    *vtcm_src0_size = L.src0_bytes;
+    *vtcm_src1_size = L.src1_bytes;
+    *vtcm_dst_size  = L.dst_bytes;
+    return L.total_bytes;
+}
+
 #define MAX_WORK_SIZE                       (1024 * 1024 * 1024)
 #define DEFAULT_VTCM_SIZE                   (8 * 1024 * 1024)
 
@@ -1450,10 +1469,10 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     kparams->u.hvx.size_v_row_padded = hex_round_up(v->ne[0] * 2, 128);
     kparams->u.hvx.src0_div21     = init_fastdiv_values(q->ne[2] * q->ne[1]);
     kparams->u.hvx.src0_div1      = init_fastdiv_values(q->ne[1]);
-    kparams->u.hvx.broadcast_rk2   = init_fastdiv_values(q->ne[2] / k->ne[2]);
-    kparams->u.hvx.broadcast_rk3   = init_fastdiv_values(q->ne[3] / k->ne[3]);
-    kparams->u.hvx.broadcast_rv2   = init_fastdiv_values(q->ne[2] / v->ne[2]);
-    kparams->u.hvx.broadcast_rv3   = init_fastdiv_values(q->ne[3] / v->ne[3]);
+    kparams->broadcast_rk2   = init_fastdiv_values(q->ne[2] / k->ne[2]);
+    kparams->broadcast_rk3   = init_fastdiv_values(q->ne[3] / k->ne[3]);
+    kparams->broadcast_rv2   = init_fastdiv_values(q->ne[2] / v->ne[2]);
+    kparams->broadcast_rv3   = init_fastdiv_values(q->ne[3] / v->ne[3]);
     if (mask) {
         kparams->src3_div2 = init_fastdiv_values(mask->ne[2]);
         kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
