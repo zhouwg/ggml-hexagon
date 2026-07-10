@@ -148,6 +148,18 @@ struct dsp_context {
     //   bit 3..31  : reserved for future use
     uint32_t dsp_cache_mode;
 
+    // DSP-side bit 0 (first-touch weight bitmap) trace enable. Pushed by AP at
+    // init via the same execute_batch(0xFFFC) special mode as dsp_cache_mode
+    // (bit 16 of the same payload word, so the special-mode encoding is
+    //   payload = (dsp_cache_trace_bit0 << 16) | (dsp_cache_mode & 0x7u)
+    // ). When non-zero, INVAL_SRC_IF_NEEDED emits one [DSP-CACHE-TRACE-BIT0]
+    // log line per bit 0 decision (SKIP or INVAL), with op index, src index,
+    // weight address, weight length, current ctx id, and qurt_timer tick count.
+    // Default 0 (off) so production perf is unaffected. Set to 1 only when
+    // diagnosing the bit 0 stale L2 read bug (llama3 33% prompt-repeat rate
+    // observed 2026-07-10). Once the bug is root-caused this can be removed.
+    uint32_t dsp_cache_trace_bit0;
+
     // htp_context for calling Qualcomm's execute_op.
     struct htp_context * htp_ctx;
 };

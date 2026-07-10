@@ -459,6 +459,7 @@ int ggmlop_dsp_open(const char * uri, remote_handle64 * handle) {
     // every code path that consults dsp_cache_mode sees 0 and behaves like
     // baseline 29c1cf196.
     g_dsp_ctx->dsp_cache_mode = 0;
+    g_dsp_ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
 
     unsigned int api_version = qurt_api_version();
@@ -1831,7 +1832,9 @@ AEEResult ggmlop_dsp_execute_batch_bulkflush(remote_handle64 h, uint32_t batch_o
         return AEE_SUCCESS;
     }
 
-    /* dsp_cache_mode config mode: batch_size == 0xFFFC, batch_offset = bitmask.
+    /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
+     *   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
+     *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
      *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
      *               dcinva for repack weights (flags==2) once invalidated.
@@ -1844,12 +1847,14 @@ AEEResult ggmlop_dsp_execute_batch_bulkflush(remote_handle64 h, uint32_t batch_o
      *               dst ranges are collected/sort/merged/flushed once after
      *               the per-op loop. */
     if (batch_size == 0xFFFC) {
-        g_dsp_ctx->dsp_cache_mode = batch_offset;
-        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d)",
+        g_dsp_ctx->dsp_cache_mode = batch_offset & 0x7u;
+        g_dsp_ctx->dsp_cache_trace_bit0 = (batch_offset >> 16) & 0x1u;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d) dsp_cache_trace_bit0=%d",
                              g_dsp_ctx->dsp_cache_mode,
                              (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
-                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0);
+                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0,
+                             g_dsp_ctx->dsp_cache_trace_bit0);
         return AEE_SUCCESS;
     }
 
@@ -2316,7 +2321,9 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         return AEE_SUCCESS;
     }
 
-    /* dsp_cache_mode config mode: batch_size == 0xFFFC, batch_offset = bitmask.
+    /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
+     *   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
+     *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
      *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
      *               dcinva for repack weights (flags==2) once invalidated.
@@ -2329,12 +2336,14 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
      *               dst ranges are collected/sort/merged/flushed once after
      *               the per-op loop. */
     if (batch_size == 0xFFFC) {
-        g_dsp_ctx->dsp_cache_mode = batch_offset;
-        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d)",
+        g_dsp_ctx->dsp_cache_mode = batch_offset & 0x7u;
+        g_dsp_ctx->dsp_cache_trace_bit0 = (batch_offset >> 16) & 0x1u;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d) dsp_cache_trace_bit0=%d",
                              g_dsp_ctx->dsp_cache_mode,
                              (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
-                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0);
+                             (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0,
+                             g_dsp_ctx->dsp_cache_trace_bit0);
         return AEE_SUCCESS;
     }
 
@@ -2480,31 +2489,49 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         /* Cache maintenance for non-coherent ION memory.
          *
          * The three optimizations are independent bit-gated by g_dsp_ctx->dsp_cache_mode:
-         *   bit 0 (0x1): first-touch weight bitmap (flags==2)
-         *   bit 1 (0x2): skip dcinva for prior dst     (flags!=2)
+         *   bit 0 (0x1): first-touch weight bitmap (flags & 0x2)
+         *   bit 1 (0x2): skip dcinva for prior dst     (flags & 0x2 == 0)
          *   bit 2 (0x4): bulk dst flush at batch end   (per-op flush is suppressed)
          *
-         * When bit 0 is OFF, weights (flags==2) are unconditionally invalidated -
+         * When bit 0 is OFF, weights (flags & 0x2) are unconditionally invalidated -
          * same behavior as baseline pre-commit-1.
-         * When bit 1 is OFF, activations (flags!=2) are unconditionally invalidated.
+         * When bit 1 is OFF, activations (flags & 0x2 == 0) are unconditionally invalidated.
          * When bit 2 is OFF, per-op dst flush runs (baseline), and prior_dst
          * tracking is not performed - meaning bit 1 alone has no effect because
          * the prior_dst list stays empty.
          *
-         * bits 0 / 1 / 2 do NOT conflict with each other; flipping any subset is safe. */
-#define INVAL_SRC_IF_NEEDED(dt_ptr, dt_buf) do {                                       \
+         * td->flags encoding (independent bits, see ggml-hexagon.cpp):
+         *   bit 0 (0x1): mirrored (heap tensor redirected to ION mirror, or
+         *               repacked weight redirected to tiled ION offset)
+         *   bit 1 (0x2): weight (read-only quantized weight tensor, stable
+         *               for the entire session; safe to skip dcinva after
+         *               first invalidation)
+         * A tensor can have both bits set (e.g. tiled repacked weight = 0x3).
+         *
+         * bits 0 / 1 / 2 of dsp_cache_mode do NOT conflict with each other;
+         * flipping any subset is safe. */
+#define INVAL_SRC_IF_NEEDED(src_idx, dt_ptr, dt_buf) do {                                       \
     if (dt_ptr) {                                                                      \
-        if ((dt_buf).flags == 2) {                                                     \
+        if ((dt_buf).flags & 0x2) {                                                    \
             /* bit 0: first-touch weight bitmap.                                       \
              *  ON  : use bitmap; skip dcinva if this weight range was invalidated     \
              *         earlier in this session. L2 line is fresh because weights are  \
              *         written once at model load and never re-touched.                 \
              *  OFF : always dcinva (baseline). */                                     \
+            bool _already_inval = false;                                               \
             if ((g_dsp_ctx->dsp_cache_mode & 0x1) &&                                   \
-                weight_inval_check_and_mark((dt_buf).data)) {                          \
+                (_already_inval = weight_inval_check_and_mark((dt_buf).data))) {       \
                 /* already invalidated this session */                                 \
+                if (g_dsp_ctx->dsp_cache_trace_bit0) {                                \
+                    GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT0] op=%u src=%d SKIP ptr=%p len=0x%x (cache_mode=0x%x)", \
+                                         i, (int)(src_idx), (dt_buf).data, (dt_buf).data_len, g_dsp_ctx->dsp_cache_mode); \
+                }                                                                       \
             } else {                                                                   \
                 ggmlop_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);        \
+                if (g_dsp_ctx->dsp_cache_trace_bit0) {                                \
+                    GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT0] op=%u src=%d INVAL ptr=%p len=0x%x (cache_mode=0x%x)", \
+                                         i, (int)(src_idx), (dt_buf).data, (dt_buf).data_len, g_dsp_ctx->dsp_cache_mode); \
+                }                                                                       \
             }                                                                          \
         } else {                                                                       \
             /* bit 1: skip dcinva for prior dst.                                       \
@@ -2522,10 +2549,10 @@ AEEResult ggmlop_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uin
         }                                                                              \
     }                                                                                  \
 } while (0)
-        INVAL_SRC_IF_NEEDED(&src0_dt, src0_dt);
-        INVAL_SRC_IF_NEEDED(src1_dt_ptr, src1_dt_buf);
-        INVAL_SRC_IF_NEEDED(src2_dt_ptr, src2_dt_buf);
-        INVAL_SRC_IF_NEEDED(src3_dt_ptr, src3_dt_buf);
+        INVAL_SRC_IF_NEEDED(0, &src0_dt, src0_dt);
+        INVAL_SRC_IF_NEEDED(1, src1_dt_ptr, src1_dt_buf);
+        INVAL_SRC_IF_NEEDED(2, src2_dt_ptr, src2_dt_buf);
+        INVAL_SRC_IF_NEEDED(3, src3_dt_ptr, src3_dt_buf);
 #undef INVAL_SRC_IF_NEEDED
 
         if (1 == g_dsp_ctx->dump_diag_info) {
