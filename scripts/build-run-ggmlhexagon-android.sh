@@ -26,7 +26,6 @@ HOST_CPU_COUNTS=`cat /proc/cpuinfo | grep "processor" | wc | awk '{print int($1)
 
 VERBOSE=OFF
 VERBOSE=ON
-default_mulmat_algotype=29
 
 #running path on Android phone
 REMOTE_PATH=/data/local/tmp
@@ -221,6 +220,7 @@ function check_and_download_hexagon_sdk()
     fi
 
     if [ ${is_hexagon_llvm_exist} -eq 0 ]; then
+        mkdir -p ${TOOLCHAIN_PATH}/Hexagon_SDK/
         if [ -f ${TOOLCHAIN_PATH}/Hexagon_SDK/hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz ]; then
             echo -e "hexagon-sdk-v6.6.0.0-amd64-lnx.tar.xz already exist\n"
         else
@@ -350,10 +350,9 @@ function check_and_download_ndk()
 function build_idl()
 {
     echo "build idl"
-    #not acutually used at the moment
-    #if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
-    #    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggmlop.idl
-    #fi
+    if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
+        ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggml_dsp.idl
+    fi
 }
 
 
@@ -716,10 +715,10 @@ function run_llamacli()
 
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -730,34 +729,30 @@ function run_llamabench()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench --mulmat-algotype ${mulmat_algotype} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench --mulmat-algotype ${mulmat_algotype} -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
 }
 
 
 function run_llamacli_all()
 {
     local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
-    local algotypes=(29 32)
 
-    local total=$(( ${#models[@]} * ${#algotypes[@]} ))
+    local total=${#models[@]}
     local count=0
 
     echo "=============================================="
-    echo "  Batch inference test: ${#models[@]} models x ${#algotypes[@]} algotypes = ${total} tests"
+    echo "  Batch inference test: ${#models[@]} models = ${total} tests"
     echo "=============================================="
 
     for model in "${models[@]}"; do
-        for algotype in "${algotypes[@]}"; do
-            count=$(( count + 1 ))
-            echo ""
-            echo "--- [${count}/${total}] model=${model} algotype=${algotype} ---"
-            mulmat_algotype=${algotype}
-            run_llamacli "${model}"
-        done
+        count=$(( count + 1 ))
+        echo ""
+        echo "--- [${count}/${total}] model=${model} ---"
+        run_llamacli "${model}"
     done
 
     echo ""
@@ -769,13 +764,11 @@ function run_llamacli_all()
 
 function run_ubatchtest()
 {
-    # Update ubatch-size values for a given model + algotype.
-    # Usage: run_ubatchtest [model_alias] [algotype] [ubatch_sizes_csv]
+    # Update ubatch-size values for a given model.
+    # Usage: run_ubatchtest [model_alias] [ubatch_sizes_csv]
     #   model_alias    default: gemma4
-    #   algotype       default: ${default_mulmat_algotype}
     #   ubatch_sizes   default: 32,64,128,512,1024
     local model_alias="gemma4"
-    local algotype=${default_mulmat_algotype}
     local ubatch_sizes=(32 64 128 512 1024)
     local save_params="${running_params}"
 
@@ -787,26 +780,21 @@ function run_ubatchtest()
             return 1
         fi
     fi
-    if [ $# -ge 2 ]; then
-        algotype=$2
-    fi
-    if [ $# -ge 3 ] && [ -n "$3" ]; then
-        IFS=',' read -ra ubatch_sizes <<< "$3"
+    if [ $# -ge 2 ] && [ -n "$2" ]; then
+        IFS=',' read -ra ubatch_sizes <<< "$2"
     fi
 
     local model_path=$(resolve_model_name "${model_alias}")
     [ -z "${model_path}" ] && { echo "ERROR: bad model"; return 1; }
 
-    mulmat_algotype=${algotype}
-
     # ensure libs are on phone
     prepare_run_on_phone llama-completion
 
     local stamp=$(date +%Y%m%d-%H%M%S)
-    local combined_log="ubatchtest_${model_alias}_a${algotype}_${stamp}.log"
+    local combined_log="ubatchtest_${model_alias}_${stamp}.log"
 
     echo "==================================================" | tee "${combined_log}"
-    echo "  ubatch sweep: model=${model_alias} algotype=${algotype}" | tee -a "${combined_log}"
+    echo "  ubatch sweep: model=${model_alias}" | tee -a "${combined_log}"
     echo "  sizes: ${ubatch_sizes[*]}" | tee -a "${combined_log}"
     echo "  combined log: ${combined_log}" | tee -a "${combined_log}"
     echo "==================================================" | tee -a "${combined_log}"
@@ -836,7 +824,7 @@ function run_ubatchtest()
         running_params="${new_params}"
 
         # print the actual command for reproducibility (captured by tee)
-        echo "CMD: cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" | tee -a "${combined_log}"
+        echo "CMD: cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" | tee -a "${combined_log}"
 
         # stream adb output in real-time: terminal <- tmpf <- combined_log
         # First tee writes to tmpf (full capture for later parsing) and forwards to stdout.
@@ -846,7 +834,7 @@ function run_ubatchtest()
         # swallow the terminal stream (the bug we just fixed).
         adb shell "cd ${REMOTE_PATH} \
                   && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-                  && ${REMOTE_PATH}/llama-completion ${running_params} --mulmat-algotype ${mulmat_algotype} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" 2>&1 \
+                  && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" 2>&1 \
             | tee "${tmpf}" \
             | tee -a "${combined_log}"
 
@@ -909,34 +897,21 @@ function run_test-ops()
 
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} -a ${mulmat_algotype} test\""
+               && ${REMOTE_PATH}/${prog_name} test\""
 
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} -a ${mulmat_algotype} test"
+               && ${REMOTE_PATH}/${prog_name} test"
 
-}
-
-
-function check_mulmat_algotype
-{
-    printf "mulmat_algotype ${mulmat_algotype} \n"
-    if [[ ${mulmat_algotype} != 0 ]] && [[ ${mulmat_algotype} != 1 ]] && [[ ${mulmat_algotype} != 2 ]] && [[ ${mulmat_algotype} != 3 ]] && [[ ${mulmat_algotype} != 4 ]] && [[ ${mulmat_algotype} != 5 ]] && [[ ${mulmat_algotype} != 6 ]] && [[ ${mulmat_algotype} != 30 ]] && [[ ${mulmat_algotype} != 32 ]] && [[ ${mulmat_algotype} != 33 ]] && [[ ${mulmat_algotype} != 29 ]]; then
-        printf "invalid mulmat algotype\n"
-        printf "valid mulmat algotype: 0, 1, 2, 3, 4, 5, 6, 29, 30, 32, 33 \n"
-        exit 1
-    fi
 }
 
 
 function run_test-op()
 {
     prog_name=test-backend-ops
-    prog_param="-o ${opname} -a ${mulmat_algotype}"
+    prog_param="-o ${opname}"
     prepare_run_on_phone ${prog_name}
-
-    check_mulmat_algotype
 
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
@@ -955,16 +930,14 @@ function run_perf-op()
     prog_name=test-backend-ops
     prepare_run_on_phone ${prog_name}
 
-    check_mulmat_algotype
-
     echo "adb shell cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype}"
+               && ${REMOTE_PATH}/${prog_name} perf -o ${opname}"
 
     echo "\n"
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname} -a ${mulmat_algotype}"
+               && ${REMOTE_PATH}/${prog_name} perf -o ${opname}"
 
 }
 
@@ -1064,17 +1037,17 @@ function show_usage()
     echo "  $0 build_armcpu (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
 
-    echo "  $0 run_testops    [mulmat_algotype]"
-    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify accuracy    of ADD/MUL_MAT)"
-    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT [mulmat_algotype] (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamabench [mulmat_algotype]"
+    echo "  $0 run_testops"
+    echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify accuracy    of ADD/MUL_MAT)"
+    echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
+    echo "  $0 run_llamabench"
 
-    echo "  $0 run_llamacli_all     (batch test 5 models x 2 algotypes (29,32) = 10 tests)"
+    echo "  $0 run_llamacli_all     (batch test 5 models = 5 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
-    echo "  $0 run_llamacli   [model_alias] [mulmat_algotype]"
+    echo "  $0 run_llamacli   [model_alias]"
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
     echo "    qwen3-mtp     -> Qwen3.5-2B-MTP-Q4_0.gguf"
@@ -1083,19 +1056,17 @@ function show_usage()
     echo "    llama3        -> llama-3.2-1B-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
-    echo "    $0 run_llamacli qwen3        # test qwen3 with default algotype"
-    echo "    $0 run_llamacli qwen3 32     # test qwen3 with algotype=32 (HMX pipeline)"
-    echo "    $0 run_llamacli gemma4 29    # test gemma4 with algotype=29 (Qualcomm execute_op)"
+    echo "    $0 run_llamacli qwen3        # test qwen3"
+    echo "    $0 run_llamacli gemma4       # test gemma4"
     echo -e "\n"
 
-    echo "  $0 run_ubatchtest  [model_alias] [algotype] [ubatch_csv]"
+    echo "  $0 run_ubatchtest  [model_alias] [ubatch_csv]"
     echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
     echo "    model_alias:  gemma4 (default) | qwen3 | qwen1 | llama3"
-    echo "    algotype:     29 (default) | 32"
     echo "    ubatch_csv:   32,64,128,512,1024 (default)"
     echo "    Examples:"
-    echo "      $0 run_ubatchtest                       # gemma4 + a29 + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3 32 32,128,512   # qwen3  + a32 + 32/128/512"
+    echo "      $0 run_ubatchtest                       # gemma4 + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3 32,128,512      # qwen3  + 32/128/512"
 }
 
 
@@ -1142,15 +1113,12 @@ elif [ $# == 1 ]; then
         remove_temp_dir
         exit 0
     elif [ "$1" == "run_testops" ]; then
-        mulmat_algotype=${default_mulmat_algotype}
         run_test-ops
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        mulmat_algotype=${default_mulmat_algotype}
         run_llamacli
         exit 0
     elif [ "$1" == "run_llamabench" ]; then
-        mulmat_algotype=${default_mulmat_algotype}
         run_llamabench
         exit 0
     elif [ "$1" == "run_llamacli_all" ]; then
@@ -1169,38 +1137,21 @@ elif [ $# == 2 ]; then
 
     if [ "$1" == "run_testop" ]; then
         opname=$2
-        mulmat_algotype=${default_mulmat_algotype}
         run_test-op
         exit 0
     elif [ "$1" == "run_perfop" ]; then
         opname=$2
-        mulmat_algotype=${default_mulmat_algotype}
         run_perf-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
-        mulmat_algotype=${default_mulmat_algotype}
-        # If second arg is numeric, treat as algotype (backward compatibility)
-        # Otherwise, treat as model name alias
-        if [[ "$2" =~ ^[0-9]+$ ]]; then
-            mulmat_algotype=$2
-            check_mulmat_algotype
-            run_llamacli
-        else
-            if [ -z "$(resolve_model_name "$2")" ]; then
-                echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, qwen1, llama3"
-                show_usage
-                exit 1
-            fi
-            run_llamacli "$2"
+        if [ -z "$(resolve_model_name "$2")" ]; then
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            show_usage
+            exit 1
         fi
-        exit 0
-    elif [ "$1" == "run_llamabench" ]; then
-        mulmat_algotype=$2
-        check_mulmat_algotype
-        run_llamabench
+        run_llamacli "$2"
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
-        mulmat_algotype=${default_mulmat_algotype}
         run_threadsafety
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
@@ -1213,14 +1164,10 @@ elif [ $# == 2 ]; then
 elif [ $# == 3 ]; then
     if [ "$1" == "run_perfop" ]; then
         opname=$2
-        mulmat_algotype=$3
-        check_mulmat_algotype
         run_perf-op
         exit 0
     elif [ "$1" == "run_testop" ]; then
         opname=$2
-        mulmat_algotype=$3
-        check_mulmat_algotype
         run_test-op
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
@@ -1229,8 +1176,6 @@ elif [ $# == 3 ]; then
             show_usage
             exit 1
         fi
-        mulmat_algotype=$3
-        check_mulmat_algotype
         run_llamacli "$2"
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
@@ -1241,13 +1186,8 @@ elif [ $# == 3 ]; then
         exit 1
     fi
 elif [ $# == 4 ]; then
-    if [ "$1" == "run_ubatchtest" ]; then
-        run_ubatchtest "$2" "$3" "$4"
-        exit 0
-    else
-        show_usage
-        exit 1
-    fi
+    show_usage
+    exit 1
 else
     show_usage
     exit 1

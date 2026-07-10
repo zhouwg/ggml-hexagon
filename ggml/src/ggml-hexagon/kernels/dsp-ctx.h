@@ -100,18 +100,11 @@ typedef struct hex_batch_hdr {
 #define HEX_OP_ALIGN        128
 
 // DSP session context: bundles all per-session state.
-// Allocated in ggmlop_dsp_open, freed in ggmlop_dsp_close.
+// Allocated in ggml_dsp_open, freed in ggml_dsp_close.
 struct dsp_context {
     // Configuration
     int thread_counts;
-    int mulmat_algotype;
-    int offload_cgraph_type;
     int dump_diag_info;
-
-    // Work data
-    void * work_data;
-    size_t work_size;
-    unsigned int work_mutex;  // qurt_mutex_t: protects work_data allocation
 
     // VTCM
     void * vtcm_base;
@@ -119,6 +112,7 @@ struct dsp_context {
     unsigned int compute_res_ctx_id;
     volatile int vtcm_needs_release;
     volatile int vtcm_valid;
+    int thread_prio;
 
     // Power
     int power_ctx;
@@ -132,15 +126,9 @@ struct dsp_context {
     void * ion_dsp_base;
     size_t ion_dsp_size;
 
-    // FP16 weight cache: uses ION shared memory tail region for caching
-    // converted FP16 weight tiles (avoids repeated Q4_0->FP16 conversion)
-    void * ion_cache_base;
-    size_t ion_cache_size;
-    size_t ion_cache_offset;
-
     // DSP-side entry.c cache optimization bitmask. Pushed by AP at init via
     // execute_batch(0xFFFC) special mode (no IDL change). All three bits are
-    // wired into ggmlop_dsp_execute_batch(); dsp_cache_mode=0 is behaviorally
+    //   are wired into ggml_dsp_execute_batch(); dsp_cache_mode=0 is behaviorally
     // identical to baseline 29c1cf196.
     //   bit 0 (0x1): first-touch weight bitmap    - skip dcinva for repack weights (flags==2) after first access
     //   bit 1 (0x2): skip dcinva for prior dst     - DSP's own dst writes stay in L2; next op's src read skips dcinva
@@ -166,23 +154,7 @@ struct dsp_context {
 
 extern struct dsp_context *g_dsp_ctx;
 
-int ggmlop_dsp_add(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_sub(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_mul(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_div(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_mulmat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_rmsnorm(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_rope(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
-int ggmlop_dsp_softmax(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, const dsptensor* src2, dsptensor* dst) ;
-int ggmlop_dsp_silu(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_scale(remote_handle64 _h, const dsptensor* src0, dsptensor* dst) ;
-int ggmlop_dsp_cpy(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_getrows(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_concat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_repeat(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_diag_mask_inf(remote_handle64 _h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst) ;
-int ggmlop_dsp_flash_attn(remote_handle64 h, const dsptensor * q, const dsptensor * k, const dsptensor * v, const dsptensor * mask, dsptensor * dst);
-int ggmlop_dsp_test_hmx(remote_handle64 h, const dsptensor* src0, const dsptensor* src1, dsptensor* dst);
+
 
 #ifdef  __cplusplus
 }

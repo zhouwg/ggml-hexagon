@@ -94,36 +94,6 @@ int llama_completion(int argc, char ** argv) {
     common_params params;
     g_params = &params;
 
-#ifdef GGML_USE_HEXAGON
-    // Strip --mulmat-algotype <N> from argv before common_params_parse, which
-    // rejects unknown args. -a is already taken by --alias in common/arg.cpp,
-    // so we use a long option here. Matches test-backend-ops.cpp semantics:
-    // -1 = not specified, use cfg file value; >=0 = override cfg.
-    // Must run BEFORE common_init(): common_init() triggers ggml_backend_load_all(),
-    // which registers the Hexagon backend and loads cfg. Calling set_mulmat_algotype
-    // after that only edits the cfg file but does not update g_hexagon_appcfg.
-    int mulmat_algotype = -1;
-    std::vector<char *> filtered_argv;
-    filtered_argv.reserve(argc);
-    filtered_argv.push_back(argv[0]);
-    for (int i = 1; i < argc; i++) {
-        if (0 == strcmp(argv[i], "--mulmat-algotype")) {
-            if (i + 1 < argc) {
-                mulmat_algotype = atoi(argv[i + 1]);
-                i++;
-            }
-            continue;
-        }
-        filtered_argv.push_back(argv[i]);
-    }
-    if (mulmat_algotype >= 0) {
-        argc = (int)filtered_argv.size();
-        argv = filtered_argv.data();
-        LOG_INF("mulmat_algotype %d\n", mulmat_algotype);
-        ggml_backend_hexagon_set_mulmat_algotype(mulmat_algotype);
-    }
-#endif
-
     common_init();
 
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_COMPLETION, print_usage)) {

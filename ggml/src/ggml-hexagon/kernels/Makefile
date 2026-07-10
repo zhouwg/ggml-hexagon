@@ -17,7 +17,6 @@ $(info HEXAGON_COMPUTE:${HEXAGON_COMPUTE})
 INCS=-I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/libs/qprintf/inc -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs -I${HEXAGON_SDK_PATH}/ipc/fastrpc/rpcmem/inc -I${HEXAGON_SDK_PATH}/ipc/fastrpc/rtld/ship/inc -I${HEXAGON_SDK_PATH}/libs/atomic/inc -I${HEXAGON_SDK_PATH}/utils/sim_utils/inc -I${HEXAGON_SDK_PATH}/utils/sim_utils/inc -I${HEXAGON_SDK_PATH}/rtos/qurt/${HEXAGON_COMPUTE}/include/posix -I${HEXAGON_SDK_PATH}/rtos/qurt/${HEXAGON_COMPUTE}/include/qurt/ -I../htp -I../../ -I../../../include -I${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/8.8.06/Tools/target/hexagon/include
 
 CFLAGS=-m${HTP_ARCH_VERSION} -c -O3 -ffast-math -Wall -Wstrict-prototypes -fno-zero-initialized-in-bss -fdata-sections -fpic -D__V_DYNAMIC__ -mhvx -mhvx-length=128B -mhmx ${INCS} -fno-finite-math-only -fno-vectorize
-CFLAGS+=-DGGMLDSP_VERSION="0.99.3"
 
 LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB_SECURE_FLAG=2 -Wl,--no-threads -fpic -shared -Wl,-Bsymbolic -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=realloc -Wl,--wrap=memalign -lc -Wl,-soname=${TARGET}
 
@@ -25,17 +24,16 @@ LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB
 vpath %.c ../htp
 
 # Qualcomm execute_op kernels (binary-ops.c, matmul-ops.c, etc.) come from ../htp/.
-# Self-built ggmlop_dsp_* kernels (add.c, mulmat.c, etc.) live in kernels/.
-# Dual-channel dispatch in entry.c selects between them by mulmat_algotype.
-SRCS = ggml-dsp.c skel.c entry.c worker-pool.c hex-dma.c hmx-queue.c binary-ops.c unary-ops.c sum-rows-ops.c softmax-ops.c act-ops.c rope-ops.c set-rows-ops.c get-rows-ops.c cpy-ops.c repeat-ops.c argsort-ops.c ssm-conv.c cumsum-ops.c fill-ops.c concat-ops.c diag-ops.c solve-tri-ops.c gated-delta-net-ops.c pad-ops.c matmul-ops.c flash-attn-ops.c
-SRCS += add.c sub.c mul.c div.c concat.c cpy.c repeat.c getrows.c diagmask.c rmsnorm.c rope.c scale.c silu.c softmax.c mulmat.c flash_attn.c
+# entry.c dispatches all ops through the execute_op path (algotype=29).
+SRCS = ggml_dsp_skel.c entry.c worker-pool.c hex-dma.c hmx-queue.c binary-ops.c unary-ops.c sum-rows-ops.c softmax-ops.c act-ops.c rope-ops.c set-rows-ops.c get-rows-ops.c cpy-ops.c repeat-ops.c argsort-ops.c ssm-conv.c cumsum-ops.c fill-ops.c concat-ops.c diag-ops.c solve-tri-ops.c gated-delta-net-ops.c pad-ops.c matmul-ops.c flash-attn-ops.c
 OBJS = $(patsubst %.c, %.o, $(patsubst %.cpp, %.o, $(SRCS)))
-OBJS += dot.o
-OBJS += worker_pool.o
 
 ALL:$(OBJS)
 		${HEXAGON_CC} ${LDFLAGS} -o ${TARGET} -Wl,--start-group ${OBJS} -Wl,--end-group
 		@ls -l ${TARGET}
+		@rm -f *.o
+		@rm -f ggml_dsp.h  ggml_dsp_skel.c  ggml_dsp_stub.c
+
 
 %.o:%.c
 		@echo "${HEXAGON_CC} ${CFLAGS} ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<"

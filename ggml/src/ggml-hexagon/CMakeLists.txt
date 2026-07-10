@@ -86,7 +86,7 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -DGGML_USE_HEXAGON ${DEBUG_F
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
 
 #file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/*.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/stub.c")
-file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/ggml-hexagon.cpp" "${CMAKE_CURRENT_LIST_DIR}/htp-drv.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/stub.c")
+file(GLOB HEXAGON_SOURCES "${CMAKE_CURRENT_LIST_DIR}/ggml-hexagon.cpp" "${CMAKE_CURRENT_LIST_DIR}/htp-drv.cpp" "${CMAKE_CURRENT_LIST_DIR}/kernels/ggml_dsp_stub.c")
 ggml_add_backend_library(ggml-hexagon ${HEXAGON_SOURCES})
 
 target_include_directories(ggml-hexagon PRIVATE ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR})
