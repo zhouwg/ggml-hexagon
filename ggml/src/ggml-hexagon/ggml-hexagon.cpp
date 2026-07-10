@@ -416,6 +416,7 @@ struct hexagon_appcfg_t {
                                 //   Used for diagnosing the bit 0 stale-L2-read bug observed on llama3
                                 //   (33% prompt-repeat rate, 2026-07-10). Once root-caused this can
                                 //   be removed.
+    int enable_graph_optimize;  // enable/disable cgraph reorder pass
 
     const char * cfgfilename;
     const char * runtime_libpath;
@@ -438,6 +439,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .fa_select              = 2,
         .gemv_offload           = 1,
         .dsp_cache_mode         = 7,  // default: all three DSP-side cache opts on
+        .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
@@ -725,6 +727,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info:                   %d", g_hexagon_appcfg.dump_diag_info);
+    GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
     GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hvx:                 %d", g_hexagon_appcfg.ggml_dsp_use_hvx);
     if (NULL != ctx) {
         GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hmx:                 %d", ctx->has_hmx);
@@ -1124,6 +1127,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "gemv_offload", g_hexagon_appcfg.gemv_offload, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 7);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit0", g_hexagon_appcfg.dsp_cache_trace_bit0, 0);
+    hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_optimize", g_hexagon_appcfg.enable_graph_optimize, 1);
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
 
@@ -7007,7 +7011,7 @@ static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .graph_compute           = */ nullptr,
         /* .event_record            = */ nullptr,
         /* .event_wait              = */ nullptr,
-        /* .graph_optimize          = */ ggml_backend_hexagon_graph_optimize,
+        /* .graph_optimize          = */ nullptr,
 };
 
 //FIXME: this guid is not make sense
@@ -7213,6 +7217,8 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
     if (nullptr != g_hexagon_mgr[device] && nullptr != g_hexagon_mgr[device]->backend) {
         GGMLHEXAGON_LOG_ALWAYS("backend %d(%s) already loaded", device,
                          ggml_backend_hexagon_get_devname(device));
+        ggml_backend_hexagon_interface.graph_optimize =
+            g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
         GGMLHEXAGON_LOG_ALWAYS("leave %s", __func__);
         return g_hexagon_mgr[device]->backend;
     }
@@ -7224,6 +7230,10 @@ ggml_backend_t ggml_backend_hexagon_init(size_t device, const char * runtime_lib
         GGMLHEXAGON_LOG_ALWAYS("using ggmlhexagon_backend_graph_compute_general (per-op)");
         ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_general;
     }
+    ggml_backend_hexagon_interface.graph_optimize =
+        g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
+    GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s",
+                           g_hexagon_appcfg.enable_graph_optimize ? "enabled" : "disabled");
     // Context (and DSP session) was already created by ggml_backend_hexagon_reg().
     // Just attach the backend handle to the existing context.
     ggml_backend_hexagon_context * ctx = g_hexagon_mgr[device];
