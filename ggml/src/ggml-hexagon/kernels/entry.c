@@ -174,6 +174,10 @@ int64_t ggml_time_us(void) {
 // Bumped by execute_op() in entry.c, dumped via FARF every N batches inside
 // ggml_dsp_execute_batch(). Off by default; enable with -DHEX_OP_PROF=1
 // to avoid disturbing normal log levels.
+#ifndef HEX_OP_PROF
+#define HEX_OP_PROF 0
+#endif
+#if HEX_OP_PROF
 #ifndef HEX_OP_PROF_BUCKETS
 #define HEX_OP_PROF_BUCKETS  64
 #endif
@@ -189,6 +193,7 @@ static uint64_t g_op_prof_count  [HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_min_us[HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_max_us[HEX_OP_PROF_BUCKETS];
 static uint32_t g_op_prof_batch_count;
+#endif // HEX_OP_PROF
 
 // Per-weight-region first-touch invalidate tracking.
 // Repack weights (flags==2) live in stable ION regions that AP writes
@@ -585,6 +590,14 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
             // TEMPORARILY DISABLED FOR DEBUGGING - memset(g_dsp_ctx->vtcm_base, 0, g_dsp_ctx->vtcm_size);
             // NOTE: HMX lock is managed per-operation in mulmat.c, not here
             //HAP_compute_res_hmx_lock(g_dsp_ctx->compute_res_ctx_id);
+
+            /* VTCM: acquire once for the whole session (matches Qualcomm
+             * htp/main.c htp_packet_callback pattern: acquire once at
+             * session start, release once at session end). Avoids
+             * per-batch HAP_compute_res_acquire/release_cached churn
+             * (~8700 calls/session -> 2 calls/session) and the SDK's
+             * adsprpc FARF log noise. */
+            dsp_vtcm_acquire();
         }
     }
 
@@ -668,8 +681,15 @@ int ggml_dsp_close(remote_handle64 handle) {
         GGMLHEXAGON_LOG_INFO("released async HMX queue");
     }
 
+    /* VTCM: release once at session end (matches Qualcomm pattern, see
+     * ggml_dsp_open). The release callback is still registered and will
+     * set vtcm_needs_release=1 if another session preempts during the
+     * session, but we intentionally ignore it here so that VTCM stays
+     * cached for the full session. */
+    dsp_vtcm_release();
+
     if (ctx->compute_res_ctx_id != 0) {
-        HAP_compute_res_release_cached(ctx->compute_res_ctx_id);
+        // HAP_compute_res_release_cached is already called inside dsp_vtcm_release()
         // NOTE: HMX lock is managed per-operation in mulmat.c, not here
         // HAP_compute_res_hmx_unlock(ctx->compute_res_ctx_id);
 
@@ -966,10 +986,12 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
 // htp-ctx.h). We only need this dispatch wrapper + a translation layer.
 // ===========================================================================
 static int execute_op(struct htp_ops_context * octx) {
+#if HEX_OP_PROF
     // Per-op profiler: bracket every op kind with ggml_time_us() so the
     // g_op_prof_* accumulators reflect real kernel time on the DSP side.
     // Aggregated / dumped by ggml_dsp_execute_batch() every N batches.
     const uint64_t t0 = ggml_time_us();
+#endif
     int ret;
     switch (octx->op) {
         case HTP_OP_MUL_MAT:
@@ -1048,6 +1070,7 @@ static int execute_op(struct htp_ops_context * octx) {
             FARF(ERROR, "Unknown Op %u", octx->op);
             ret = -1; break;
     }
+#if HEX_OP_PROF
     {
         const uint64_t dt = ggml_time_us() - t0;
         const unsigned int op = (unsigned int) octx->op;
@@ -1060,6 +1083,7 @@ static int execute_op(struct htp_ops_context * octx) {
             if (dt < g_op_prof_min_us[op]) g_op_prof_min_us[op] = dt;
         }
     }
+#endif
     return ret;
 }
 
@@ -1067,6 +1091,7 @@ static int execute_op(struct htp_ops_context * octx) {
 // codes to short names so the log is readable; unknown indices are emitted
 // as plain numeric IDs. Only buckets that have at least one call are printed,
 // so a single 1-line entry per op kind keeps log volume manageable.
+#if HEX_OP_PROF
 static const char * htp_op_short_name(unsigned int op) {
     switch (op) {
         case HTP_OP_MUL_MAT:         return "MUL_MAT";
@@ -1118,10 +1143,12 @@ static const char * htp_op_short_name(unsigned int op) {
         default:                     return NULL;
     }
 }
+#endif // HEX_OP_PROF
 
 // One-shot init for the per-op profiler: stamp min to UINT64_MAX so the
 // first real call always sets it. Called lazily from dump_op_prof so we
 // don't need a separate init hook in ggml_dsp_open. Idempotent.
+#if HEX_OP_PROF
 static void init_op_prof_min(void) {
     static int done = 0;
     if (done) return;
@@ -1161,6 +1188,7 @@ static void dump_op_prof(const char * tag) {
         }
     }
 }
+#endif // HEX_OP_PROF
 
 // ---------------------------------------------------------------------------
 // Translation layer: dsptensor -> htp_tensor, GGML_OP -> HTP_OP
@@ -1775,10 +1803,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const hex_op_desc * ops = (const hex_op_desc *)((const char *)hdr + hdr->ops_offset);
     const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
 
-    /* Per-batch VTCM acquire (matches Qualcomm htp/main.c opbatch pattern):
-     * acquire once here, all ops in the batch share it, release at batch
-     * boundary. Per-op mulmat/flash_attn no longer call ensure themselves. */
-    dsp_vtcm_acquire();
+    /* VTCM is acquired once in ggml_dsp_open and held for the whole
+     * session (matches Qualcomm htp_packet_callback pattern). Per-batch
+     * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
 
     GGMLHEXAGON_LOG_INFO("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
@@ -2135,21 +2162,19 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     }
     __asm__ __volatile__("" ::: "memory");
 
-    /* Lazy VTCM release: if the release callback flagged us during the batch,
-     * release now so other sessions (QNN/another GGML session) can use VTCM.
-     * If not flagged, keep it cached for the next batch (avoids re-acquire). */
-    if (g_dsp_ctx->vtcm_needs_release) {
-        dsp_vtcm_release();
-    }
+    /* VTCM is held for the whole session; release is deferred to
+     * ggml_dsp_close. Matches Qualcomm htp_packet_callback pattern. */
 
     /* Per-op profiler: print accumulated cum/count/avg every N batches so
      * log volume stays bounded (one multi-line dump per interval, not per op). */
+#if HEX_OP_PROF
     g_op_prof_batch_count++;
     if ((g_op_prof_batch_count % HEX_OP_PROF_DUMP_INTERVAL) == 0) {
         char tag[32];
         snprintf(tag, sizeof(tag), "batch#%u", g_op_prof_batch_count);
         dump_op_prof(tag);
     }
+#endif
 
     return AEE_SUCCESS;
 }
