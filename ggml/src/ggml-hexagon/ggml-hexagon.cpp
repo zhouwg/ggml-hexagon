@@ -368,6 +368,13 @@ struct hexagon_appcfg_t {
                                 //   Used for diagnosing the bit 0 stale-L2-read bug observed on llama3
                                 //   (33% prompt-repeat rate, 2026-07-10). Once root-caused this can
                                 //   be removed.
+    int dsp_cache_trace_bit1;   // DSP-side bit 1 (skip dcinva for prior dst) trace enable. 0=off
+                                //   (production), 1=emit one [DSP-CACHE-TRACE-BIT1] log line per bit 1
+                                //   decision (SKIP if prior_dst_contains_src, INVAL otherwise) with
+                                //   op/src/ptr/len. Pushed to DSP at init via bit 17 of the same
+                                //   execute_batch(0xFFFC) payload. Used for diagnosing why dsp_cache_mode
+                                //   5/6/7 garble on the new matmul pipeline (81ff7abe5). Pair with
+                                //   dsp_cache_trace_bit0 to localize the stale-L2-read culprit.
     int enable_graph_optimize;  // enable/disable cgraph reorder pass
 
     const char * cfgfilename;
@@ -561,6 +568,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
+    GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit1:             %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(DSP):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
@@ -897,6 +905,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "gemv_offload", g_hexagon_appcfg.gemv_offload, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 7);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit0", g_hexagon_appcfg.dsp_cache_trace_bit0, 0);
+    hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit1", g_hexagon_appcfg.dsp_cache_trace_bit1, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_optimize", g_hexagon_appcfg.enable_graph_optimize, 1);
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
@@ -1519,10 +1528,10 @@ static int ggmlhexagon_set_rpc_priority(int domain, int priority) {
         if (err != AEE_SUCCESS) {
             GGMLHEXAGON_LOG_WARN("remote_session_control failed with 0x%x when setting thread priority\n", err);
         } else {
-            GGMLHEXAGON_LOG_VERBOSE("thread priority set to %d\n", priority);
+            GGMLHEXAGON_LOG_VERBOSE("thread priority set to %d", priority);
         }
     } else {
-        GGMLHEXAGON_LOG_WARN("cannot set thread priority\n");
+        GGMLHEXAGON_LOG_WARN("cannot set thread priority");
     }
     return err;
 }
@@ -2022,7 +2031,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_VERBOSE("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
         ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, 2, 29, g_hexagon_appcfg.thread_counts);
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
-        ggmlhexagon_set_rpc_priority(domain_id, 64);
+        //ggmlhexagon_set_rpc_priority(domain_id, 64);
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
             GGMLHEXAGON_LOG_INFO("failed to init rpc mempool");
             goto bail;
@@ -2032,25 +2041,30 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // Payload bit layout (low bits are dsp_cache_mode):
         //   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
         //   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
-        // See the dsp_cache_mode and dsp_cache_trace_bit0 comments in hexagon_appcfg_t.
+        //   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
+        // See the dsp_cache_mode and dsp_cache_trace_bit{0,1} comments in hexagon_appcfg_t.
         //
         // Note: must run AFTER ggmlhexagon_init_rpcmempool(). The DSP-side
         // 0xFFFC handler in entry.c asserts ion_dsp_base != NULL; without the
         // mempool registered first it returns AEE_EBADPARM (0x8000040e) and
         // the bitmask is silently dropped.
         {
-            const uint32_t mode_bits = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0x7u;
-            const uint32_t trace_bit = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
-            const uint32_t payload   = trace_bit | mode_bits;
+            const uint32_t mode_bits    = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0x7u;
+            const uint32_t trace_bit0   = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
+            const uint32_t trace_bit1   = (g_hexagon_appcfg.dsp_cache_trace_bit1 ? 0x20000u : 0u);
+            const uint32_t payload      = trace_bit1 | trace_bit0 | mode_bits;
             int opts_err = ggml_dsp_execute_batch(ctx->ggmlop_handle, payload, 0xFFFC);
             if (AEE_SUCCESS != opts_err) {
-                GGMLHEXAGON_LOG_WARN("set dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d failed: 0x%x (DSP-side optimizations disabled)",
-                                     mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0, opts_err);
+                GGMLHEXAGON_LOG_WARN("set dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d failed: 0x%x (DSP-side optimizations disabled)",
+                                     mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
+                                     g_hexagon_appcfg.dsp_cache_trace_bit1, opts_err);
                 g_hexagon_appcfg.dsp_cache_mode = 0;  // fall back to baseline
                 g_hexagon_appcfg.dsp_cache_trace_bit0 = 0;
+                g_hexagon_appcfg.dsp_cache_trace_bit1 = 0;
             } else {
-                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d pushed to DSP (payload=0x%x)",
-                                       mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0, payload);
+                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
+                                       mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
+                                       g_hexagon_appcfg.dsp_cache_trace_bit1, payload);
             }
         }
     } else {

@@ -504,6 +504,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     // baseline 29c1cf196.
     g_dsp_ctx->dsp_cache_mode = 0;
     g_dsp_ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
+    g_dsp_ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
     GGMLHEXAGON_LOG_INFO("uri %s", uri);
 
     unsigned int api_version = qurt_api_version();
@@ -1762,6 +1763,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
      *   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
      *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
+     *   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
      *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
      *               dcinva for repack weights (flags==2) once invalidated.
@@ -1776,12 +1778,14 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     if (batch_size == 0xFFFC) {
         g_dsp_ctx->dsp_cache_mode = batch_offset & 0x7u;
         g_dsp_ctx->dsp_cache_trace_bit0 = (batch_offset >> 16) & 0x1u;
-        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d) dsp_cache_trace_bit0=%d",
+        g_dsp_ctx->dsp_cache_trace_bit1 = (batch_offset >> 17) & 0x1u;
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d) dsp_cache_trace_bit0=%d dsp_cache_trace_bit1=%d",
                              g_dsp_ctx->dsp_cache_mode,
                              (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0,
-                             g_dsp_ctx->dsp_cache_trace_bit0);
+                             g_dsp_ctx->dsp_cache_trace_bit0,
+                             g_dsp_ctx->dsp_cache_trace_bit1);
         return AEE_SUCCESS;
     }
 
@@ -1977,8 +1981,16 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             if ((g_dsp_ctx->dsp_cache_mode & 0x2) &&                                   \
                 prior_dst_contains_src((dt_buf).data, (dt_buf).data_len)) {            \
                 /* DSP wrote this range as dst earlier in batch */                     \
+                if (g_dsp_ctx->dsp_cache_trace_bit1) {                                \
+                    GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT1] op=%u src=%d SKIP ptr=%p len=0x%x (cache_mode=0x%x)", \
+                                         i, (int)(src_idx), (dt_buf).data, (dt_buf).data_len, g_dsp_ctx->dsp_cache_mode); \
+                }                                                                       \
             } else {                                                                   \
                 ggml_dsp_cache_inval_range((dt_buf).data, (dt_buf).data_len);        \
+                if (g_dsp_ctx->dsp_cache_trace_bit1) {                                \
+                    GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT1] op=%u src=%d INVAL ptr=%p len=0x%x (cache_mode=0x%x)", \
+                                         i, (int)(src_idx), (dt_buf).data, (dt_buf).data_len, g_dsp_ctx->dsp_cache_mode); \
+                }                                                                       \
             }                                                                          \
         }                                                                              \
     }                                                                                  \

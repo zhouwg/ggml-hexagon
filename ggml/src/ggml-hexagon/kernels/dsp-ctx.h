@@ -148,6 +148,20 @@ struct dsp_context {
     // observed 2026-07-10). Once the bug is root-caused this can be removed.
     uint32_t dsp_cache_trace_bit0;
 
+    // DSP-side bit 1 (skip dcinva for prior dst) trace enable. Pushed by AP at
+    // init via bit 17 of the same execute_batch(0xFFFC) payload word, so the
+    // special-mode encoding is
+    //   payload = (dsp_cache_trace_bit1 << 17) | (dsp_cache_trace_bit0 << 16)
+    //           | (dsp_cache_mode & 0x7u)
+    // When non-zero, INVAL_SRC_IF_NEEDED emits one [DSP-CACHE-TRACE-BIT1] log
+    // line per bit 1 decision (SKIP if prior_dst_contains_src, INVAL otherwise)
+    // with the same op/src/ptr/len fields as the bit 0 trace. Default 0 (off)
+    // so production perf is unaffected. Set to 1 only when diagnosing why
+    // dsp_cache_mode 5/6/7 garble on the new matmul pipeline (upstream commit
+    // 81ff7abe5). Pair with dsp_cache_trace_bit0 to localize the stale-L2-read
+    // culprit to a specific bit/op combination.
+    uint32_t dsp_cache_trace_bit1;
+
     // htp_context for calling Qualcomm's execute_op.
     struct htp_context * htp_ctx;
 };
