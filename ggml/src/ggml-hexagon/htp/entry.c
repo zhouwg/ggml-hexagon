@@ -14,9 +14,9 @@
 #include "ggml.h"
 #include "dsp-ctx.h"
 #include "hmx-queue.h"
-#include "../htp/htp-ctx.h"
-#include "../htp/matmul-ops.h"
-#include "../htp/flash-attn-ops.h"
+#include "htp-ctx.h"
+#include "matmul-ops.h"
+#include "flash-attn-ops.h"
 
 // Log and cache infrastructure (previously in ggml-dsp.h/c).
 

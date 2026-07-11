@@ -119,30 +119,30 @@
   "hexagon_implementations": {
     "description": "Two ggml-hexagon implementations exist in this project",
     "qualcomm_official": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp",
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "description": "Qualcomm's official ggml-hexagon implementation"
     },
     "jz_implementation": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/kernels/",
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "description": "JZ's custom ggml-hexagon implementation (primary development target)"
     }
   },
   "development_rules": {
     "primary_target": "jz_implementation",
     "jz_implementation": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/kernels/",
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
+      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "build_command": "./scripts/build-run-android.sh build",
       "description": "JZ's custom ggml-hexagon implementation (primary development target)"
     },
     "qualcomm_official_debug": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-qcom.cpp",
+      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "build_command": "./scripts/build-run-android.sh build_qcom",
-      "description": "When debugging Qualcomm's official backend, modify ggml-hexagon-qcom.cpp and files under htp/ directory. The build script will automatically handle swapping files before building and restore them after.",
-      "note": "The build script (build_arm64_qcom function) automatically: 1) backs up jz's ggml-hexagon.cpp and CMakeLists.txt, 2) replaces them with qcom versions, 3) builds, 4) restores jz's files"
+      "description": "When debugging Qualcomm's official backend, modify ggml-hexagon.cpp and files under htp/ directory. The unified CMakeLists.txt uses option GGML_HEXAGON_JZ (default OFF) to select between QCOM and JZ variants.",
+      "note": "build_arm64_qcom passes -DGGML_HEXAGON_JZ=OFF (default) to use Qualcomm's implementation. build_arm64/build_arm64_debug pass -DGGML_HEXAGON_JZ=ON to use JZ's implementation."
     },
     "ccache_usage": {
       "description": "ccache is enabled for faster builds. For jz build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For qcom build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom. Do NOT disable ccache.",
@@ -360,7 +360,7 @@
     "title": "MUL_MAT DSP-side Optimization Rules",
     "focus_types": ["GGML_TYPE_BF16", "GGML_TYPE_Q8_0", "GGML_TYPE_Q4_0", "GGML_TYPE_Q5_0", "GGML_TYPE_IQ4_NL", "GGML_TYPE_F32", "GGML_TYPE_F16"],
     "dsp_kernel_build": {
-      "description": "When only modifying files under ggml/src/ggml-hexagon/kernels/, use fast kernel-only build",
+      "description": "When only modifying files under ggml/src/ggml-hexagon/htp/, use fast kernel-only build",
       "command": "./scripts/build-kernels.sh",
       "note": "This is significantly faster than full build. Only use ./scripts/build-run-android.sh build when non-kernel files are also modified."
     },

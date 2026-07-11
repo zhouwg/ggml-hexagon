@@ -63,14 +63,13 @@ function is_so_file_changed() {
 
 
 cd ${PROJECT_ROOT_PATH}
-echo "${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggml_dsp.idl"
-${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggml_dsp.idl
 
 for HTP_ARCH_VERSION in ${HTP_ARCH_VERSIONS}; do
     TARGET=${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${HTP_ARCH_VERSION}.so
     printf "\n========== build libggmldsp-skel-${HTP_ARCH_VERSION}.so ==========\n"
-    cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/kernels/ clean && make -C ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=${HTP_ARCH_VERSION} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG=${DEBUG_FLAG}
-    /bin/cp -fv ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so  ${TARGET}
+    ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ggml_dsp.idl
+    cd ${PROJECT_ROOT_PATH} && make -C ggml/src/ggml-hexagon/htp/ clean && make -C ggml/src/ggml-hexagon/htp/ HTP_ARCH_VERSION=${HTP_ARCH_VERSION} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG=${DEBUG_FLAG}
+    /bin/cp -fv ggml/src/ggml-hexagon/htp/libggmldsp-skel.so  ${TARGET}
     if [  -f ${TARGET} ]; then
         is_so_file_changed ${TARGET}
         if [ $? -eq 0 ]; then
