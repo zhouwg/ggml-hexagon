@@ -5865,6 +5865,63 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     PERF_RECORD(t_p7, ctx->p7_hist);
     ctx->cum_p7_dsp_exec_us  += t_p7;
     ctx->p7_dsp_exec_hist[ctx->perf_hist_idx] = t_p7;
+#if 0
+    // [LONGTAIL-PROBE 2026-07-11] log batch_call + op summary when dsp_exec > 5ms.
+    // Helps identify which subgraph(s) cause the heavy tail (max=27ms in recent tests).
+    // Throttled: at most one log per 100ms wall-clock to avoid log flood.
+    if (t_p7 > 5000) {
+        static int64_t s_last_longtail_log_us = 0;
+        int64_t now_us = ggml_time_us();
+        if (now_us - s_last_longtail_log_us > 100000) {
+            s_last_longtail_log_us = now_us;
+            // Summarize op types in this batch (count per op code).
+            int op_count[GGML_OP_COUNT] = {0};
+            for (uint32_t k = 0; k < n_ops; k++) {
+                int opc = (int) hex_ops[k].opcode;
+                if (opc >= 0 && opc < GGML_OP_COUNT) {
+                    op_count[opc]++;
+                }
+            }
+            char op_summary[512];
+            int  op_summary_len = 0;
+            for (int op = 0; op < GGML_OP_COUNT; op++) {
+                if (op_count[op] > 0) {
+                    op_summary_len += snprintf(op_summary + op_summary_len,
+                                               sizeof(op_summary) - op_summary_len,
+                                               "%s%s=%d",
+                                               op_summary_len ? "," : "",
+                                               ggml_op_name((enum ggml_op) op),
+                                               op_count[op]);
+                }
+            }
+            // MUL_MAT breakdown: walk tensor_src via src_idx, gather src0->ne[1] (=N)
+            // and src1->ne[1] (=M, rows of activation).
+            int mat_n_rows_sum = 0, mat_n_cols_sum = 0, mat_count = 0;
+            int mat_ne11_min = 999999, mat_ne11_max = 0;
+            for (uint32_t k = 0; k < n_ops; k++) {
+                if ((int) hex_ops[k].opcode != GGML_OP_MUL_MAT) continue;
+                uint32_t s0_idx = hex_ops[k].src_idx[0];
+                uint32_t s1_idx = hex_ops[k].src_idx[1];
+                if (s0_idx >= n_tensors || s1_idx >= n_tensors) continue;
+                ggml_tensor * src0 = tensor_src[s0_idx];
+                ggml_tensor * src1 = tensor_src[s1_idx];
+                if (!src0 || !src1) continue;
+                int ne11 = (int) src1->ne[1];
+                int ne01 = (int) src0->ne[1];
+                mat_n_rows_sum += ne11;
+                mat_n_cols_sum += ne01;
+                mat_count++;
+                if (ne11 < mat_ne11_min) mat_ne11_min = ne11;
+                if (ne11 > mat_ne11_max) mat_ne11_max = ne11;
+            }
+            GGMLHEXAGON_LOG_ALWAYS("[LONGTAIL-PROBE] batch_call#%llu dsp_exec=%lldus n_ops=%u ops=[%s] mm=%d mm_ne11[min=%d max=%d avg=%.1f] mm_ne01[sum=%d]",
+                                   (unsigned long long) ctx->rpc_batch_call_count, (long long) t_p7, n_ops, op_summary,
+                                   mat_count, mat_ne11_min, mat_ne11_max,
+                                   mat_count ? (double) mat_n_rows_sum / mat_count : 0.0,
+                                   mat_n_cols_sum);
+        }
+    }
+#endif
     // rpc_setup = AP-side cost between Phase 6.5 end and the invoke entry
     int64_t p7_rpc_setup = t_p7_pre - t_prev;
     ctx->cum_p7_rpc_setup_us  += p7_rpc_setup;

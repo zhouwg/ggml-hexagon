@@ -5,8 +5,8 @@ include(CheckIncludeFileCXX)
 #set(CMAKE_WARN_DEPRECATED YES)
 set(CMAKE_WARN_UNUSED_CLI YES)
 
-set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE")
+set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
