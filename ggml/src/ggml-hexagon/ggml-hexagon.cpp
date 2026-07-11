@@ -291,6 +291,15 @@ struct ggml_backend_hexagon_context {
     int64_t  rpc_overhead_sum_us;  // sum of all probe invokes (for avg)
     uint32_t rpc_overhead_count;   // number of probe invokes measured
 
+    // Cumulative MUL_MAT counters (PP optimization diagnostics).
+    // Tracked in ctx so we can read rates after a sweep run without
+    // changing existing per-call LOG_DEBUG output paths.
+    uint64_t n_mul_mat_total_cum = 0;        // total MUL_MAT ops in supported_nodes
+    uint64_t n_hmx_used_cum      = 0;        // MUL_MAT dispatched to HMX kernels
+    uint64_t n_fused_qkv_cum     = 0;        // 3x MUL_MAT -> HTP_OP_MUL_MAT_QKV fusions
+    uint64_t n_fused_ffn_cum     = 0;        // 2x MUL_MAT -> HTP_OP_MUL_MAT_FFN fusions
+    uint64_t n_fused_mm_add_cum  = 0;        // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
+
     // Buffer type owned by this context (each device has its own buft)
     struct ggml_backend_buffer_type buffer_type;
     // Repack buffer type(is_host=false), same ION pool as buffer_type
@@ -630,6 +639,27 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              (unsigned long long)ctx->cgraph_cache_misses,
                              total_cache_lookups ? (100.0 * ctx->cgraph_cache_hits / total_cache_lookups) : 0.0,
                              ctx->cgraph_cache.size());
+
+    // MUL_MAT optimization diagnostics (PP). Cumulative across the run.
+    // - n_mul_mat_total: every MUL_MAT in supported_nodes (cache miss only)
+    // - n_hmx_used:      MUL_MAT dispatched to HMX (kparams.n_hmx == 1)
+    // - n_fused_qkv:     3x MUL_MAT (Q,K,V) merged into HTP_OP_MUL_MAT_QKV
+    // - n_fused_ffn:     2x MUL_MAT (gate,up) merged into HTP_OP_MUL_MAT_FFN
+    // - n_fused_mm_add:  MUL_MAT + ADD merged into HTP_OP_MUL_MAT_ADD
+    {
+        const double total = (double) ctx->n_mul_mat_total_cum;
+        const double hmx_pct  = total > 0 ? 100.0 * ctx->n_hmx_used_cum      / total : 0.0;
+        const double qkv_pct  = total > 0 ? 100.0 * (3 * ctx->n_fused_qkv_cum) / total : 0.0;
+        const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
+        const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
+        GGMLHEXAGON_LOG_VERBOSE("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
+                               "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
+                               (unsigned long long)ctx->n_mul_mat_total_cum,
+                               (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
+                               (unsigned long long)ctx->n_fused_qkv_cum, qkv_pct,
+                               (unsigned long long)ctx->n_fused_ffn_cum, ffn_pct,
+                               (unsigned long long)ctx->n_fused_mm_add_cum, add_pct);
+    }
 
     // Per-call distribution (min/p50/p95/max) for the last PERF_HIST_CAP calls
     if (ctx->perf_hist_count > 0) {
@@ -1807,20 +1837,19 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
 
     size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
-    GGMLHEXAGON_LOG_VERBOSE("system mem size %d MiB", total_mem / SIZE_IN_MB);
 
-    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73 || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
-        GGMLHEXAGON_LOG_VERBOSE("dsp arch version 0x%x", dsp_version);
+
+    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73
+        || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
         //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
         htp_arch = ggmlhexagon_htparch_hex_to_decimal(dsp_version);
-        GGMLHEXAGON_LOG_DEBUG("dsp arch version %d", htp_arch);
         struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_htparch(htp_arch);
-        if (nullptr != socinfo) {
-            ctx->socinfo = *socinfo;
-            GGMLHEXAGON_LOG_VERBOSE("device info: %s, %s", socinfo->soc_desc, ggmlhexagon_get_htparch_desc(htp_arch));
-        }
+        GGML_ASSERT(nullptr != socinfo);
+        ctx->socinfo = *socinfo;
+        GGMLHEXAGON_LOG_VERBOSE("device info: %s, %s, dsp arch version 0x%x, system mem size %d MiB",
+                                socinfo->soc_desc, ggmlhexagon_get_htparch_desc(htp_arch), dsp_version, total_mem / SIZE_IN_MB);
     } else {
-        GGMLHEXAGON_LOG_VERBOSE("error: dsp arch version 0x%x is not supported", dsp_version);
+        GGMLHEXAGON_LOG_VERBOSE("device info: unknown");
     }
 
     uint32_t vtcm_count = 0;
@@ -1847,14 +1876,15 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
         ctx->has_hmx = true;
     }
 
-    GGMLHEXAGON_LOG_VERBOSE("vtcm_count %d", vtcm_count);
-    GGMLHEXAGON_LOG_VERBOSE("vtcm_page %d", vtcm_page);
+    GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
     //FIXME: the log output is "hmx_depth 0 hmx_spatial 0", this is not correct
     //GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d hmx_spatial %d", hmx_depth, hmx_spatial);
-    GGMLHEXAGON_LOG_VERBOSE("hvx_support_128b %d", hvx_support_128b);
-    GGMLHEXAGON_LOG_VERBOSE("unsigned pd supported %d", ggmlhexagon_is_unsignedpd_supported(ctx->domain_id));
-    GGMLHEXAGON_LOG_VERBOSE("async fastrpc supported %d", ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
-    GGMLHEXAGON_LOG_VERBOSE("device %d caps: has_vtcm=%d has_hvx=%d has_hmx=%d", ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx);
+
+    GGMLHEXAGON_LOG_VERBOSE("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
+                            "unsigned pd supported %d, async fastrpc supported %d",
+                                ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
+                                ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
+                                ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
     return htp_arch;
 }
 
@@ -3183,6 +3213,11 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       rpc_overhead_max_us(0),
       rpc_overhead_sum_us(0),
       rpc_overhead_count(0),
+      n_mul_mat_total_cum(0),
+      n_hmx_used_cum(0),
+      n_fused_qkv_cum(0),
+      n_fused_ffn_cum(0),
+      n_fused_mm_add_cum(0),
       buffer_type{},
       has_vtcm(false),
       has_hvx(false),
@@ -4871,6 +4906,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         memcpy(op.params, node->op_params, sizeof(op.params));
         if (node->op == GGML_OP_MUL_MAT) {
             ggml_hexagon_precompute_mm_params(ctx, node, op, false);
+            ctx->n_mul_mat_total_cum++;
+            if (((const struct htp_mm_kernel_params *) op.kernel_params)->n_hmx) {
+                ctx->n_hmx_used_cum++;
+            }
 
             // Diagnostic: log N=1 GEMV kernel params and tensor info for debugging
             // ION mirror precision issues. N=1 is the smallest batch and most
@@ -5115,6 +5154,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 fused_ops.push_back(op);
                                 i += 2;
                                 n_mul_mat_qkv++;
+                                ctx->n_fused_qkv_cum++;
                                 GGMLHEXAGON_LOG_DEBUG("DBG QKV fusion: q=%s k=%s v=%s | Wq[t%d] Wk[t%d] Wv[t%d] x[t%d] | Q[t%d] K[t%d] V[t%d]",
                                                          n_q->name ? n_q->name : "?",
                                                          n_k->name ? n_k->name : "?",
@@ -5156,6 +5196,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 fused_ops.push_back(op);
                                 i += 1;
                                 n_mul_mat_ffn++;
+                                ctx->n_fused_ffn_cum++;
                                 GGMLHEXAGON_LOG_DEBUG("DBG FFN fusion: gate=%s up=%s | Wgate[t%d] y[t%d] Wup[t%d] | gate[t%d] up[t%d]",
                                                          n_gate->name ? n_gate->name : "?",
                                                          n_up->name ? n_up->name : "?",
@@ -5202,6 +5243,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                             fused_ops.push_back(op);
                             i++;
                             n_mul_mat_add++;
+                            ctx->n_fused_mm_add_cum++;
                             continue;
                         } else {
                             GGMLHEXAGON_LOG_ALWAYS("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
