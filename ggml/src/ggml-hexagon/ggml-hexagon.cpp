@@ -5175,6 +5175,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             // Only applies to pre-norm models where MUL_MAT (down_proj)
             // is immediately followed by residual ADD. Gemma uses post-norm
             // (MUL_MAT -> RMS_NORM -> MUL -> ADD), so this won't trigger there.
+            //
+            // Bias (src2) is read from DDR, not VTCM, so the kparams from
+            // Phase 2 (MUL_MAT) are reusable. The VTCM budget check is
+            // defensive: if the matmul already saturates VTCM as a plain
+            // MUL_MAT, fusing into MUL_MAT_ADD cannot save anything; better
+            // to keep it as 2 separate ops than risk silent overflow.
             if (op.opcode == GGML_OP_MUL_MAT && i + 1 < hex_ops.size()) {
                 const hex_op_desc & next = hex_ops[i + 1];
                 if (next.opcode == GGML_OP_ADD &&
@@ -5187,13 +5193,20 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                         bias_idx = next.src_idx[0];
                     }
                     if (bias_idx >= 0) {
-                        op.htp_opcode = HTP_OP_MUL_MAT_ADD;
-                        op.src_idx[2]   = bias_idx;
-                        op.dst_idx[0]    = next.dst_idx[0];
-                        fused_ops.push_back(op);
-                        i++;
-                        n_mul_mat_add++;
-                        continue;
+                        const struct htp_mm_kernel_params * kparams_mm =
+                            (const struct htp_mm_kernel_params *) op.kernel_params;
+                        if ((size_t) kparams_mm->vtcm_size <= vtcm_budget) {
+                            op.htp_opcode = HTP_OP_MUL_MAT_ADD;
+                            op.src_idx[2]   = bias_idx;
+                            op.dst_idx[0]    = next.dst_idx[0];
+                            fused_ops.push_back(op);
+                            i++;
+                            n_mul_mat_add++;
+                            continue;
+                        } else {
+                            GGMLHEXAGON_LOG_ALWAYS("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
+                                                  (int) kparams_mm->vtcm_size, vtcm_budget);
+                        }
                     }
                 }
             }
