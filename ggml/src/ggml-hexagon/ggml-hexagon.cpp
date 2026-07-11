@@ -81,8 +81,11 @@
 #include "kernels/ggml_dsp.h"
 #include "kernels/dsp-ctx.h"
 #include "htp/htp-ops.h"
+#include "htp/hex-common.h"
+#include "htp/hex-fastdiv.h"
 #include "htp/matmul-ops.h"
 #include "htp/flash-attn-ops.h"
+#include "htp/unary-ops.h"
 
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
@@ -2198,6 +2201,116 @@ static bool ggml_hexagon_compute_fa_params(
     kparams->qrows           = (uint32_t)(q->ne[1] * q->ne[2] * q->ne[3]);
     kparams->qrows_per_thread = (kparams->qrows + ctx->n_threads - 1) / ctx->n_threads;
     return true;
+}
+
+// Map GGML opcode to HTP opcode for unary-family ops. Mirrors the DSP-side
+// ggml_op_to_htp_op() in kernels/entry.c, restricted to the subset that
+// htp_op_is_unary() in unary-ops.h accepts. GGML_UNARY_OP_GELU/SILU are
+// intentionally NOT mapped here because the DSP dispatches them to
+// op_activations, not op_unary, and have a different kparams contract.
+// Returns false if the op is not a precompute-required unary.
+static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, uint32_t * htp_op) {
+    switch (ggml_op) {
+        case GGML_OP_NORM:    *htp_op = HTP_OP_NORM;        return true;
+        case GGML_OP_L2_NORM: *htp_op = HTP_OP_L2_NORM;     return true;
+        case GGML_OP_RMS_NORM:*htp_op = HTP_OP_RMS_NORM;    return true;
+        case GGML_OP_SCALE:   *htp_op = HTP_OP_SCALE;       return true;
+        case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return true;
+        case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return true;
+        case GGML_OP_TRI:     *htp_op = HTP_OP_TRI;         return true;
+        case GGML_OP_UNARY:
+            if (!op_params) return false;
+            switch (op_params[0]) {
+                case GGML_UNARY_OP_NEG:      *htp_op = HTP_OP_UNARY_NEG;      return true;
+                case GGML_UNARY_OP_TANH:     *htp_op = HTP_OP_UNARY_TANH;     return true;
+                case GGML_UNARY_OP_SIGMOID:  *htp_op = HTP_OP_UNARY_SIGMOID;  return true;
+                case GGML_UNARY_OP_EXP:      *htp_op = HTP_OP_UNARY_EXP;      return true;
+                case GGML_UNARY_OP_SOFTPLUS: *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
+                // GELU/SILU are op_activations on DSP; not handled here.
+                default: return false;
+            }
+        default:
+            return false;
+    }
+}
+
+// Precompute htp_unary_kernel_params on AP side for unary ops (NORM, RMS_NORM,
+// RMS_NORM_MUL, SCALE, SQR, SQRT, UNARY_*, L2_NORM, TRI). Ported from
+// Qualcomm's ggml-hexagon::ggml_hexagon_precompute_unary_params.
+//
+// After commit fb30ba9a6, the DSP-side op_unary requires these fields to be
+// filled by the host: n_threads, col_tile, vtcm_*_size_per_thread,
+// src/dst_row_size_aligned, fastdiv helpers, etc. JZ previously did not call
+// this, leaving kparams zeroed - op_unary then computed 0-sized VTCM
+// allocations and n_threads=0, garbling the output.
+static void ggml_hexagon_precompute_unary_params(
+    const ggml_backend_hexagon_context * ctx,
+    uint32_t op,
+    const ggml_tensor * src0,
+    const ggml_tensor * src1,
+    const ggml_tensor * dst,
+    struct htp_unary_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const uint32_t src0_nrows = (uint32_t)(src0->ne[1] * src0->ne[2] * src0->ne[3]);
+    const uint32_t n_threads  = (ctx->n_threads < (int) src0_nrows) ? (uint32_t) ctx->n_threads : src0_nrows;
+
+    kparams->n_threads = n_threads;
+
+    const size_t src0_data_row_size = (size_t) src0->ne[0] * sizeof(float);
+    const size_t dst_data_row_size  = (size_t) dst->ne[0]  * sizeof(float);
+
+    const size_t src0_row_size_aligned = hex_round_up((uint32_t) src0_data_row_size, 128);
+    const size_t dst_row_size_aligned  = hex_round_up((uint32_t) dst_data_row_size,  128);
+
+    kparams->src0_row_size_aligned = (uint32_t) src0_row_size_aligned;
+    kparams->dst_row_size_aligned  = (uint32_t) dst_row_size_aligned;
+
+    size_t src1_data_row_size = 0;
+    size_t src1_row_size_aligned = 0;
+    bool broadcast_weight = false;
+
+    if (op == HTP_OP_RMS_NORM_MUL) {
+        GGML_ASSERT(src1 != nullptr);
+        src1_data_row_size = (size_t) src1->ne[0] * sizeof(float);
+        src1_row_size_aligned = hex_round_up((uint32_t) src1_data_row_size, 128);
+        broadcast_weight = (src1->ne[1] * src1->ne[2] * src1->ne[3] == 1);
+    }
+
+    kparams->src1_row_size_aligned = (uint32_t) src1_row_size_aligned;
+    kparams->broadcast_weight      = broadcast_weight ? 1u : 0u;
+
+    const size_t vtcm_size_budget = ctx->socinfo.vtcm_size_in_mb * 1024ull * 1024ull;
+
+    struct htp_unary_vtcm_layout L;
+    uint32_t col_tile = 0;
+    uint32_t vtcm_row_per_thread = 0;
+
+    htp_unary_vtcm_layout_build(&L, op, (uint32_t) src0->ne[0], (uint32_t) dst->ne[0],
+                                op == HTP_OP_RMS_NORM_MUL ? (uint32_t) src1->ne[0] : 0,
+                                broadcast_weight, n_threads, vtcm_size_budget,
+                                &col_tile, &vtcm_row_per_thread);
+
+    kparams->col_tile              = col_tile;
+    kparams->vtcm_row_per_thread   = vtcm_row_per_thread;
+    kparams->vtcm_size             = (uint32_t) L.total_bytes;
+
+    kparams->vtcm_src0_size_per_thread = (uint32_t) L.src0_bytes;
+    kparams->vtcm_src1_size_per_thread = (uint32_t) L.src1_bytes;
+    kparams->vtcm_dst_size_per_thread  = (uint32_t) L.dst_bytes;
+
+    kparams->vtcm_src0_size = (uint32_t)(L.src0_bytes * n_threads);
+    kparams->vtcm_src1_size = (uint32_t)(L.src1_bytes * n_threads);
+    kparams->vtcm_dst_size  = (uint32_t)(L.dst_bytes  * n_threads);
+
+    kparams->block = col_tile ? 0u : (uint32_t) ((L.src0_bytes / 2) / src0_row_size_aligned);
+
+    const uint32_t tiles_per_row = col_tile > 0 ? ((uint32_t) src0->ne[0] + col_tile - 1) / col_tile : 1u;
+    kparams->div_ne01  = init_fastdiv_values((uint32_t) src0->ne[1]);
+    kparams->div_ne02  = init_fastdiv_values((uint32_t) src0->ne[2]);
+    kparams->div_ne012 = init_fastdiv_values((uint32_t)(src0->ne[1] * src0->ne[2]));
+    kparams->div_tpr   = init_fastdiv_values(tiles_per_row);
 }
 
 static bool ggml_hexagon_matmul_is_hmx_eligible(
@@ -4788,6 +4901,18 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
             ggml_hexagon_compute_fa_params(ctx, node,
                 (struct htp_fa_kernel_params *) op.kernel_params);
+        } else {
+            // Unary-family ops (NORM, RMS_NORM, SCALE, SQR, SQRT, UNARY_*,
+            // L2_NORM, TRI) require host-precomputed htp_unary_kernel_params
+            // since upstream commit fb30ba9a6. Without this the DSP reads
+            // zeroed kparams (n_threads=0, etc.) and the output is garbled.
+            uint32_t unary_htp_op = 0;
+            if (ggml_op_to_htp_op_unary(node->op, node->op_params, &unary_htp_op)) {
+                ggml_hexagon_precompute_unary_params(ctx, unary_htp_op,
+                    node->src[0], node->src[1], node,
+                    (struct htp_unary_kernel_params *) op.kernel_params);
+                op.htp_opcode = (int32_t) unary_htp_op;
+            }
         }
         op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
         op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
@@ -4919,6 +5044,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     op.htp_opcode = HTP_OP_RMS_NORM_MUL;
                     op.src_idx[1] = next.src_idx[1];
                     op.dst_idx[0] = next.dst_idx[0];
+                    // Precompute unary kparams for the fused op (src0 = RMS_NORM's
+                    // input, src1 = MUL's other input, dst = MUL's output).
+                    if (op.src_idx[0] >= 0 && op.src_idx[1] >= 0 && op.dst_idx[0] >= 0) {
+                        ggml_hexagon_precompute_unary_params(ctx, HTP_OP_RMS_NORM_MUL,
+                            tensor_src[op.src_idx[0]], tensor_src[op.src_idx[1]], tensor_src[op.dst_idx[0]],
+                            (struct htp_unary_kernel_params *) op.kernel_params);
+                    }
                     fused_ops.push_back(op);
                     i++;
                     n_rms_norm_mul++;
