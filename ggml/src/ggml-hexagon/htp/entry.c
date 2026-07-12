@@ -1854,7 +1854,14 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * session (matches Qualcomm htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
 
+    // (Removed for perf: per-batch and per-op LOG_INFO calls below were firing
+    // ggml_log_always() with 4-arg pushes for 50 ops * 4352 batches ~= 217K
+    // function-call/return sequences per inference. Even with dump_diag_info=0
+    // early-return, the call setup is non-zero on Hexagon. Re-enable with
+    // -DGGMLHEXAGON_DEBUG or set dsp_cache_trace_bit0=1 when actively debugging.)
+#if GGMLHEXAGON_DEBUG
     GGMLHEXAGON_LOG_INFO("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+#endif
 
     /* Reset per-batch dst trackers.
      *  - prior_dst_ranges is consulted by bit 1; the per-op dst tracker
@@ -1995,7 +2002,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             }
         }
 
+#if GGMLHEXAGON_DEBUG
         GGMLHEXAGON_LOG_INFO("ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
+#endif
 
         // Translation layer: map GGML op to HTP op, build octx, call execute_op.
         // For fused ops, AP sets htp_opcode directly (skip ggml_op_to_htp_op).
@@ -2092,7 +2101,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             return AEE_EFAILED;
         }
 
+#if GGMLHEXAGON_DEBUG
         GGMLHEXAGON_LOG_INFO("ion-batch: op %u done", i);
+#endif
 
         /* bit 2: bulk dst flush at batch end.
          * Also mark dst tensors as dirty so they get re-invalidated
@@ -2122,7 +2133,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
     }
 
+#if GGMLHEXAGON_DEBUG
     GGMLHEXAGON_LOG_INFO("ion-batch: all %u ops done", hdr->n_ops);
+#endif
 
     /* bit 2: bulk dst flush. Sort + merge collected ranges, then flush once
      * per merged region. Flushes happen here (after all ops in the batch
