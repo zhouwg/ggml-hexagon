@@ -387,7 +387,10 @@ function build_arm64
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
@@ -408,7 +411,10 @@ function build_arm64_debug
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
@@ -449,9 +455,15 @@ function build_armcpu()
 {
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_cpu
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=OFF -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
+    #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=OFF -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
+    #remove stale hexagon artifacts from previous hexagon builds to ensure CPU-only runtime
+    rm -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+    rm -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so
     show_pwd
 }
 
@@ -631,12 +643,32 @@ function update_ggml_libs()
     #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-base.so                 ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so                  ${REMOTE_PATH}/
-    adb push ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so              ${REMOTE_PATH}/
+    #libggml-hexagon.so only exists in hexagon builds, not in CPU-only builds
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+        adb push ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${REMOTE_PATH}/
+    fi
     adb push ${LOCAL_BUILD_DIR}/bin/libggml.so                      ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-common.so              ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so     ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so          ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama.so                     ${REMOTE_PATH}/
+}
+
+
+#detect build type from build output: hexagon-jz, hexagon-qcom, or cpu-only
+function detect_build_type()
+{
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+        if ls ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so 1>/dev/null 2>&1; then
+            echo "hexagon-jz"
+        else
+            echo "hexagon-qcom"
+        fi
+    elif ls ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so 1>/dev/null 2>&1; then
+        echo "hexagon-qcom"
+    else
+        echo "cpu-only"
+    fi
 }
 
 
@@ -652,23 +684,47 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
-    if [ $? -eq 0 ]; then
-        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n\n"
-        #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
-    else
-        printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
-        #upload ggml runtime libs to Android phone
-        update_ggml_libs
+    local current_build_type
+    current_build_type=$(detect_build_type)
+
+    local last_build_type_file="${LOCAL_BUILD_DIR}/.last_deployed_build_type"
+    local last_build_type=""
+    if [ -f "${last_build_type_file}" ]; then
+        last_build_type=$(cat "${last_build_type_file}")
     fi
 
-    #for verify JZ's open-source ggml-hexagon backend(libggmldsp-skel.so) which generated from source codes in this branch
-    #this is default behaviour(it will report libggmldsp-skel.so can't found when exec UT after build_qcom), but Qualcomm's backend so already updated on device side when running build_qcom
-    prepare_ggmldsp
+    if [ "${current_build_type}" != "${last_build_type}" ]; then
+        printf "build type changed: '%s' -> '%s', force update ggml libs\n\n" "${last_build_type}" "${current_build_type}"
+        update_ggml_libs
+        echo "${current_build_type}" > "${last_build_type_file}"
+    else
+        is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+        if [ $? -eq 0 ]; then
+            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n\n"
+            #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
+        else
+            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
+            #upload ggml runtime libs to Android phone
+            update_ggml_libs
+        fi
+    fi
 
-    #for verify Qualcomm's open-source ggml-hexagon backend(libggml-htp.so) which generated from source codes in this branch
-    #this is non-default behaviour, but JZ's backend so already updated on device side when running build
-    #prepare_ggmlhtp
+    #deploy/cleanup backend-specific libs per build type
+    case "${current_build_type}" in
+        hexagon-jz)
+            prepare_ggmldsp
+            adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
+            ;;
+        hexagon-qcom)
+            prepare_ggmlhtp
+            adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
+            ;;
+        cpu-only)
+            adb shell rm -f ${REMOTE_PATH}/libggml-hexagon.so
+            adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
+            adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
+            ;;
+    esac
 
     adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
 
