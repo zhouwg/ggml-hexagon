@@ -1,16 +1,26 @@
-#ifndef GGMLDSP_OPS_H
-#define GGMLDSP_OPS_H
+/*
+ * 2024-2026 The ggml authors
+ *
+ * this file is part of jz's ggml-hexagon
+ *
+ * GitHub:   - https://github.com/zhouwg/ggml-hexagon
+ */
+#ifndef GGMLDSP_CTX_H
+#define GGMLDSP_CTX_H
 
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <remote.h>
-#include <AEEStdDef.h>
 #include <stddef.h>
 
 #ifdef  __cplusplus
 extern "C" {
 #endif
+
+/* Alignment requirements */
+#define HEX_BATCH_ALIGN     128
+#define HEX_TENSOR_ALIGN    128
+#define HEX_OP_ALIGN        128
 
 // Forward declarations for types used in dsp_context
 struct hmx_queue;
@@ -38,16 +48,6 @@ struct dsp_op_desc {
    int32_t src2_idx;
    int32_t src3_idx;
    int32_t dst_idx;
-};
-
-typedef struct dsp_opbatch_req dsp_opbatch_req;
-struct dsp_opbatch_req {
-   int32_t n_tensors;
-   int32_t n_ops;
-   dsptensor* tensors;
-   int tensors_len;
-   dsp_op_desc* ops;
-   int ops_len;
 };
 
 /*
@@ -93,11 +93,6 @@ typedef struct hex_batch_hdr {
     uint32_t total_size;        /* total size of this batch region (hdr + ops + tensors) */
     uint32_t reserved;          /* padding / future use */
 } hex_batch_hdr;
-
-/* Alignment requirements */
-#define HEX_BATCH_ALIGN     128
-#define HEX_TENSOR_ALIGN    128
-#define HEX_OP_ALIGN        128
 
 // DSP session context: bundles all per-session state.
 // Allocated in ggml_dsp_open, freed in ggml_dsp_close.
@@ -166,12 +161,8 @@ struct dsp_context {
     struct htp_context * htp_ctx;
 };
 
-extern struct dsp_context *g_dsp_ctx;
-
-
-
 #ifdef  __cplusplus
 }
 #endif
 
-#endif /* GGMLDSP_OPS_H */
+#endif /* GGMLDSP_CTX_H */

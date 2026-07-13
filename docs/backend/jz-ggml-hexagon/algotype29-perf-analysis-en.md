@@ -1,5 +1,29 @@
 # algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend
 
+> [!WARNING]
+> **This document is based on the 2026-07-05 pre-optimization state and contains multiple stale sections.**
+>
+> The latest authoritative analysis consistent with the current code is
+> [algotype29-perf-analysis-en-20260711.md](algotype29-perf-analysis-en-20260711.md)
+> (reviewed 2026-07-12).
+>
+> Known stale content (to be revised):
+> - **Line 5**: "JZ uses `kernels/entry.c`" — **wrong**. Post-remove-dual-path, JZ uses `htp/entry.c`; the `kernels/` directory was completely removed (24,298 lines).
+> - **Lines 13-19 (Relevant Files)**: file table is entirely stale:
+>   - `ggml-hexagon.cpp` is now the **Qualcomm version** (4,452 lines), not the JZ version
+>   - The JZ version is `ggml-hexagon-jz.cpp` (6,717 lines)
+>   - `ggml-hexagon-qcom.cpp` no longer exists
+>   - `kernels/entry.c` no longer exists
+>   - See [algotype29-perf-analysis-en-20260711.md:15-17](algotype29-perf-analysis-en-20260711.md#L15-L17) for the correct division
+> - **Lines 23-67 (2026-07-05 benchmark)**: PP=105.6 t/s is the pre-optimization state. Post-optimization (weight repack moved to set_tensor + dsp_cache_mode + ion_sync_mode) reached **PP 321+ t/s** (see [algotype29-perf-analysis-en-20260711.md:34](algotype29-perf-analysis-en-20260711.md#L34)).
+> - **Lines 77-116 (Weight Repack Timing)**: describes JZ doing per-call repack in Phase 4.5 — **completely wrong**. Post-optimization, repack is done once at set_tensor; Phase 4.5 no longer repacks. See [algotype29-perf-analysis-en-20260711.md:266-308](algotype29-perf-analysis-en-20260711.md#L266-L308).
+> - **Lines 156-196 (Op Fusion Scope)**: "QKV/FFN not supported" — **stale**, QKV/FFN fusion has been implemented.
+> - **Lines 199-223 (Graph Cache)**: "all PP cache MISS" — **stale**, post-optimization hit rate = 99.2% (content-hash based, see [algotype29-perf-analysis-en-20260711.md:35](algotype29-perf-analysis-en-20260711.md#L35)).
+> - **Lines 319-323 (Optimization Recommendations Priority 1)**: "Move tiled repack to set_tensor" — **completed**.
+> - **`mulmat_algotype` config knob has been removed** (dual path cleanup); the algotype=29 concept survives only as a historical comment.
+>
+> The analysis frameworks in lines 119-153 (FastRPC Call Pattern) and lines 227-243 (Cache Coherency Management) remain valid and can still be referenced.
+
 ## Background
 
 When `mulmat_algotype=29`, both the JZ and Qualcomm versions of the ggml-hexagon backend route through Qualcomm's `execute_op` path (the `execute_op` implementation lives in `htp/` and is shared by both versions). However, the DSP entry points differ: JZ uses `kernels/entry.c`, while Qualcomm uses `htp/main.c`. The AP-side implementations differ significantly, leading to substantial performance differences.

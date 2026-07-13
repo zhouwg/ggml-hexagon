@@ -1,3 +1,5 @@
+# this is part of JZ's ggml-hexagon:
+#
 #following vars already defined in CMakeLists.txt
 #HTP_ARCH_VERSION=v79
 #DEBUG_FLAG=-DNDEBUG -Wall

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# this self-contained file is part of JZ's ggml-hexagon:
+
 # build DSP kernel of JZ's ggml-hexagon independently for purpose of simplify work flow
 
 PROJECT_HOME_PATH=`pwd`
@@ -8,10 +10,11 @@ LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 REMOTE_PATH=/data/local/tmp
 
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+
 #build all supported DSP skel versions: v75, v79, v81
-#v75 uses qf32 accumulator fallbacks (HVX_V*_F32 macros) for __HVX_ARCH__ < 79
 #HTP_ARCH_VERSIONS="v75 v79 v81"
 HTP_ARCH_VERSIONS="v79"
+
 HEXAGON_SDK_VERSION=6.6.0.0
 HEXAGON_TOOLS_VERSION=19.0.07
 HEXAGON_SDK_PATH=${TOOLCHAIN_PATH}/Hexagon_SDK/${HEXAGON_SDK_VERSION}

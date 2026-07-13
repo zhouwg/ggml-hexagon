@@ -1,5 +1,28 @@
 # algotype=29 性能差异分析：JZ 版本 vs 高通版本
 
+> [!WARNING]
+> **本文档基于 2026-07-05 pre-optimization 状态编写,多个关键内容已过时。**
+>
+> 最新且与代码一致的权威分析是
+> [algotype29-perf-analysis-en-20260711.md](algotype29-perf-analysis-en-20260711.md)
+> (reviewed 2026-07-12)。
+>
+> 已知过时内容(待修正):
+> - **第 5 行**: "JZ 为 `kernels/entry.c`" — **错误**。post-remove-dual-path 后 JZ 用 `htp/entry.c`,`kernels/` 目录已被完全删除(24298 行)。
+> - **第 9-18 行(相关文件)**: 文件表完全过时:
+>   - `ggml-hexagon.cpp` 已是 **Qualcomm 版本** (4452 行),不是 JZ 版本
+>   - JZ 版本是 `ggml-hexagon-jz.cpp` (6717 行)
+>   - `ggml-hexagon-qcom.cpp` 已不存在
+>   - `kernels/entry.c` 已不存在
+>   - 正确分工见 [algotype29-perf-analysis-en-20260711.md:15-17](algotype29-perf-analysis-en-20260711.md#L15-L17)
+> - **第 22-61 行(权重 repack 时机)**: 描述 JZ 在 Phase 4.5 中做 per-call repack — **完全错误**。post-optimization 已在 set_tensor 做一次性 repack,Phase 4.5 不再 repack。详见 [algotype29-perf-analysis-en-20260711.md:266-308](algotype29-perf-analysis-en-20260711.md#L266-L308)。
+> - **第 99-128 行(op fusion 范围)**: "QKV/FFN 不支持" — **过时**,QKV/FFN fusion 早已实现。
+> - **第 130-147 行(graph cache)**: 描述"graph 缓存:无" — **过时**,post-optimization hit rate = 99.2% (content-hash based,详见 [algotype29-perf-analysis-en-20260711.md:35](algotype29-perf-analysis-en-20260711.md#L35))。
+> - **第 241-245 行(优化建议优先级 1)**: "把 tiled repack 移到 set_tensor" — **已完成**。
+> - **`mulmat_algotype` config knob 已被移除**(dual path 清理),algotype=29 概念仅作为历史注释保留。
+>
+> 第 63-96 行(FastRPC 调用模式)和第 149-167 行(cache coherency 管理)的分析框架仍然有效,可继续参考。
+
 ## 背景
 
 当 `mulmat_algotype=29` 时，JZ 版本和高通版本的 ggml-hexagon backend 都走 Qualcomm 的 `execute_op` 路径（`execute_op` 实现位于 `htp/` 目录下，被两版本共享调用）。但 DSP 端入口不同：JZ 为 `kernels/entry.c`，高通为 `htp/main.c`。两者在 AP 端的实现差异巨大，导致性能显著不同。

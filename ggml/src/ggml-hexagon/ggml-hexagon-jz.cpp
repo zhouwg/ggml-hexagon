@@ -1,7 +1,9 @@
 /*
  * 2024-2026 The ggml authors
  *
- * this single-source-file implementation of JZ's ggml-hexagon backend has 8 sections:
+ * this single-source-file is part of jz's ggml-hexagon
+ *
+ * this file has 8 sections:
  * section-1  forward declarations, global vars, macros
  * section-2  data structures
  * section-3  troubleshooting and profiler
@@ -11,7 +13,6 @@
  * section-7  Qualcomm compatibility layer
  * section-8  backend implementation
  *
- * Jeff Zhou - zhouwg2000@gmail.com
  * GitHub:   - https://github.com/zhouwg/ggml-hexagon
  */
 #include <stdio.h>
@@ -119,8 +120,12 @@
 #endif
 
 #define SIZE_IN_MB                                      (1 << 20)
+
 #define GGMLHEXAGON_MAX_OPS_PER_TASK                    16
+
 #define GGMLHEXAGON_MAX_TENSORS_PER_TASK                32
+
+#define DMA_BUF_IOCTL_SYNC_IOCTL                        0x40086200u
 
 #if !defined (_WINDOWS)
 #pragma weak remote_system_request
@@ -243,7 +248,7 @@ struct ggml_backend_hexagon_context {
     int64_t  cum_p25_us;      // Phase 2.5: op fusion
     int64_t  cum_p3_us;       // Phase 3: compute layout sizes
     int64_t  cum_p4_us;       // Phase 4: tensor mirroring
-    int64_t  cum_p45_us;      // Phase 4.5: weight repack (dominant for algotype=29)
+    int64_t  cum_p45_us;      // Phase 4.5: weight repack
     int64_t  cum_p5_us;       // Phase 5: allocate batch descriptor in ION
     int64_t  cum_p6_us;       // Phase 6: descriptor construction
     int64_t  cum_p65_us;      // Phase 6.5: cache flush
@@ -261,7 +266,7 @@ struct ggml_backend_hexagon_context {
     int64_t  p25_hist[PERF_HIST_CAP];  // Phase 2.5: op fusion
     int64_t  p3_hist[PERF_HIST_CAP];   // Phase 3: compute layout sizes
     int64_t  p4_hist[PERF_HIST_CAP];   // Phase 4: tensor mirroring
-    int64_t  p45_hist[PERF_HIST_CAP];  // Phase 4.5: weight repack (dominant for algotype=29)
+    int64_t  p45_hist[PERF_HIST_CAP];  // Phase 4.5: weight repack
     int64_t  p5_hist[PERF_HIST_CAP];   // Phase 5: allocate batch descriptor in ION
     int64_t  p6_hist[PERF_HIST_CAP];   // Phase 6: descriptor construction
     int64_t  p65_hist[PERF_HIST_CAP];  // Phase 6.5: cache flush
@@ -538,12 +543,7 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
     }
 }
 
-// Always-emit log channel. Used by GGMLHEXAGON_LOG_ERROR and
-// GGMLHEXAGON_LOG_ALWAYS (both bypass the log-level filter).
-// Unlike ggmlhexagon_log_internal:
-//   - on Android writes ONLY to logcat (via __android_log_print), never to
-//     stdout, so per-batch error/always messages won't spam the llama-cli console
-//   - on non-Android hosts falls back to stdout
+// Always-emit log channel. Used by GGMLHEXAGON_LOG_ERROR and GGMLHEXAGON_LOG_ALWAYS (both bypass the log-level filter).
 static void ggmlhexagon_log_always_internal(const char * file, const char * func, int line, const char * format, ...) {
     static std::mutex s_log_mutex;
     static char s_log_buf[GGMLHEXAGON_LOGBUF_LEN];
@@ -661,7 +661,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                             i, ctx->diag_first_n_nodes[i], ctx->diag_first_n_tensors[i],
                             (long long)ctx->diag_first_graph_us[i], (long long)ctx->diag_first_gap_us[i]);
         }
-        GGMLHEXAGON_LOG_VERBOSE("%s", line);
+        GGMLHEXAGON_LOG_ALWAYS("%s", line);
     }
     GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p2.5=%lld p3=%lld p4=%lld p4.5=%lld p5=%lld p6=%lld p6.5=%lld p7.5=%lld p8=%lld us",
                              (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
@@ -1072,26 +1072,9 @@ static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
     return false;
 }
 
-// Check if an op is allowed by the enabled_ops config filter.
-// algotype=29 forces all ops enabled.
-static bool ggmlhexagon_op_is_enabled(enum ggml_op op) {
-    if (ggmlhexagon_is_metadata_op(op)) {
-        return true;
-    }
-    return true;
-}
-
 // =================================================================================================
 //  section-5: general helper functions
 // =================================================================================================
-
-// ---- ARM64 cache maintenance for non-coherent ION ----
-// DMA_BUF_IOCTL_SYNC: bracket CPU access to dma-buf fd so the kernel
-// can flush/invalidate caches.  This goes through the kernel (EL1)
-// so it works even when EL0 DC CVAC/CIVAC is trapped by hypervisor.
-// Correct ioctl number: _IOW('b', 0, struct { __u64 flags; }) = 0x40086200
-#define DMA_BUF_IOCTL_SYNC_IOCTL  0x40086200u
-
 static int ion_sync_for_direction(int fd, int direction) {
 #if defined(__ANDROID__) || defined(__linux__)
     if (fd <= 0) return -1;
@@ -1138,7 +1121,6 @@ static int ion_sync_for_direction(int fd, int direction) {
 }
 
 static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
-#if 1
     // range-based DC CVAC with 8x loop unrolling (matching QCOM hex_l2flush pattern)
     if (size == 0) return;
     {
@@ -1162,24 +1144,10 @@ static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend
         }
         __asm__ volatile("dsb ish" ::: "memory");
     }
-#else
-    // whole-pool DC CVAC
-    if (backend_ctx && backend_ctx->rpc_mempool && backend_ctx->rpc_mempool_len > 0) {
-        const char * start = (const char *)backend_ctx->rpc_mempool;
-        const char * end   = start + backend_ctx->rpc_mempool_len;
-        const size_t line_size = 64;
-        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
-        for (; addr < end; addr += line_size) {
-            __asm__ volatile("dc cvac, %0" : : "r"((const void *)addr) : "memory");
-        }
-        __asm__ volatile("dsb ish" ::: "memory");
-    }
-#endif
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
 }
 
 static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
-#if 1
     // range-based DC CIVAC with 8x loop unrolling (matching QCOM hex_l2flush pattern)
     if (size == 0) return;
     {
@@ -1204,20 +1172,6 @@ static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend
         __asm__ volatile("dsb ish" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
     }
-#else
-    // whole-pool DC CIVAC
-    if (backend_ctx && backend_ctx->rpc_mempool && backend_ctx->rpc_mempool_len > 0) {
-        const char * start = (const char *)backend_ctx->rpc_mempool;
-        const char * end   = start + backend_ctx->rpc_mempool_len;
-        const size_t line_size = 64;
-        const char * addr = (const char *)((uintptr_t)start & ~(line_size - 1));
-        for (; addr < end; addr += line_size) {
-            __asm__ volatile("dc civac, %0" : : "r"((const void *)addr) : "memory");
-        }
-        __asm__ volatile("dsb ish" ::: "memory");
-        __asm__ volatile("isb" ::: "memory");
-    }
-#endif
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
 }
 
@@ -2150,7 +2104,7 @@ bail:
 }
 
 // =================================================================================================
-//  section-7: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon for mulmat_algotype=29 path)
+//  section-7: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon
 // =================================================================================================
 
 // Adapters for the old htp_mm_hvx vtcm_sizes API that was replaced by
@@ -3889,16 +3843,6 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
         return true;
     }
 
-    if (!ggmlhexagon_op_is_enabled(op_tensor->op)) {
-        static std::unordered_set<int> logged_filtered;
-        if (logged_filtered.find((int)op_tensor->op) == logged_filtered.end()) {
-            logged_filtered.insert((int)op_tensor->op);
-            GGMLHEXAGON_LOG_INFO("op %s filtered by enabled_ops (kept on CPU)",
-                                 ggml_op_name(op_tensor->op));
-        }
-        return false;
-    }
-
     init_op_validators();
 
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
@@ -5240,9 +5184,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             for (const auto & o : hex_ops) {
                 op_count[ggml_op_name((ggml_op)o.opcode)]++;
             }
-            GGMLHEXAGON_LOG_VERBOSE("LARGE-BATCH diag: n_ops=%zu op_dist:", hex_ops.size());
+            GGMLHEXAGON_LOG_ALWAYS("LARGE-BATCH diag: n_ops=%zu op_dist:", hex_ops.size());
             for (const auto & [k, v] : op_count) {
-                GGMLHEXAGON_LOG_VERBOSE("  %-12s = %d", k.c_str(), v);
+                GGMLHEXAGON_LOG_ALWAYS("  %-12s = %d", k.c_str(), v);
             }
             s_dumped_large = true;
         }
@@ -5310,45 +5254,41 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // htp_arch>=V73 is required because op_matmul_qkv/ffn use HMX instructions.
         bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73
                                 && g_hexagon_appcfg.enable_opfusion);
+#if 0
+        // dbg: list all ops (kept for future fusion analysis)
+        size_t n_mulmat = 0;
+        for (size_t i = 0; i < hex_ops.size(); i++) {
+            const hex_op_desc & o = hex_ops[i];
+            if (o.opcode == GGML_OP_MUL_MAT) n_mulmat++;
+            const ggml_tensor * node = tensor_src[o.dst_idx[0]];
+            const char * node_name = node ? ggml_get_name(node) : nullptr;
+            GGMLHEXAGON_LOG_INFO("DBG op[%zu] %-12s node=%s dst[t%d]",
+                                    i, ggml_op_name((ggml_op)o.opcode),
+                                    node_name ? node_name : "(unnamed)",
+                                    o.dst_idx[0]);
+        }
+        GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
 
-#if 0  // dbg: list all ops (kept for future fusion analysis)
-        {
-            size_t n_mulmat = 0;
-            for (size_t i = 0; i < hex_ops.size(); i++) {
-                const hex_op_desc & o = hex_ops[i];
-                if (o.opcode == GGML_OP_MUL_MAT) n_mulmat++;
-                const ggml_tensor * node = tensor_src[o.dst_idx[0]];
-                const char * node_name = node ? ggml_get_name(node) : nullptr;
-                GGMLHEXAGON_LOG_INFO("DBG op[%zu] %-12s node=%s dst[t%d]",
-                                        i, ggml_op_name((ggml_op)o.opcode),
-                                        node_name ? node_name : "(unnamed)",
-                                        o.dst_idx[0]);
-            }
-            GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
+        // dbg: list MUL_MAT ops for op-fusion analysis
+        size_t n_mulmat = 0;
+        for (size_t i = 0; i < hex_ops.size(); i++) {
+            const hex_op_desc & o = hex_ops[i];
+            if (o.opcode != GGML_OP_MUL_MAT) continue;
+            n_mulmat++;
+            const ggml_tensor * node = tensor_src[o.dst_idx[0]];
+            const ggml_tensor * w    = (o.src_idx[0] >= 0) ? tensor_src[o.src_idx[0]] : nullptr;
+            const ggml_tensor * x    = (o.src_idx[1] >= 0) ? tensor_src[o.src_idx[1]] : nullptr;
+            const char * node_name = node ? ggml_get_name(node) : nullptr;
+            const char * w_name    = w    ? ggml_get_name(w)    : nullptr;
+            const int    x_type    = x    ? (int)x->type         : -1;
+            const int    hmx       = node ? (int)mm_is_hmx_eligible(node) : -1;
+            GGMLHEXAGON_LOG_VERBOSE("DBG batch MUL_MAT[%zu] node=%s W=%s(src1.type=%d) hmx=%d",
+                                    i,
+                                    node_name ? node_name : "(unnamed)",
+                                    w_name    ? w_name    : "(unnamed)",
+                                    x_type, hmx);
         }
-#endif
-#if 0  // dbg: list MUL_MAT ops for op-fusion analysis
-        {
-            size_t n_mulmat = 0;
-            for (size_t i = 0; i < hex_ops.size(); i++) {
-                const hex_op_desc & o = hex_ops[i];
-                if (o.opcode != GGML_OP_MUL_MAT) continue;
-                n_mulmat++;
-                const ggml_tensor * node = tensor_src[o.dst_idx[0]];
-                const ggml_tensor * w    = (o.src_idx[0] >= 0) ? tensor_src[o.src_idx[0]] : nullptr;
-                const ggml_tensor * x    = (o.src_idx[1] >= 0) ? tensor_src[o.src_idx[1]] : nullptr;
-                const char * node_name = node ? ggml_get_name(node) : nullptr;
-                const char * w_name    = w    ? ggml_get_name(w)    : nullptr;
-                const int    x_type    = x    ? (int)x->type         : -1;
-                const int    hmx       = node ? (int)mm_is_hmx_eligible(node) : -1;
-                GGMLHEXAGON_LOG_VERBOSE("DBG batch MUL_MAT[%zu] node=%s W=%s(src1.type=%d) hmx=%d",
-                                        i,
-                                        node_name ? node_name : "(unnamed)",
-                                        w_name    ? w_name    : "(unnamed)",
-                                        x_type, hmx);
-            }
-            GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
-        }
+        GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
 #endif
 
         for (size_t i = 0; i < hex_ops.size(); i++) {
@@ -5611,7 +5551,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     std::vector<ion_mirror> mirrors;
 
 #if 0
-    // ---- VERIFY (temporary): dump cgraph structure for first 30 calls ----
+    // ---- Dump cgraph structure for first 30 calls ----
     // Helps diagnose ubatch-related correctness issues by exposing the
     // actual shape contract that the cgraph provides to Phase 4/4.5/6.
     static int s_verify_call_count = 0;
@@ -5741,7 +5681,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // ---- Phase 4.5: track ION offsets for repacked quantized weights ----
     t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     PERF_RECORD(t_p4, ctx->p4_hist);
-    // For algotype=29: weights are already repacked to tile-based layout
+    //   weights are already repacked to tile-based layout
     //   by set_tensor during model loading. Phase 4.5 only tracks ION
     //   offsets for DSP descriptor updates in Phase 6.
     std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
@@ -6425,29 +6365,20 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->max_graph_us     = graph_dur;
         ctx->max_graph_n_nodes = graph_n_nodes;
         ctx->max_graph_n_ops   = n_ops;
-        // (Removed for perf: per-graph "new max" log fires every time a new max
-        // is hit. With 4352 batches the first ~50 hit it; same overhead as the
-        // per-batch logs. Useful only when investigating long-tail outliers.)
-        // GGMLHEXAGON_LOG_WARN("new max graph_dur=%lld us (n_nodes=%u n_ops=%u p7=%lld p6.5=%lld p7.5=%lld)",
-        //                      (long long)graph_dur, graph_n_nodes, n_ops,
-        //                      (long long)t_p7, (long long)t_p65, (long long)t_p75);
+        GGMLHEXAGON_LOG_DEBUG("new max graph_dur=%lld us (n_nodes=%u n_ops=%u p7=%lld p6.5=%lld p7.5=%lld)",
+                              (long long)graph_dur, graph_n_nodes, n_ops,
+                              (long long)t_p7, (long long)t_p65, (long long)t_p75);
     }
-    // (Removed for perf: 4 per-graph summary logs (timing breakdown +
-    // supported_nodes + graph_dur + rpc stats) fire 4352 times per PP run.
-    // Each ggmlhexagon_log_internal call costs ~2us even with
-    // dump_debug_info=0 (function-call setup + level check + early return).
-    // That's 8.7ms of pure overhead for a 24s PP run. All four are gated by
-    // dump_debug_info so re-enable that flag when investigating performance.)
-    // GGMLHEXAGON_LOG_WARN("ion-batch timing: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
-    //                      (long long)t_p4, (long long)t_p45, (long long)t_p6, (long long)t_p65,
-    //                      (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
-    // GGMLHEXAGON_LOG_WARN("graph supported_nodes   %d", supported_nodes.size());
-    // GGMLHEXAGON_LOG_WARN("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
-    // GGMLHEXAGON_LOG_WARN("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
-    //                      (unsigned long long)ctx->rpc_batch_call_count,
-    //                      (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
-    //                      ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_p7_us / (int64_t)ctx->rpc_batch_call_count) : 0,
-    //                      ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
+    GGMLHEXAGON_LOG_DEBUG("ion-batch timing: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
+                          (long long)t_p4, (long long)t_p45, (long long)t_p6, (long long)t_p65,
+                          (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
+    GGMLHEXAGON_LOG_DEBUG("graph supported_nodes   %d", supported_nodes.size());
+    GGMLHEXAGON_LOG_DEBUG("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
+    GGMLHEXAGON_LOG_DEBUG("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
+                          (unsigned long long)ctx->rpc_batch_call_count,
+                          (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
+                          ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_p7_us / (int64_t)ctx->rpc_batch_call_count) : 0,
+                          ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
 
     return result;
 }
@@ -6780,7 +6711,7 @@ static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .graph_plan_free         = */ nullptr,
         /* .graph_plan_update       = */ nullptr,
         /* .graph_plan_compute      = */ nullptr,
-        /* .graph_compute           = */ nullptr,
+        /* .graph_compute           = */ ggmlhexagon_backend_graph_compute_batch,
         /* .event_record            = */ nullptr,
         /* .event_wait              = */ nullptr,
         /* .graph_optimize          = */ nullptr,
@@ -6997,8 +6928,6 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
         return g_hexagon_mgr[device]->backend;
     }
 
-    GGMLHEXAGON_LOG_ALWAYS("using ggmlhexagon_backend_graph_compute_batch (ION-based op-batch)");
-    ggml_backend_hexagon_interface.graph_compute = ggmlhexagon_backend_graph_compute_batch;
     ggml_backend_hexagon_interface.graph_optimize =
         g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
     GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s",

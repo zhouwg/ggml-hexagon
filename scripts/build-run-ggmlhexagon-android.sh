@@ -12,7 +12,6 @@
 #
 # 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
 #
-# Jeff Zhou - zhouwg2000@gmail.com
 # GitHub:   - https://github.com/zhouwg/ggml-hexagon
 #
 set -e
@@ -211,6 +210,7 @@ function check_android_phone()
 }
 
 
+#TODO:refine this function
 function check_and_download_hexagon_sdk()
 {
     is_hexagon_llvm_exist=1
@@ -871,6 +871,45 @@ function run_ubatchtest()
 }
 
 
+function run_ubatchtest_all()
+{
+    # Batch ubatch sweep across 5 models x 5 ubatches = 25 tests.
+    # No arguments. Similar in spirit to run_llamacli_all.
+    local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    local ubatch_sizes=(32 64 128 512 1024)
+
+    # re-join ubatch sizes back into a comma-separated string for run_ubatchtest
+    local ubatch_csv
+    ubatch_csv=$(IFS=,; echo "${ubatch_sizes[*]}")
+
+    local total_models=${#models[@]}
+    local total_ubatches=${#ubatch_sizes[@]}
+    local total_tests=$(( total_models * total_ubatches ))
+    local count=0
+
+    echo "=============================================="
+    echo "  Batch ubatch sweep:"
+    echo "    ${total_models} models x ${total_ubatches} ubatches = ${total_tests} tests"
+    echo "    models:    ${models[*]}"
+    echo "    ubatches:  ${ubatch_sizes[*]}"
+    echo "  Log capture example:"
+    echo "    $0 run_ubatchtest_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
+    echo "=============================================="
+
+    for model in "${models[@]}"; do
+        count=$(( count + 1 ))
+        echo ""
+        echo "=== [${count}/${total_models}] model=${model} ==="
+        run_ubatchtest "${model}" "${ubatch_csv}"
+    done
+
+    echo ""
+    echo "=============================================="
+    echo "  Batch ubatch sweep complete: ${total_tests} tests done"
+    echo "=============================================="
+}
+
+
 function run_threadsafety()
 {
     prepare_run_on_phone test-thread-safety
@@ -1055,11 +1094,23 @@ function show_usage()
 
     echo "  $0 run_ubatchtest  [model_alias] [ubatch_csv]"
     echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
-    echo "    model_alias:  gemma4 (default) | qwen3 | qwen1 | llama3"
+    echo "    model_alias:  gemma4 (default) | qwen3 | qwen3-mtp | qwen1 | llama3"
     echo "    ubatch_csv:   32,64,128,512,1024 (default)"
     echo "    Examples:"
-    echo "      $0 run_ubatchtest                       # gemma4 + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3 32,128,512      # qwen3  + 32/128/512"
+    echo "      $0 run_ubatchtest                          # gemma4 + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3                    # qwen3  + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3 32,128,512         # qwen3  + 32/128/512"
+    echo "      $0 run_ubatchtest qwen3-mtp 64             # qwen3-mtp + 64"
+    echo "    Log capture example:"
+    echo "      $0 run_ubatchtest 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
+    echo "  $0 run_ubatchtest_all"
+    echo "    Batch ubatch sweep across 5 models x 5 ubatches = 25 tests."
+    echo "    models:    gemma4, qwen3, qwen3-mtp, qwen1, llama3"
+    echo "    ubatches:  32, 64, 128, 512, 1024"
+    echo "    Log capture example:"
+    echo "      $0 run_ubatchtest_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
 }
 
 
@@ -1119,6 +1170,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest
+        exit 0
+    elif [ "$1" == "run_ubatchtest_all" ]; then
+        run_ubatchtest_all
         exit 0
     else
         show_usage

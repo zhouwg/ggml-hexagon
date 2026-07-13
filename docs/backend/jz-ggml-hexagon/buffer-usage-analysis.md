@@ -1,5 +1,18 @@
 # Buffer 用途分析报告
 
+> [!WARNING]
+> **本文档基于 pre-remove-dual-path 状态编写,部分描述已过时。**
+>
+> 最新且与代码一致的权威分析是
+> [algotype29-perf-analysis-en-20260711.md](algotype29-perf-analysis-en-20260711.md)。
+>
+> 已知过时内容(待修正):
+> - 第一章 "ION Pool 布局" 中的 "FP16 weight cache: 3452 ~ 3964 MiB (512 MiB, 用于 weight repack)" — **不存在**。FP16 weight cache 是 algotype=32 (self-built) 路径的遗留概念,见 [HMX_PIPELINE_MIGRATION.md:76,123](HMX_PIPELINE_MIGRATION.md)。post-remove-dual-path 后 ION pool 是单一连续区,无此 region。
+> - 第一章 "配置来源: ggml-hexagon.cpp:2751 `ION layout: total=3964MB, cache_offset=3452MB, cache_size=512MB, data_region=3452MB`" — **line 2751 实际是 `is_repack` 标志计算**,不是 ION layout 配置。ION pool 大小来源于 `ggml-hexagon-jz.cpp:1764` 的日志输出。
+> - 第七章 "Phase 4.5 x4x2 repack(部分 F16 权重)" — 应为 32x32 tiled quantized repack (Q4_0/Q4_1/Q8_0/MXFP4),保持量化类型,**不是 F16 格式**。详见 [algotype29-perf-analysis-en-20260711.md:266-308](algotype29-perf-analysis-en-20260711.md#L266-L308)。
+>
+> 第四-七章关于 ION mirror、cache coherency、CC-1~6 的分析仍然有效,描述了当前 JZ 实现的核心机制。
+
 基于 `log_ap.txt` 和源码分析，以下是 4 次 `alloc_buffer` 调用的完整归属分析。
 
 ---

@@ -28,13 +28,8 @@
         }
       },
       "test_matrix": {
-        "models": ["gemma4", "qwen3", "qwen1", "llama3"],
-        "algotypes": [29, 33],
-        "total_tests": 8,
-        "algotype_meanings": {
-          "29": "Qualcomm execute_op (delegates to ../htp/*.c)",
-          "33": "HVX multithread + VTCM (self-built path)"
-        }
+        "models": ["gemma4", "qwen3", "qwen3-mtp", "qwen1", "llama3"],
+        "total_tests": 5
       },
       "validation_criteria": {
         "pp_tg_valid": {
@@ -52,20 +47,17 @@
           "check": "Scan output for the same sentence appearing 3+ times consecutively. A single repeated sentence is OK; endless looping is a bug.",
           "action_on_failure": "The commit MUST NOT proceed. This indicates a sampling or logits corruption issue."
         },
-        "all_8_tests_pass": {
-          "description": "All 8 tests (4 models X 2 algotypes) MUST pass all 3 validation criteria above. Any single failure blocks the commit.",
-          "summary_table_format": "| # | Model | Algotype | PP (tok/s) | TG (tok/s) | Output OK | Status |"
+        "all_5_tests_pass": {
+          "description": "All 5 tests (5 models) MUST pass all 3 validation criteria above. Any single failure blocks the commit.",
+          "summary_table_format": "| # | Model | PP (tok/s) | TG (tok/s) | Output OK | Status |"
         }
       },
       "commands": [
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4 29",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4 33",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3 29",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3 33",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1 29",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1 33",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3 29",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3 33"
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3-mtp",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3"
       ]
     },
     "commit_message_rules": {
@@ -100,6 +92,12 @@
       "forbidden_functions": [],
       "reason": "All functions are allowed for local execution."
     },
+    "dsp_kernel_fast_build": {
+      "description": "If only DSP-side source files (under ggml/src/ggml-hexagon/htp/, e.g. entry.c, matmul-ops.c, HVX/HMX kernels) were modified, use the fast kernel-only build to skip the full AP rebuild.",
+      "command": "./scripts/build-kernels.sh",
+      "when_to_use": "Only DSP-side files in ggml/src/ggml-hexagon/htp/ were modified; no changes to ARM-AP source (ggml-hexagon.cpp, ggml-hexagon-jz.cpp) or top-level build files.",
+      "fallback": "If any AP-side file (ggml-hexagon.cpp, ggml-hexagon-jz.cpp) or non-DSP file was also modified, fall back to the full build command above."
+    },
     "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-ggmlhexagon-android.sh accordingly",
     "if_unsure": "STOP. Do NOT use make/cmake. ONLY follow: docs/how-to-build-ggmlhexagon.md"
   },
@@ -117,32 +115,36 @@
     "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom"
   },
   "hexagon_implementations": {
-    "description": "Two ggml-hexagon implementations exist in this project",
+    "description": "Two ggml-hexagon implementations share the same DSP kernel directory (htp/) but use different ARM-AP source files AND different DSP entry-point source files. The bulk of htp/ (ops kernels, HVX/HMX headers, common headers) is shared, but the DSP-side entry-point main function lives in different files.",
     "qualcomm_official": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "description": "Qualcomm's official ggml-hexagon implementation"
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "description": "Qualcomm's official ggml-hexagon implementation. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: shared htp/ directory."
     },
     "jz_implementation": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target)"
-    }
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory."
+    },
+    "shared_dsp_directory_note": "Both implementations compile DSP ops kernels, HVX/HMX headers, and common helpers from the shared htp/ directory. They differ in: (1) ARM-AP source file - ggml-hexagon.cpp vs ggml-hexagon-jz.cpp, selected by CMake option GGML_HEXAGON_JZ (default OFF); (2) DSP entry-point source file - htp/main.c (QCOM) vs htp/entry.c (JZ)."
   },
   "development_rules": {
     "primary_target": "jz_implementation",
     "jz_implementation": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "build_command": "./scripts/build-run-android.sh build",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target)"
+      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory."
     },
     "qualcomm_official_debug": {
-      "main_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
-      "kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "build_command": "./scripts/build-run-android.sh build_qcom",
-      "description": "When debugging Qualcomm's official backend, modify ggml-hexagon.cpp and files under htp/ directory. The unified CMakeLists.txt uses option GGML_HEXAGON_JZ (default OFF) to select between QCOM and JZ variants.",
-      "note": "build_arm64_qcom passes -DGGML_HEXAGON_JZ=OFF (default) to use Qualcomm's implementation. build_arm64/build_arm64_debug pass -DGGML_HEXAGON_JZ=ON to use JZ's implementation."
+      "description": "Qualcomm's official backend. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: shared htp/ directory. Use this when debugging or benchmarking against the official reference."
     },
     "ccache_usage": {
       "description": "ccache is enabled for faster builds. For jz build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For qcom build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom. Do NOT disable ccache.",
@@ -150,11 +152,6 @@
       "qcom_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache_qcom"
     },
     "testing_focus": "jz_implementation"
-  },
-  "cdsp_data_path_notes": {
-    "idl_usage": "ggml/src/ggml-hexagon/kernels/ggmlop.idl is NOT actively used. The real artifacts are the customized skel.c, stub.c and skel.h generated/tailored from that IDL.",
-    "shared_memory_model": "ARM-AP side and cDSP side share data via ion shared memory buffer. DSP writes results directly into the shared buffer, so NO memcpy back-copy is needed on the AP side after op_func returns.",
-    "ap_side_data_path_status": "ARM-AP side code path in ggml-hexagon.cpp is known good - it works correctly with the prebuilt libggmldsp-skel.so for both testops and inference."
   },
   "testing_rules": {
     "description": "Test commands for different test types. All tests should be run locally.",
@@ -176,214 +173,5 @@
       "note": "Use this to debug DSP-side issues, including DSP crashes, memory issues, and HMX/HVX instruction errors"
     },
     "workflow": "After running a test, always check the relevant log to understand what happened. If UT fails, check ut_program_log first. If DSP crashes or produces incorrect results, check dsp_log."
-  },
-  "mulmat_performance_comparison": {
-    "title": "MUL_MAT Single-thread vs Multi-thread Performance Comparison",
-    "description": "Used to compare performance differences of MUL_MAT operation between single-thread and multi-thread modes",
-    "configuration_file": "scripts/ggml-hexagon.cfg",
-    "thread_counts_setting": "thread_counts",
-    "steps": [
-      {
-        "step": 1,
-        "description": "Set single-thread mode",
-        "action": "Modify thread_counts = 1 in scripts/ggml-hexagon.cfg"
-      },
-      {
-        "step": 2,
-        "description": "Clear logs",
-        "action": "Run command: adb logcat -c"
-      },
-      {
-        "step": 3,
-        "description": "Run MUL_MAT test",
-        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
-      },
-      {
-        "step": 4,
-        "description": "Capture single-thread test logs",
-        "action": "Run command: adb logcat | grep ggml-hexagon > /tmp/single_thread_mulmat.log"
-      },
-      {
-        "step": 5,
-        "description": "Set multi-thread mode",
-        "action": "Modify thread_counts = 6 in scripts/ggml-hexagon.cfg"
-      },
-      {
-        "step": 6,
-        "description": "Clear logs",
-        "action": "Run command: adb logcat -c"
-      },
-      {
-        "step": 7,
-        "description": "Run MUL_MAT test",
-        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
-      },
-      {
-        "step": 8,
-        "description": "Capture multi-thread test logs",
-        "action": "Run command: adb logcat | grep ggml-hexagon > /tmp/multi_thread_mulmat.log"
-      },
-      {
-        "step": 9,
-        "description": "Analyze results",
-        "action": "Compare the time differences of 'inference duration of MUL_MAT' between the two tests"
-      }
-    ],
-    "expected_results": {
-      "small_matrix": "256x256 matrix: expected speedup ~2.0-2.5x",
-      "medium_matrix": "1024x1024 matrix: expected speedup ~1.5-2.0x",
-      "large_matrix": "4096x4096 matrix: expected speedup ~1.2-1.5x",
-      "note": "Speedup decreases with matrix size, mainly limited by DSP's VTCM memory bandwidth"
-    },
-    "performance_trend": {
-      "best_case": "Medium-sized matrices (600x600, 900x900) achieve best speedup (~2.3x)",
-      "medium_case": "Small matrices (<1024) achieve good speedup (1.7-2.3x)",
-      "limited_case": "Large matrices (>2048) have reduced speedup (1.2-1.5x), limited by memory bandwidth"
-    },
-    "reminder": "All commands must be executed locally"
-  },
-  "vec_dot_f32_hvx_performance_comparison": {
-    "title": "vec_dot_f32_hvx_impl vs vec_dot_f32_hvx_impl_me Performance Comparison",
-    "description": "Used to compare performance differences between two HVX dot product implementations",
-    "source_file": "ggml/src/ggml-hexagon/kernels/mulmat.c",
-    "steps": [
-      {
-        "step": 1,
-        "description": "Enable vec_dot_f32_hvx_ai",
-        "action": "Modify function vec_dot_f32_hvx in mulmat.c : uncomment vec_dot_f32_hvx_impl, comment vec_dot_f32_hvx_impl_me"
-      },
-      {
-        "step": 2,
-        "description": "Build project",
-        "action": "Run command: ./scripts/build-run-android.sh build"
-      },
-      {
-        "step": 3,
-        "description": "Clear logs",
-        "action": "Run command: adb logcat -c"
-      },
-      {
-        "step": 4,
-        "description": "Run MUL_MAT test",
-        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
-      },
-      {
-        "step": 5,
-        "description": "Capture ai version logs",
-        "action": "Run command: adb logcat -d | grep 'inference duration.*MUL_MAT' | grep -E 'f32_[0-9]+x[0-9]+f32_[0-9]+x[0-9]+f32' > /tmp/vec_dot_ai.log"
-      },
-      {
-        "step": 6,
-        "description": "Enable vec_dot_f32_hvx_impl_me",
-        "action": "Modify function vec_dot_f32_hvx in mulmat.c : comment vec_dot_f32_hvx_impl, uncomment vec_dot_f32_hvx_impl_me"
-      },
-      {
-        "step": 7,
-        "description": "Build project",
-        "action": "Run command: ./scripts/build-run-android.sh build"
-      },
-      {
-        "step": 8,
-        "description": "Clear logs",
-        "action": "Run command: adb logcat -c"
-      },
-      {
-        "step": 9,
-        "description": "Run MUL_MAT test",
-        "action": "Run command: ./scripts/build-run-android.sh run_testop MUL_MAT"
-      },
-      {
-        "step": 10,
-        "description": "Capture me version logs",
-        "action": "Run command: adb logcat -d | grep 'inference duration.*MUL_MAT' | grep -E 'f32_[0-9]+x[0-9]+f32_[0-9]+x[0-9]+f32' > /tmp/vec_dot_me.log"
-      },
-      {
-        "step": 11,
-        "description": "Analyze results",
-        "action": "Compare the time differences between the two implementations"
-      }
-    ],
-    "performance_summary": {
-      "ai_version_faster": "vec_dot_f32_hvx_impl is significantly faster in most cases",
-      "large_matrix_speedup": "Up to 49% faster for 4096x4096 matrices",
-      "small_matrix_speedup": "Up to 37% faster for small matrices",
-      "recommendation": "vec_dot_f32_hvx_impl for better performance"
-    }
-  },
-  "mulmat_vtcm_hmx_performance_comparison": {
-    "title": "MUL_MAT VTCM+HMX Performance Comparison",
-    "description": "Used to compare performance differences of MUL_MAT operation between different algorithm types: 0=auto, 32=VTCM+HMX, 33=VTCM multithread",
-    "source_file": "ggml/src/ggml-hexagon/kernels/mulmat.c",
-    "algotype_values": {
-      "0": "Auto mode (default)",
-      "32": "VTCM+HMX mode",
-      "33": "VTCM multithread mode"
-    },
-    "steps": [
-      {
-        "step": 1,
-        "description": "Run MUL_MAT test with algorithm type 0 (auto)",
-        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 0 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo0.log"
-      },
-      {
-        "step": 2,
-        "description": "Run MUL_MAT test with algorithm type 32 (VTCM+HMX)",
-        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 32 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo32.log"
-      },
-      {
-        "step": 3,
-        "description": "Run MUL_MAT test with algorithm type 33 (VTCM multithread)",
-        "action": "Run command: adb logcat -c && ./scripts/build-run-android.sh run_testop MUL_MAT 3 33 && adb logcat -d | grep -E 'inference duration.*MUL_MAT' > /tmp/mulmat_algo33.log"
-      },
-      {
-        "step": 4,
-        "description": "Generate performance report",
-        "action": "Compare the inference duration data from all three logs and generate performance comparison report"
-      }
-    ],
-    "expected_results": {
-      "f32_matrix": "FP32 matrix multiplication: expected speedup ~10-15% with VTCM+HMX",
-      "f16_weight": "FP16 weight matrices: expected speedup ~15-45% with VTCM+HMX",
-      "q4_0_weight": "Q4_0 quantized weights: expected speedup ~15-70% with VTCM+HMX",
-      "q8_0_weight": "Q8_0 quantized weights: expected speedup ~15-75% with VTCM+HMX",
-      "note": "Quantized weights achieve best speedup due to efficient dequantization in VTCM"
-    },
-    "performance_trend": {
-      "best_case": "Quantized weights (Q4_0, Q8_0) achieve best speedup (~70-75%)",
-      "medium_case": "FP16 weights achieve good speedup (15-45%)",
-      "limited_case": "FP32 matrices have moderate speedup (10-15%)",
-      "vtcm_limit": "Very large matrices (>4096) may fall back due to VTCM memory constraints"
-    },
-    "reminder": "All commands must be executed on the local development machine with Android phone connected via adb"
-  },
-  "mulmat_optimization_rules": {
-    "title": "MUL_MAT DSP-side Optimization Rules",
-    "focus_types": ["GGML_TYPE_BF16", "GGML_TYPE_Q8_0", "GGML_TYPE_Q4_0", "GGML_TYPE_Q5_0", "GGML_TYPE_IQ4_NL", "GGML_TYPE_F32", "GGML_TYPE_F16"],
-    "dsp_kernel_build": {
-      "description": "When only modifying files under ggml/src/ggml-hexagon/htp/, use fast kernel-only build",
-      "command": "./scripts/build-kernels.sh",
-      "note": "This is significantly faster than full build. Only use ./scripts/build-run-android.sh build when non-kernel files are also modified."
-    },
-    "performance_testing": {
-      "description": "How to test and measure mulmat performance",
-      "test_command": "./scripts/build-run-android.sh run_testop MUL_MAT 0 [algo_type]",
-      "algo_types": {
-        "0": "HVX + multithread (self-built path)",
-        "29": "Qualcomm execute_op path (full op coverage; delegates to ../htp/*.c)",
-        "30": "HMX sync + x4x2 repack (self-built path)",
-        "32": "HMX pipeline (self-built path)",
-        "33": "VTCM + multithread (self-built path)"
-      },
-      "dual_channel_dispatch": {
-        "description": "entry.c dispatches ops to two kernel sets based on mulmat_algotype. Applies to per-op (ggmlop_dsp_execute_task) and ION-batch (ggmlop_dsp_execute_batch) paths.",
-        "qualcomm_path": "mulmat_algotype == 29 -> Qualcomm execute_op. Full op coverage (see enabled_ops in ggml-hexagon.cfg).",
-        "self_built_path": "mulmat_algotype != 29 -> ggmlop_dsp_* kernels. Limited op coverage.",
-        "self_built_supported_ops": ["ADD", "SUB", "MUL", "DIV", "MUL_MAT", "RMS_NORM", "ROPE", "SOFT_MAX", "UNARY", "SCALE", "CPY", "CONCAT", "REPEAT", "DIAG_MASK_INF", "FLASH_ATTN_EXT"],
-        "self_built_unsupported_ops_in_cfg": ["GET_ROWS", "SET_ROWS", "SUM_ROWS", "CONT", "GLU", "NORM", "L2_NORM", "SQR", "SQRT", "ARGSORT", "PAD", "CUMSUM", "FILL", "DIAG", "TRI"],
-        "note": "When using self-built path (algotype != 29), trim enabled_ops in ggml-hexagon.cfg to match self_built_supported_ops. Otherwise unsupported ops return AEE_EUNSUPPORTED on DSP and corrupt inference output (e.g. algotype=30 produces garbled text)."
-      },
-      "log_command": "adb logcat | grep CDSP0",
-      "note": "Use DSP-side log timing for performance analysis. Do NOT run ./scripts/build-run-android.sh run_perfop unless explicitly approved - it is very time-consuming."
-    }
   }
 }
