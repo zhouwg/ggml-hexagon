@@ -172,3 +172,4 @@ tags
 log*.txt
 log*.log
 ubatchtest_*.log
+stability_logs*

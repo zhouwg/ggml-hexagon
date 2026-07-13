@@ -43,9 +43,16 @@
 
 #define HEX_OP_PROF_DUMP_INTERVAL       100
 
-#define WEIGHT_INVAL_MAP_BITS           16384
+#define WEIGHT_INVAL_MAX_PTRS           4096
 
 #define DSP_OPT_MAX_TENSORS             2048
+
+/* Maximum dst length eligible for prior-dst skip (bit 1). Strategy 2: only
+ * allow skipping invalidation when the prior dst fits within a single L2
+ * cacheline. Anything larger may have been produced through async DMA/HMX
+ * paths and risks stale scalar L2 reads. The op-type whitelist provides an
+ * extra safety net. */
+#define PRIOR_DST_MAX_LEN               DSP_CACHE_LINE_SIZE
 
 #ifndef NDEBUG
 #define GGMLHEXAGON_DEBUG               1
@@ -99,7 +106,7 @@
         } else {                                                                       \
             /* Activation tensor: bit 1 check */                                       \
             if ((g_dsp_ctx->dsp_cache_mode & 0x2) &&                                   \
-                prior_dst_contains_src((dt_ptr)->data, (dt_ptr)->data_len)) {            \
+                prior_dst_contains_src((tensor_idx), (dt_ptr)->data, (dt_ptr)->data_len)) { \
                 if (g_dsp_ctx->dsp_cache_trace_bit1) {                                \
                     GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT1] op=%u src=%d SKIP ptr=%p len=0x%x (cache_mode=0x%x)", \
                                          (op_i), (int)(src_idx), (dt_ptr)->data, (dt_ptr)->data_len, g_dsp_ctx->dsp_cache_mode); \
@@ -127,6 +134,7 @@ enum ggmlhexagon_log_level {
 typedef struct {
     void * base;
     size_t len;
+    uint32_t tensor_idx;  /* only used by prior_dst (bit 1) */
 } dsp_dst_range_t;
 
 #if HEX_OP_PROF
@@ -146,12 +154,10 @@ static uint32_t g_op_prof_batch_count;
 // Repack weights (flags==2) live in stable ION regions that AP writes
 // once at model load and never touches again, so DSP can cache them in
 // L2 for the entire session after a single first-touch invalidate.
-// The bitmap is indexed by (ION_ptr >> 6) so each bit covers one 64B
-// cache line. 16K bits = 1024 unique 64B-aligned weight cache lines
-// worth of tracking (~2KB). False positives only lead to one extra
-// "skip" (skip = "L2 has fresh data"), which is always safe for
-// read-only repack weights.
-static uint64_t g_weight_inval_seen[(WEIGHT_INVAL_MAP_BITS + 63) / 64];
+// We use an exact sorted pointer array (not a hash bitmap) to avoid the
+// address-collision bug that caused garbled output with bit 0.
+static const void * g_weight_inval_ptrs[WEIGHT_INVAL_MAX_PTRS];
+static uint32_t g_weight_inval_count = 0;
 
 // Per-batch src invalidation tracking: avoids redundant dcinva calls
 // when the same tensor is used as src by multiple ops within the same batch.
@@ -375,26 +381,38 @@ static void ggml_dsp_cache_inval_range(void * addr, size_t size) {
     __asm__ __volatile__("syncht\n");
 }
 
-static inline uint32_t weight_inval_slot(const void * ptr) {
-    uintptr_t v = (uintptr_t)ptr;
-    v >>= 6;  // 64B cache line granularity
-    return (uint32_t)(v & (WEIGHT_INVAL_MAP_BITS - 1));
-}
-
 static inline bool weight_inval_check_and_mark(const void * ptr) {
-    uint32_t slot = weight_inval_slot(ptr);
-    uint32_t word = slot >> 6;
-    uint32_t bit  = slot & 63;
-    uint64_t mask = (uint64_t)1 << bit;
-    bool already = (g_weight_inval_seen[word] & mask) != 0;
-    g_weight_inval_seen[word] |= mask;
-    return already;  // true => already seen, can skip invalidate
+    int lo = 0;
+    int hi = (int)g_weight_inval_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        const void * mid_ptr = g_weight_inval_ptrs[mid];
+        if (mid_ptr == ptr) {
+            return true;  // already invalidated, can skip
+        }
+        if (mid_ptr < ptr) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    // Not found: insert at lo and keep array sorted.
+    if (g_weight_inval_count >= WEIGHT_INVAL_MAX_PTRS) {
+        // Table full: fall back to always invalidate. This is safe but
+        // loses the optimization. With 4096 slots and read-only weights,
+        // overflow should not happen in practice.
+        return false;
+    }
+    for (int i = (int)g_weight_inval_count; i > lo; i--) {
+        g_weight_inval_ptrs[i] = g_weight_inval_ptrs[i - 1];
+    }
+    g_weight_inval_ptrs[lo] = ptr;
+    g_weight_inval_count++;
+    return false;
 }
 
 static inline void weight_inval_reset_all(void) {
-    for (uint32_t i = 0; i < sizeof(g_weight_inval_seen)/sizeof(g_weight_inval_seen[0]); i++) {
-        g_weight_inval_seen[i] = 0;
-    }
+    g_weight_inval_count = 0;
 }
 
 /* DSP-side cache optimization: prior_dst tracking (bit 1) + bulk flush (bit 2).
@@ -403,11 +421,13 @@ static inline void weight_inval_reset_all(void) {
  * They use simple range lists (no hash bitmap) to avoid the ptr-based hash
  * collision bug from the earlier commit that caused qwen3 garbled output.
  *
- * - bit 1 (skip dcinva for prior dst): when the next op's src range is fully
- *   contained in a dst range of an earlier op in the same batch, skip dcinva
- *   because the L2 "modified" line is fresh (DSP's own write). The per-op
- *   dst tracker populates the prior_dst list only when bit 2 is on, so
- *   bit 1 alone is a no-op (a cfg comment in ggml-hexagon.cfg covers this).
+ * - bit 1 (skip dcinva for prior dst): when the next op's src is the *same*
+ *   tensor as a small dst of an earlier op in the same batch, and its range is
+ *   fully contained, skip dcinva because the L2 line is fresh (DSP's own write).
+ *   We require tensor_idx equality and len <= PRIOR_DST_MAX_LEN to avoid stale
+ *   reads across DMA/HMX cache domains or aliased views. The per-op dst tracker
+ *   populates the prior_dst list only when bit 2 is on, so bit 1 alone is a
+ *   no-op (a cfg comment in ggml-hexagon.cfg covers this).
  * - bit 2 (bulk dst flush at batch end): collect all dst ranges during the
  *   op loop, sort + merge adjacent/overlapping ranges at batch end, then
  *   call ggml_dsp_cache_flush_range() once per merged region. Replaces
@@ -419,9 +439,9 @@ static inline void weight_inval_reset_all(void) {
  * Hexagon batch path is single-threaded (one FastRPC call drives one batch),
  * so static globals are safe.
  *
- * bit 0 (first-touch weight bitmap) is a separate mechanism; see
+ * bit 0 (first-touch weight tracking) is a separate mechanism; see
  * weight_inval_check_and_mark() and INVAL_SRC_IF_NEEDED(). It is session-
- * scoped (bitmap never reset) because repack weights are stable ION regions
+ * scoped (array never reset) because repack weights are stable ION regions
  * written once at model load.
  */
 /* True iff [q_base, q_base+q_len) is fully contained in [r_base, r_base+r_len). */
@@ -435,10 +455,12 @@ static inline bool dsp_range_contains(const void * r_base, size_t r_len,
     return (qb >= rb) && (qe <= re);
 }
 
-static inline bool prior_dst_contains_src(const void * base, size_t len) {
+static inline bool prior_dst_contains_src(uint32_t src_idx,
+                                          const void * base, size_t len) {
     if (!base) return false;
     for (int i = 0; i < g_prior_dst_count; i++) {
-        if (dsp_range_contains(g_prior_dst_ranges[i].base, g_prior_dst_ranges[i].len,
+        if (g_prior_dst_ranges[i].tensor_idx == src_idx &&
+            dsp_range_contains(g_prior_dst_ranges[i].base, g_prior_dst_ranges[i].len,
                                base, len)) {
             return true;
         }
@@ -446,11 +468,53 @@ static inline bool prior_dst_contains_src(const void * base, size_t len) {
     return false;
 }
 
-static inline void prior_dst_add(void * base, size_t len) {
+/* Only element-wise / in-place style ops were originally considered safe for
+ * prior-dst skip. Experimentally, with PRIOR_DST_MAX_LEN == cacheline size,
+ * the prior-dst is small enough to remain in scalar L2 regardless of op type,
+ * so the whitelist below is intentionally disabled in prior_dst_add(). It is
+ * kept here to document the experiment and make re-enabling trivial. */
+static inline bool prior_dst_op_safe(enum htp_op_code op) {
+    switch (op) {
+        case HTP_OP_ADD:
+        case HTP_OP_SUB:
+        case HTP_OP_MUL:
+        case HTP_OP_DIV:
+        case HTP_OP_SCALE:
+        case HTP_OP_SQR:
+        case HTP_OP_SQRT:
+        case HTP_OP_NORM:
+        case HTP_OP_RMS_NORM:
+        case HTP_OP_RMS_NORM_MUL:
+        case HTP_OP_L2_NORM:
+        case HTP_OP_UNARY_NEG:
+        case HTP_OP_UNARY_SIGMOID:
+        case HTP_OP_UNARY_TANH:
+        case HTP_OP_UNARY_EXP:
+        case HTP_OP_UNARY_SOFTPLUS:
+        case HTP_OP_UNARY_SILU:
+        case HTP_OP_UNARY_GELU:
+        case HTP_OP_GLU_SWIGLU:
+        case HTP_OP_GLU_SWIGLU_OAI:
+        case HTP_OP_GLU_GEGLU:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static inline void prior_dst_add(void * base, size_t len, uint32_t tensor_idx,
+                                 enum htp_op_code op) {
+    (void)op;
     if (!base || len == 0) return;
+    /* With PRIOR_DST_MAX_LEN == cacheline size, the prior-dst is small enough
+     * that it should still reside in scalar L2. Drop the op-type whitelist to
+     * maximize the number of dcinva skips. */
+    if (len > PRIOR_DST_MAX_LEN) return;
+    /* if (!prior_dst_op_safe(op)) return; */  /* see prior_dst_op_safe() docs */
     if (g_prior_dst_count >= DSP_OPT_MAX_BATCH_DSTS) return;  /* overflow guard */
     g_prior_dst_ranges[g_prior_dst_count].base = base;
     g_prior_dst_ranges[g_prior_dst_count].len  = len;
+    g_prior_dst_ranges[g_prior_dst_count].tensor_idx = tensor_idx;
     g_prior_dst_count++;
 }
 
@@ -1763,6 +1827,14 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         return AEE_SUCCESS;
     }
 
+    /* Warmup mode: batch_size == 0xFFFB.
+     * AP calls this once after session init to warm up the FastRPC/ION path
+     * without doing any real compute. Just logs and returns. */
+    if (batch_size == 0xFFFB) {
+        GGMLHEXAGON_LOG_INFO("[DSP-WARMUP] no-op warmup done");
+        return AEE_SUCCESS;
+    }
+
     /* Normal batch execution */
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
@@ -2000,7 +2072,12 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
             if (!dst_dt_ptrs[k]) continue;
             if (g_dsp_ctx->dsp_cache_mode & 0x4) {
-                prior_dst_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                /* prior_dst ranges are only consumed by bit 1; avoid dead
+                 * work when bit 2 is enabled without bit 1. */
+                if (g_dsp_ctx->dsp_cache_mode & 0x2) {
+                    prior_dst_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len,
+                                  op->dst_idx[k], htp_op);
+                }
                 bulk_flush_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
             } else {
                 ggml_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);

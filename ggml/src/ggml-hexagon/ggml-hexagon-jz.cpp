@@ -254,6 +254,7 @@ struct ggml_backend_hexagon_context {
     int64_t  cum_p65_us;      // Phase 6.5: cache flush
     int64_t  cum_p75_us;      // Phase 7.5: cache inval
     int64_t  cum_p8_us;       // Phase 8: ION->heap copy-back
+    int64_t  cum_unaccounted_us; // wall-clock not covered by p1..p8 (gaps, scheduler, etc.)
 
     // Per-call fine-grained profiling (ring buffer, capacity 1024).
     // Captures per-call durations so dump_perf_stats can compute
@@ -273,6 +274,7 @@ struct ggml_backend_hexagon_context {
     int64_t  p7_hist[PERF_HIST_CAP];   // Phase 7: FastRPC + DSP exec + cache inval (cumulative; see 3-way split below)
     int64_t  p75_hist[PERF_HIST_CAP];  // Phase 7.5: cache inval
     int64_t  p8_hist[PERF_HIST_CAP];   // Phase 8: ION->heap copy-back
+    int64_t  unaccounted_hist[PERF_HIST_CAP]; // wall-clock not covered by p1..p8
     int64_t  graph_us_hist[PERF_HIST_CAP];   // total wall-clock per graph_compute_batch call
     int32_t  n_nodes_hist[PERF_HIST_CAP];    // cgraph->n_nodes at entry
     int32_t  n_ops_hist[PERF_HIST_CAP];      // offloaded DSP ops at FastRPC dispatch
@@ -289,6 +291,7 @@ struct ggml_backend_hexagon_context {
     uint32_t diag_first_n_tensors[DIAG_FIRST_N];
     int64_t  diag_first_graph_us [DIAG_FIRST_N];
     int64_t  diag_first_gap_us   [DIAG_FIRST_N];
+    int64_t  diag_first_unaccounted_us[DIAG_FIRST_N];
     // Also a once-per-session LARGE-BATCH op distribution dump (n_ops > 500),
     // to identify whether a huge sub-graph is 1 mega-op or many small layers.
     // -----------------------------------------------------------------------
@@ -352,8 +355,8 @@ struct ggml_backend_hexagon_context {
     // cgraph cache: Phase 1 (tensor dedup) + Phase 2 (hex_ops build) +
     // Phase 2.5 (op fusion) result keyed by content-based cgraph hash.
     // The scheduler's split->graph pointer changes every call, but the
-    // underlying node ops/shapes/data ptrs are stable for graph-reuse
-    // A FNV-1a hash over {op, ne[4], nb[4], src[0..2] ptr, data ptr}
+    // underlying node ops/shapes/src/data ptrs are stable for graph-reuse.
+    // A FNV-1a hash over {op, ne[4], nb[4], non-null src[0..3] ptr, data ptr}
     // per node gives a 64-bit key that is stable across pointer churn
     // and effectively collision-free (2^-64 false positive).
     // On hit, skip ~38us of Phase 1+2 work. With 17 subgraphs/token and
@@ -366,7 +369,7 @@ struct ggml_backend_hexagon_context {
         std::vector<ggml_tensor *> tensor_src;
         std::vector<ggml_tensor *> supported_nodes;
         std::vector<hex_op_desc>   hex_ops;
-        std::vector<uint32_t>      weight_indices;
+        std::vector<uint8_t>       is_weight;      // per-tensor boolean, replaces unordered_set count()
     };
     std::unordered_map<uint64_t, cgraph_cache_entry> cgraph_cache;
     uint64_t cgraph_cache_hits   = 0;
@@ -654,22 +657,24 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                           ? ctx->diag_n_calls : (uint32_t)ctx->DIAG_FIRST_N;
         // Each entry up to ~50 bytes ([31]nnnnn/nnnnn/nnnnnnn/nnnnnnn = ~40), so 4 KiB fits 64+ entries.
         char line[4096]; int off = 0;
-        off += snprintf(line+off, sizeof(line)-off, "first-%u graphs (n_nodes/n_tensors/graph_us/gap_us):",
+        off += snprintf(line+off, sizeof(line)-off, "first-%u graphs (n_nodes/n_tensors/graph_us/gap_us/unaccounted_us):",
                         dump_n);
         for (uint32_t i = 0; i < dump_n; i++) {
-            off += snprintf(line+off, sizeof(line)-off, " [%u]%u/%u/%lld/%lld",
+            off += snprintf(line+off, sizeof(line)-off, " [%u]%u/%u/%lld/%lld/%lld",
                             i, ctx->diag_first_n_nodes[i], ctx->diag_first_n_tensors[i],
-                            (long long)ctx->diag_first_graph_us[i], (long long)ctx->diag_first_gap_us[i]);
+                            (long long)ctx->diag_first_graph_us[i], (long long)ctx->diag_first_gap_us[i],
+                            (long long)ctx->diag_first_unaccounted_us[i]);
         }
         GGMLHEXAGON_LOG_ALWAYS("%s", line);
     }
-    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p2.5=%lld p3=%lld p4=%lld p4.5=%lld p5=%lld p6=%lld p6.5=%lld p7.5=%lld p8=%lld us",
+    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p2.5=%lld p3=%lld p4=%lld p4.5=%lld p5=%lld p6=%lld p6.5=%lld p7.5=%lld p8=%lld unaccounted=%lld us",
                              (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
                              (long long)ctx->cum_p25_us, (long long)ctx->cum_p3_us,
                              (long long)ctx->cum_p4_us, (long long)ctx->cum_p45_us,
                              (long long)ctx->cum_p5_us,
                              (long long)ctx->cum_p6_us, (long long)ctx->cum_p65_us,
-                             (long long)ctx->cum_p75_us, (long long)ctx->cum_p8_us);
+                             (long long)ctx->cum_p75_us, (long long)ctx->cum_p8_us,
+                             (long long)ctx->cum_unaccounted_us);
     // Fine-grained: 3-way p7 split + per-call distribution
     GGMLHEXAGON_LOG_VERBOSE("p7 3-way cumulative: rpc_setup=%lld dsp_exec=%lld civac=%lld us (sum=%lld)",
                              (long long)ctx->cum_p7_rpc_setup_us,
@@ -766,6 +771,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         DUMP_PHASE_HIST("p7",   ctx->p7_hist,   false);
         DUMP_PHASE_HIST("p7.5", ctx->p75_hist,  false);
         DUMP_PHASE_HIST("p8",   ctx->p8_hist,   false);
+        DUMP_PHASE_HIST("unaccounted", ctx->unaccounted_hist, false);
         DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist, true);
         DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist, true);
         DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist, true);
@@ -1686,15 +1692,22 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
 
     if (nullptr == ctx)
         return 2;
+    /* Probe ION capacity with 32/64 MiB-aligned slots.
+     * A smoother gradient avoids the big 3072 -> 3972 MiB jump and gives
+     * the allocator more chances to find a large contiguous block near the
+     * 4 GiB boundary on modern devices. */
     probe_slots.push_back(1024);
     probe_slots.push_back(1536);
-    probe_slots.push_back(2000);
     probe_slots.push_back(2048);
-    probe_slots.push_back(1024+2048);
+    probe_slots.push_back(2560);
+    probe_slots.push_back(3072);
+    probe_slots.push_back(3584);
+    probe_slots.push_back(3840);
+    probe_slots.push_back(3968);
     if (htp_arch > 75) {
-        probe_slots.push_back(1024+2048+900);
+        probe_slots.push_back(4032);
     } else {
-        probe_slots.push_back(1024+2048+200);
+        probe_slots.push_back(3272);
     }
 
     size_t probe_counts     = probe_slots.size();
@@ -2087,6 +2100,16 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
                 GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
                                        mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
                                        g_hexagon_appcfg.dsp_cache_trace_bit1, payload);
+            }
+
+            /* Warmup FastRPC/ION path once before first real inference.
+             * This triggers delayed ION mapping and touches the DSP entry path
+             * so the first real batch does not pay cold-state penalty. */
+            int warmup_err = ggml_dsp_execute_batch(ctx->ggmlop_handle, 0, 0xFFFB);
+            if (AEE_SUCCESS != warmup_err) {
+                GGMLHEXAGON_LOG_WARN("warmup execute_batch failed: 0x%x", warmup_err);
+            } else {
+                GGMLHEXAGON_LOG_ALWAYS("[AP-WARMUP] FastRPC/ION warmup done");
             }
         }
     } else {
@@ -3268,6 +3291,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       cum_p65_us(0),
       cum_p75_us(0),
       cum_p8_us(0),
+      cum_unaccounted_us(0),
       perf_hist_count(0),
       diag_n_calls(0),
       perf_hist_idx(0),
@@ -3320,6 +3344,13 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
     repack_buffer_type.iface.is_host          = ggml_backend_hexagon_repack_buffer_is_host;
     repack_buffer_type.device  = dev;
     repack_buffer_type.context = this;
+
+    // Pre-size the cgraph cache to avoid rehashing during inference. With
+    // max_load_factor=0.5 and reserve(1024) the bucket array can hold ~1024
+    // entries before rehash; observed peak is ~227 (qwen3), so this keeps the
+    // load low and lookup latency stable.
+    cgraph_cache.max_load_factor(0.5f);
+    cgraph_cache.reserve(1024);
 
     int result = ggmlhexagon_init_dsp(this);
     if (0 != result) {
@@ -4565,6 +4596,9 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     }
 
     // Mark weights dirty so Phase 6.5 flushes them on the next batch.
+    // For repack-buft weights, flush immediately after repack; this moves the
+    // cold-state cache-clean cost from the first inference batch to model-load
+    // time and lets Phase 6.5 skip already-coherent repack weights.
     ggml_backend_hexagon_buffer_context * bctx =
         (ggml_backend_hexagon_buffer_context *)buffer->context;
     if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
@@ -4572,7 +4606,13 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
         const char * dp   = (const char *)tensor->data + offset;
         const char * base = (const char *)hctx->rpc_mempool;
         if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
-            hctx->weights_dirty = true;
+            if (is_repack) {
+                cpu_dcache_flush_range(hctx, hctx->rpc_mempool_handle,
+                                       tensor->data, ggml_nbytes(tensor));
+                hctx->weights_dirty = false;
+            } else {
+                hctx->weights_dirty = true;
+            }
         }
     }
 }
@@ -4919,6 +4959,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t begin_time = ggml_time_us();
     int64_t gap_from_prev = ctx->last_graph_end_us ? (begin_time - ctx->last_graph_end_us) : 0;
 
+    // Snapshot cumulative phase counters at entry so we can compute the
+    // current call's accounted time at exit (used for unaccounted-time).
+    int64_t snap_p1  = ctx->cum_p1_us;
+    int64_t snap_p2  = ctx->cum_p2_us;
+    int64_t snap_p25 = ctx->cum_p25_us;
+    int64_t snap_p3  = ctx->cum_p3_us;
+    int64_t snap_p5  = ctx->cum_p5_us;
+    int64_t snap_p7  = ctx->cumulative_p7_us;
+
     // track per-graph node statistics (what ggml core assigned to this backend)
     uint32_t graph_n_nodes = (uint32_t)cgraph->n_nodes;
     ctx->total_nodes_processed += graph_n_nodes;
@@ -4950,34 +4999,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->diag_n_calls++;
     }
 
-    // collect supported ops
-    std::vector<ggml_tensor *> supported_nodes;
-    // (Removed for perf: GGMLHEXAGON_LOG_WARN per-cgraph + per-node forces
-    // std::string allocation and ggmlhexagon_get_opkey_from_op even when
-    // dump_debug_info=0. With 17+ nodes * 4352 cgraph calls, this is
-    // ~hundreds of ms of pure overhead. Re-add only when actively debugging.)
-    // GGMLHEXAGON_LOG_WARN("cgraph has %d total nodes (gap_from_prev=%lld us)", cgraph->n_nodes, (long long)gap_from_prev);
-    for (int i = 0; i < cgraph->n_nodes; i++) {
-        ggml_tensor * node = cgraph->nodes[i];
-
-        // (Removed for perf: per-node key construction)
-        // std::string node_name;
-        // ggmlhexagon_get_opkey_from_op(node, node_name);
-        // GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
-
-        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
-            || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
-            || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
-            continue;
-        }
-
-        supported_nodes.push_back(node);
-    }
-
-    if (supported_nodes.empty()) {
-        return result;
-    }
-
     // ====================================================================
     // ION-based multi-op offload: pack all ops into ION shared memory,
     // then pass only (offset, size) via FastRPC as doorbell.
@@ -5001,20 +5022,33 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // tiles remain valid and TG can reuse them (first call miss, later hit).
     // Do NOT reset cache here: resetting kills TG hit rate.
 
-    std::vector<ggml_tensor *> tensor_src;
-    std::vector<hex_op_desc> hex_ops;
-    std::unordered_set<uint32_t> weight_indices;
+    // Storage for cache-miss path; on cache hit we reference cached vectors
+    // directly to avoid copying ~20-110 KB of descriptors per call.
+    std::vector<ggml_tensor *> local_tensor_src;
+    std::vector<hex_op_desc>   local_hex_ops;
+    std::vector<uint8_t>       local_is_weight;
+    std::vector<int32_t>       local_mirror_offset;  // per-tensor heap mirror ION offset, -1 = none
     uint32_t n_tensors = 0;
     uint32_t n_ops = 0;
+
+    // supported_nodes is only required to build descriptors on cache miss.
+    // On a cache hit we restore the derived descriptors directly, so avoid
+    // scanning the cgraph and allocating this vector in the hot path.
+    std::vector<ggml_tensor *> supported_nodes;
 
     // Phase timing: declare all timers here, used across the pipeline
     int64_t t_p1, t_p2, t_p25, t_p3, t_p4, t_p45, t_p5, t_p6, t_p65, t_p7, t_p75, t_p8;
     int64_t t_start = ggml_time_us();
 
     // ---- cgraph content-hash check for Phase 1/2/2.5 cache hit ----
-    // Hash over each node's {op, ne[4], nb[4], src[0..2] ptr, data ptr}.
-    // ~0.2us per node on ARM (FNV-1a: 1 xor + 1 mul per uint64). 17 nodes
-    // = ~3us, dominated by the 17 cache-misses that miss this.
+    // Hash over each node's {op, ne[4], nb[4], non-null src[0..3] ptr, data ptr}.
+    // The src slot index is folded into the value so that NULL slots do not
+    // collide with real tensors at different positions. The node's own data
+    // pointer is kept because distinct dst tensors can share the same
+    // op/shape/srcs (e.g., buffer reuse), and omitting it caused cache hits
+    // to restore descriptors pointing to stale tensors.
+    // ~0.15us per node on ARM (FNV-1a). 17 nodes = ~2.5us, all of which
+    // is paid every call because the hit/miss decision needs the key.
     //
     // cgraph pointer is NOT used: the scheduler rebuilds split->graph every
     // call (even when graph_reuse is on at the llama.cpp layer), so the
@@ -5028,7 +5062,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             for (int j = 0; j < 4; j++) { h ^= (uint64_t)node->ne[j]; h *= 0x100000001b3ULL; }
             for (int j = 0; j < 4; j++) { h ^= (uint64_t)node->nb[j]; h *= 0x100000001b3ULL; }
             for (int j = 0; j < GGML_MAX_SRC; j++) {
-                h ^= (uint64_t)(uintptr_t)node->src[j]; h *= 0x100000001b3ULL;
+                ggml_tensor * src = node->src[j];
+                if (src) {
+                    h ^= (uint64_t)(uintptr_t)src ^ (uint64_t)j;
+                    h *= 0x100000001b3ULL;
+                }
             }
             h ^= (uint64_t)(uintptr_t)node->data; h *= 0x100000001b3ULL;
         }
@@ -5036,52 +5074,76 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     };
     const uint64_t content_hash = compute_content_hash();
     bool cache_hit = false;
+    ggml_backend_hexagon_context::cgraph_cache_entry * cached_entry = nullptr;
     {
         auto it = ctx->cgraph_cache.find(content_hash);
         if (it != ctx->cgraph_cache.end() &&
             it->second.n_nodes == cgraph->n_nodes &&
             it->second.hex_ops.size() > 0) {
-            // Hit. Restore cached state.
-            tensor_src.assign(it->second.tensor_src.begin(), it->second.tensor_src.end());
-            supported_nodes.assign(it->second.supported_nodes.begin(), it->second.supported_nodes.end());
-            hex_ops.assign(it->second.hex_ops.begin(), it->second.hex_ops.end());
-            weight_indices.clear();
-            weight_indices.insert(it->second.weight_indices.begin(), it->second.weight_indices.end());
-            n_tensors = (uint32_t)it->second.n_tensors;
-            n_ops     = (uint32_t)it->second.n_ops;
+            cached_entry = &it->second;
             cache_hit = true;
             ctx->cgraph_cache_hits++;
-            // TEMP DIAG: fill n_tensors for the first N calls (cache hit path)
-            {
-                uint32_t my_id = ctx->diag_n_calls - 1;
-                if (my_id < ctx->DIAG_FIRST_N) {
-                    ctx->diag_first_n_tensors[my_id] = n_tensors;
-                }
-            }
         } else {
             ctx->cgraph_cache_misses++;
         }
     }
 
-    // ---- Phase 1: collect unique tensor objects (per-tensor, not per-buffer) ----
-    // Each tensor object gets its own descriptor with correct ne/nb,
-    // even if multiple tensors share the same data buffer (in-place or buffer reuse).
-    std::unordered_map<ggml_tensor *, int32_t> tensor_index_map;
+    // Bind to cached descriptors on hit, local vectors on miss. This avoids
+    // the expensive assign() of hex_ops/tensor_src in the hot path.
+    std::vector<ggml_tensor *> & tensor_src = cache_hit ? cached_entry->tensor_src : local_tensor_src;
+    std::vector<hex_op_desc>   & hex_ops   = cache_hit ? cached_entry->hex_ops   : local_hex_ops;
+    std::vector<uint8_t>       & is_weight = cache_hit ? cached_entry->is_weight : local_is_weight;
 
-    auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
-        if (!t) return -1;
-        auto it = tensor_index_map.find(t);
-        if (it != tensor_index_map.end()) return it->second;
-        int32_t idx = (int32_t)tensor_src.size();
-        tensor_index_map[t] = idx;
-        tensor_src.push_back(t);
-        return idx;
-    };
+    if (cache_hit) {
+        n_tensors = (uint32_t)cached_entry->n_tensors;
+        n_ops     = (uint32_t)cached_entry->n_ops;
+        // TEMP DIAG: fill n_tensors for the first N calls (cache hit path)
+        {
+            uint32_t my_id = ctx->diag_n_calls - 1;
+            if (my_id < ctx->DIAG_FIRST_N) {
+                ctx->diag_first_n_tensors[my_id] = n_tensors;
+            }
+        }
+    }
+
+    if (!cache_hit) {
+        // ---- collect supported ops (cache miss only) ----
+        // (Removed for perf: GGMLHEXAGON_LOG_WARN per-cgraph + per-node forces
+        // std::string allocation and ggmlhexagon_get_opkey_from_op even when
+        // dump_debug_info=0. With 17+ nodes * 4352 cgraph calls, this is
+        // ~hundreds of ms of pure overhead. Re-add only when actively debugging.)
+        // GGMLHEXAGON_LOG_WARN("cgraph has %d total nodes (gap_from_prev=%lld us)", cgraph->n_nodes, (long long)gap_from_prev);
+
+        supported_nodes.reserve(cgraph->n_nodes);
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            ggml_tensor * node = cgraph->nodes[i];
+
+            // (Removed for perf: per-node key construction)
+            // std::string node_name;
+            // ggmlhexagon_get_opkey_from_op(node, node_name);
+            // GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
+
+            if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
+                || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
+                || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+                continue;
+            }
+
+            supported_nodes.push_back(node);
+        }
+
+        if (supported_nodes.empty()) {
+            return result;
+        }
+
+        tensor_src.reserve(cgraph->n_nodes);
+        hex_ops.reserve(supported_nodes.size());
+    }
 
     // Per-call ring buffer recorder. Writes `t_value` into the next slot of
-    // `hist_arr`, and tags this slot's index in perf_hist_idx. The slot index
-    // is shared across all phase histograms so a single dump can correlate
-    // a specific call's phase breakdown (n_nodes, p1, p2, ..., graph_us).
+    // `hist_arr`, using the current perf_hist_idx. The slot index is shared
+    // across all phase histograms so a single dump can correlate a specific
+    // call's phase breakdown (n_nodes, p1, p2, ..., graph_us).
     auto PERF_RECORD = [&](int64_t t_value, int64_t * hist_arr) {
         const int hidx = ctx->perf_hist_idx;
         hist_arr[hidx] = t_value;
@@ -5090,8 +5152,20 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     t_p1 = t_start; t_start = ggml_time_us(); ctx->cum_p1_us += t_start - t_p1;
     PERF_RECORD(t_start - t_p1, ctx->p1_hist);
 
-    // ---- Phase 2: build op descriptors ----
+    // ---- Phase 2: build op descriptors (cache miss only) ----
     if (!cache_hit) {
+        std::unordered_map<ggml_tensor *, int32_t> tensor_index_map;
+        tensor_index_map.reserve(cgraph->n_nodes * 2);
+        auto get_or_add_tensor_idx = [&](ggml_tensor * t) -> int32_t {
+            if (!t) return -1;
+            auto it = tensor_index_map.find(t);
+            if (it != tensor_index_map.end()) return it->second;
+            int32_t idx = (int32_t)tensor_src.size();
+            tensor_index_map[t] = idx;
+            tensor_src.push_back(t);
+            return idx;
+        };
+
     for (auto * node : supported_nodes) {
         hex_op_desc op;
         memset(&op, 0, sizeof(op));
@@ -5195,16 +5269,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
     // Weights are read-only across batches; AP never modifies them per batch,
     // so cache flush/invalidate can be skipped for them.
-    std::unordered_set<uint32_t> dst_indices;   // indices of tensors that are dst of any op
+    is_weight.assign(n_tensors, 0);
+    std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
     for (const auto & op : hex_ops) {
-        dst_indices.insert(op.dst_idx[0]);
+        uint32_t didx = op.dst_idx[0];
+        if (didx < n_tensors) dst_indices[didx] = 1;
     }
     for (const auto & op : hex_ops) {
         if (op.opcode == GGML_OP_MUL_MAT) {
-            if (dst_indices.find(op.src_idx[0]) == dst_indices.end()) {
-                weight_indices.insert(op.src_idx[0]);
+            uint32_t sidx = op.src_idx[0];
+            if (sidx < n_tensors && !dst_indices[sidx]) {
+                is_weight[sidx] = 1;
                 GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
-                                     op.src_idx[0], (int)tensor_src[op.src_idx[0]]->type);
+                                     sidx, (int)tensor_src[sidx]->type);
             }
         }
     }
@@ -5509,7 +5586,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         entry.tensor_src.assign(tensor_src.begin(), tensor_src.end());
         entry.supported_nodes.assign(supported_nodes.begin(), supported_nodes.end());
         entry.hex_ops.assign(hex_ops.begin(), hex_ops.end());
-        entry.weight_indices.assign(weight_indices.begin(), weight_indices.end());
+        entry.is_weight.assign(is_weight.begin(), is_weight.end());
     }
 
     t_p25 = t_start; t_start = ggml_time_us(); ctx->cum_p25_us += t_start - t_p25;
@@ -5657,7 +5734,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                               data_ptr, moff, info.max_data_len);
     }
 
-    // Step 3: Build mirrors list for each tensor (for Phase 6 offset lookup and Phase 8 copy-back)
+    // Step 3: Build per-tensor mirror offset lookup and mirrors list for copy-back.
+    local_mirror_offset.assign(n_tensors, -1);
     for (int32_t tidx = 0; tidx < (int32_t)n_tensors; tidx++) {
         ggml_tensor * t = tensor_src[tidx];
         if (!t->data) continue;
@@ -5669,6 +5747,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         auto it = buffer_mirrors_map.find(t->data);
         if (it == buffer_mirrors_map.end() || !it->second.allocated) continue;
+
+        local_mirror_offset[tidx] = (int32_t)it->second.mirror_offset;
 
         ion_mirror m;
         m.tensor_idx    = tidx;
@@ -5705,7 +5785,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
-            bool is_quant_weight = weight_indices.count(i) && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+            bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
             if (!is_quant_weight) continue;
             if (t->type != GGML_TYPE_Q4_0 && t->type != GGML_TYPE_Q4_1 &&
                 t->type != GGML_TYPE_Q8_0 && t->type != GGML_TYPE_IQ4_NL &&
@@ -5730,11 +5810,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 g_tiled_ion_offsets[t->data] = (uint32_t)(dp - ion_base);
-            } else {
-                auto bmi = buffer_mirrors_map.find(t->data);
-                if (bmi != buffer_mirrors_map.end() && bmi->second.allocated) {
-                    g_tiled_ion_offsets[t->data] = bmi->second.mirror_offset;
-                }
+            } else if (local_mirror_offset[i] >= 0) {
+                g_tiled_ion_offsets[t->data] = (uint32_t)local_mirror_offset[i];
             }
         }
     }
@@ -5802,12 +5879,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
             // ION tensor: direct offset
             td->data_offset = (uint32_t)(data_ptr - ion_base);
-            td->flags = weight_indices.count(i) ? 2 : 0;  // 2=weight (skip cache flush)
+            td->flags = is_weight[i] ? 2 : 0;  // 2=weight (skip cache flush)
         } else {
             // heap tensor: look up ION offset
-            auto bmi = buffer_mirrors_map.find(t->data);
-            if (bmi != buffer_mirrors_map.end() && bmi->second.allocated) {
-                td->data_offset = bmi->second.mirror_offset;
+            int32_t moff = local_mirror_offset[i];
+            if (moff >= 0) {
+                td->data_offset = (uint32_t)moff;
                 td->flags = 1;  // writable (mirrored)
             } else {
                 td->data_offset = 0;
@@ -5818,7 +5895,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         // tiled: update descriptor to match tile-based repacked layout
         // (repack done in set_tensor during model loading via repack buffer type)
-        bool is_quant_weight = weight_indices.count(i) && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+        bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
         if (is_quant_weight) {
             auto it = g_tiled_ion_offsets.find(t->data);
             if (it != g_tiled_ion_offsets.end()) {
@@ -5924,12 +6001,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
-            if (weight_indices.count(i) && !ctx->weights_dirty) continue;
+            if (is_weight[i] && !ctx->weights_dirty) continue;
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 // For quantized weights repacked in-place by set_tensor,
                 // use the repacked size (larger than ggml_nbytes).
-                bool is_quant_weight = weight_indices.count(i) && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+                bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
                 size_t flush_size = is_quant_weight ? ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]) : ggml_nbytes(t);
                 if (flush_size == 0) flush_size = ggml_nbytes(t);
                 add_range((uint32_t)(dp - ion_base), (uint32_t)flush_size);
@@ -6215,14 +6292,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 dst_off = (uint32_t)(dp - ion_base);
             } else {
-                for (const auto & m : mirrors) {
-                    if ((uint32_t)m.tensor_idx == dst_idx) { dst_off = m.mirror_offset; break; }
-                }
-                if (dst_off == 0xFFFFFFFFu) {
-                    auto bmi = buffer_mirrors_map.find(dst_t->data);
-                    if (bmi != buffer_mirrors_map.end() && bmi->second.allocated)
-                        dst_off = bmi->second.mirror_offset;
-                }
+                int32_t moff = local_mirror_offset[dst_idx];
+                if (moff >= 0) dst_off = (uint32_t)moff;
             }
             if (dst_off == 0xFFFFFFFFu) continue;
 
@@ -6336,6 +6407,27 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t graph_dur = end_time - begin_time;
     // (cumulative_p7_us is already updated at the end of the Phase 7 invoke()
     //  block; do not add t_p7 a second time here.)
+
+    // Compute wall-clock time not covered by the explicit phase timers.
+    // Use entry snapshots so the subtraction yields this call's contribution only.
+    {
+        int64_t accounted_this_call = (ctx->cum_p1_us  - snap_p1)
+                                    + (ctx->cum_p2_us  - snap_p2)
+                                    + (ctx->cum_p25_us - snap_p25)
+                                    + (ctx->cum_p3_us  - snap_p3)
+                                    + (ctx->cum_p5_us  - snap_p5)
+                                    + (ctx->cumulative_p7_us - snap_p7)
+                                    + t_p4 + t_p45 + t_p6 + t_p65 + t_p75 + t_p8;
+        int64_t unaccounted = graph_dur - accounted_this_call;
+        if (unaccounted < 0) unaccounted = 0;  // guard against measurement noise
+        ctx->cum_unaccounted_us += unaccounted;
+        PERF_RECORD(unaccounted, ctx->unaccounted_hist);
+        uint32_t my_id = ctx->diag_n_calls - 1;
+        if (my_id < ctx->DIAG_FIRST_N) {
+            ctx->diag_first_unaccounted_us[my_id] = unaccounted;
+        }
+    }
+
     ctx->cumulative_graph_us += graph_dur;
     ctx->last_graph_end_us   = end_time;
     // TEMP DIAG: record graph_dur for the first N calls
@@ -6372,7 +6464,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     GGMLHEXAGON_LOG_DEBUG("ion-batch timing: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
                           (long long)t_p4, (long long)t_p45, (long long)t_p6, (long long)t_p65,
                           (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
-    GGMLHEXAGON_LOG_DEBUG("graph supported_nodes   %d", supported_nodes.size());
+    GGMLHEXAGON_LOG_DEBUG("graph n_ops   %u", n_ops);
     GGMLHEXAGON_LOG_DEBUG("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
     GGMLHEXAGON_LOG_DEBUG("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
                           (unsigned long long)ctx->rpc_batch_call_count,
