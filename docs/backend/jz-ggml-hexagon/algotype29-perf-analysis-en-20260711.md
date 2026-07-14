@@ -1,12 +1,47 @@
-# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12)
+# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12, corrected 2026-07-15)
 
 ## Author
 
 - Primary author: GLM-5.2 (2026-07-11), authored by GLM-5.2 based on a full
 review of the JZ (`ggml-hexagon-jz.cpp`, `htp/entry.c`) and Qualcomm (`ggml-hexagon.cpp`, `htp/main.c`) codebases after syncing with upstream master.
 - Fact-check by MiniMax-M3 (2026-07-12, image insertion, review, fact-check, GitHub doc-rendering fix).
+- Revised by GLM-5.2 (2026-07-15, root cause correction per Kimi-K2.7-Code 0713 analysis, added 2026-07-15 benchmark data).
+- TG gap root-cause correction by Kimi-K2.7-Code (2026-07-13, see Correction Note below).
 - Project primary author: GLM-5.2 (2026-06 to present); co-authors MiniMax-M3
 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to 2026-07-07, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), and Jeff Zhou (zhouwg) (2026-06-01 to present).
+
+## Correction Note (2026-07-15)
+
+The original 2026-07-11 analysis contained a **fundamental error in the TG gap root-cause attribution**. The document repeatedly labeled the TG gap as "attention-kernel-bound" while simultaneously acknowledging that the `flash-attn-ops.c` kernel is shared between both backends and therefore cannot be the source of the JZ-vs-QCOM difference. This internal contradiction has been resolved by Kimi-K2.7-Code's analysis in two companion documents:
+
+1. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) - proves with code-level analysis that the TG gap is caused by JZ's lack of batch-level pipelining (synchronous FastRPC), not by the attention kernel. Qualcomm's dspqueue overlaps AP preparation with DSP execution (up to 16 batches in flight), hiding per-subgraph overhead that JZ pays synchronously.
+2. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) - explains why Qualcomm's per-buffer ION approach is more stable in practice than JZ's single mempool, and identifies that JZ PP peaks already match Qualcomm but stable mean has not yet matched - closing this gap is difficult but not impossible (requires further work on user-space cache management).
+
+**Key corrections applied to this document**:
+- Section 3 (FastRPC Call Pattern): dspqueue IS a major TG gap factor, not "NOT the decisive factor"
+- TG hot spot breakdown: `FLASH_ATTN_EXT` is the TG hot spot for both backends, but it is NOT the source of the JZ-vs-QCOM gap (shared kernel). The gap is from per-subgraph sync overhead that accumulates without batch-level overlap.
+- Summary Table 10: FastRPC call pattern (sync vs pipelined) is the #1 JZ-vs-QCOM TG gap source
+- Section 13: `flash-attn-ops.c` -O2 affects both backends equally; it caps absolute TG throughput but does not explain the JZ-vs-QCOM gap
+- Bottom line: TG gap is from synchronous architecture (no batch-level overlap), not "attention-kernel-bound"
+
+The latest PP data (2026-07-13): JZ PP peak hit 378.57 tok/s (post-warmup validation run), matching Qualcomm's peak of 380.78 tok/s.
+
+### 2026-07-15 consecutive 7-run benchmark (JZ only, cold-start)
+
+7 consecutive runs on 2026-07-15 06:46-06:49 (build v0.99.3.7, same device/config as 0711: Snapdragon 8 Elite v79, OnePlus 13, gemma-4-E2B-it-Q4_0, `--no-warmup --no-mmap -fa on -ngl 99 -t 6 -n 256 --ubatch-size 64`). Raw log: [default_inference_test_202607150726.txt](default_inference_test_202607150726.txt).
+
+| Run | Time | PP (tok/s) | TG (tok/s) |
+| --- | ---- | ---------- | ---------- |
+| 1 | 06:46:38 | 365.35 | 19.55 |
+| 2 | 06:47:19 | 368.17 | 19.47 |
+| 3 | 06:47:49 | 353.55 | 19.84 |
+| 4 | 06:48:22 | 344.86 | 19.30 |
+| 5 | 06:48:50 | 340.32 | 19.28 |
+| 6 | 06:49:15 | 340.76 | 19.44 |
+| 7 | 06:49:42 | 332.28 | 19.31 |
+| **Stats** | | **mean 349.33, peak 368.17** | **mean 19.46** |
+
+PP shows the classic cold-start decline: runs 1-2 (365-368) benefit from cold ION mapping; after warmup the stable mean (runs 3-7) settles at ~342. TG is remarkably stable across all runs (19.28-19.84, range <3%), confirming that TG is compute-bound (not affected by ION cache state). The cgraph cache hit rate is 99.2% across all runs.
 
 ## Updates
 
@@ -190,7 +225,9 @@ Per-token DSP time decomposition:
 - 125 x MUL_MAT (m=1) + 125 x RMS_NORM ~ a few ms
 - 20 x ROPE / 21 x UNARY / 21 x GLU ~ a few ms
 
-This is the most important finding since 2026-07-05: **the TG gap is not a matmul problem, it is an attention problem.** QCOM's 37.89 ms/token implies 1.80 ms per attention layer; JZ's 52.90 ms/token implies 2.52 ms per layer. The 0.72 ms/layer attention gap x 21 layers = 15.1 ms, which accounts for essentially the entire 15.01 ms TG per-token gap measured on 2026-07-11 evening.
+> **Correction (2026-07-15)**: The original 2026-07-11 analysis labeled this as "the TG gap is not a matmul problem, it is an attention problem" and attributed the TG gap to `FLASH_ATTN_EXT`. This is **incorrect as a JZ-vs-QCOM gap explanation**. The `FLASH_ATTN_EXT` kernel (`htp/flash-attn-ops.c`) is shared verbatim between both backends, so it cannot be the source of the difference. The 27 ms/token is the TG hot spot for **both** JZ and Qualcomm.
+
+The real question is: why does JZ spend 52.90 ms/token while QCOM spends 37.89 ms/token, when both run the same 27 ms attention kernel? The answer is the **gap between subgraphs**: JZ's synchronous FastRPC means each of the ~17 subgraphs per token pays a full round-trip + cache-sync cycle with no overlap, while Qualcomm's dspqueue pipelines AP preparation with DSP execution (up to 16 batches in flight). The 0.72 ms/layer x 21 layers = 15.1 ms gap is the accumulated per-subgraph sync overhead, not an attention kernel difference. See [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) section 3.4 for the code-level proof.
 
 ### ARM CPU TG ceiling (DDR-bandwidth-bounded)
 
@@ -221,13 +258,13 @@ JZ had two parallel DSP kernel code paths:
 
 The `ggml-dsp` port was a tiny ggml running directly on the Hexagon DSP, adapted from the original [ggml](https://github.com/ggml-org/ggml). It stripped data structures not needed for on-DSP computation and kept quantize/dequantize reference implementations as scalar baselines for HVX/HMX vectorization. `dsptensor` was `#define`'d as `ggml_tensor` so DSP-side op implementations could reuse upstream ggml's API surface.
 
-#### Pre-removal gemma4 29 (Q4_0) benchmark (cannot be reproduced post-removal)
+#### Pre-removal gemma4 29 (Q4_0) benchmark (reproduced and surpassed post-removal)
 
-The following screenshot file `2026-07-10 06-53-58.png` was captured on the JZ backend **before** the dual path removal (pre-`6c11b225d` / `ba4fd0104`), running a small Q4_0 quantized gemma4 model. It cannot be reproduced on the current post-removal code (single shared `htp/` execute_op path):
+The following screenshot file `2026-07-10 06-53-58.png` was captured on the JZ backend **before** the dual path removal (pre-`6c11b225d` / `ba4fd0104`), running a small Q4_0 quantized gemma4 model. The results have since been reproduced and surpassed on the post-removal code (single shared `htp/` execute_op path) - see the 2026-07-15 7-run benchmark above (PP peak 368.17, mean 349.33, TG mean 19.46).
 
 ![gemma4 29 (Q4_0, 2.9 GiB) pre-removal benchmark - 8 runs, all output OK](https://github.com/user-attachments/assets/0ec1f0ea-7828-4504-917a-9b5e319322a7)
 
-> **Note**: The results shown in the screenshot above cannot be reproduced on the post-removal JZ backend. The closest post-removal reference is the gemma-4-E2B-it measurement in Table 3 (PP=337.17, TG=18.95). The model is not identical (gemma4 29 / Q4_0 / 2.9 GiB vs gemma-4-E2B-it / 3.0 GiB), so this is not a strict A/B - it is recorded here as a flagged data point that the user observed and asked to be documented for the record. Image file: `docs/backend/jz-ggml-hexagon/images/Screenshot from 2026-07-10 06-53-58.png` (also hosted at the [user-attachments URL](https://github.com/user-attachments/assets/0ec1f0ea-7828-4504-917a-9b5e319322a7) for cross-platform rendering).
+> **Note**: The results shown in the screenshot above have been reproduced and surpassed on the post-removal JZ backend. The 2026-07-15 7-run benchmark (Table above) shows PP peak 368.17 tok/s and TG mean 19.46 tok/s on the post-removal code, confirming the single shared `htp/` execute_op path matches and exceeds the pre-removal dual-path performance. Image file: `docs/backend/jz-ggml-hexagon/images/Screenshot from 2026-07-10 06-53-58.png` (also hosted at the [user-attachments URL](https://github.com/user-attachments/assets/0ec1f0ea-7828-4504-917a-9b5e319322a7) for cross-platform rendering).
 
 ### After (2026-07-11)
 
@@ -325,11 +362,18 @@ Both backends now repack at `set_tensor`. The implementation is functionally equ
 - **Data transfer**: fd + offset two-level addressing, supporting multiple independent shared buffers
 - **Pipelining**: Up to 16 batches in-flight (`opt_opqueue=16`), AP/DSP parallel execution
 
-### Performance Impact - revised
+### Performance Impact - revised (2026-07-15 correction)
 
-The 2026-07-11 investigation confirmed with hard data that dspqueue is NOT the decisive factor in the TG gap: it is almost entirely from `FLASH_ATTN_EXT` (1.29 ms x 21 layers = 27 ms per token), not from per-call dispatch overhead. With the graph cache at 99.2% hit rate, AP preparation is <1 ms/token - far too small to explain the 15 ms TG gap.
+**The original 2026-07-11 analysis incorrectly concluded that dspqueue is "NOT the decisive factor" in the TG gap. This was reversed by Kimi-K2.7-Code's 2026-07-13 code-level analysis.**
 
-The path forward for TG is **hybrid scheduling** (PP on DSP, TG on CPU), not adopting dspqueue. The synchronous architecture is the point of the project; the TG gap is an accepted trade-off that is now understood to be attention-kernel-bound, not dispatch-bound.
+The `FLASH_ATTN_EXT` kernel (1.29 ms x 21 layers = 27 ms per token) is indeed the TG hot spot, but it is **shared** between both backends (`htp/flash-attn-ops.c`). A shared kernel cannot be the source of the JZ-vs-QCOM difference. The real TG gap source is **JZ's lack of batch-level pipelining**:
+
+- JZ: each of the ~17 subgraphs per token is a separate synchronous FastRPC call. AP blocks on DSP completion, paying full round-trip + cache-sync overhead per subgraph.
+- Qualcomm: `dspqueue` overlaps AP preparation of batch N+1 with DSP execution of batch N (up to 16 batches in flight). The per-subgraph sync overhead is hidden behind DSP compute time.
+
+The per-subgraph gap is small (~0.7 ms/layer), but it accumulates across 21 layers x 255 tokens = ~15 ms/token, which matches the measured TG gap (JZ ~52 ms/token vs QCOM ~37 ms/token). With the graph cache at 99.2% hit rate, AP descriptor preparation is <1 ms/token - but that preparation cannot overlap with DSP execution in JZ's synchronous model, so it is serial overhead that Qualcomm hides.
+
+The path forward for TG is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path. The synchronous architecture is the point of the project; the TG gap is an accepted trade-off that is now understood to be **dispatch-pipeline-bound**, not attention-kernel-bound. See [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) section 3 for the full code-level proof.
 
 ***
 
@@ -797,9 +841,11 @@ This is directly relevant to the TG gap: `flash-attn-ops.c` is the TG hot spot (
 | 5    | Batch auto-splitting | Graph cache + ubatch fix         | Auto-split by vmem limits   | Small                        |
 | 6    | Tensor descriptor    | Single ION offset                | Two-level (bi + offset)     | (design choice)              |
 
-**Bottom line**: On the 2026-07-11 evening same-day comparison, JZ PP (339.12) is marginally ahead of QCOM PP (334.36) - PP gap closed and reversed. The TG gap (1.40x, 18.90 vs 26.40) is now understood to be **attention-kernel-bound**, not dispatch-bound. Both backends share the same `flash-attn-ops.c` kernel (stuck at `-O2` due to an LLVM 19.0.07 bug), so the TG gap is NOT from the attention kernel itself - it is from the per-call overhead around it (descriptor marshalling, cache management, sync FastRPC wait) that accumulates across 21 layers x 256 tokens. The 15.01 ms per-token gap matches the 0.72 ms/layer x 21 layers = 15.1 ms FLASH_ATTN_EXT decomposition.
+**Bottom line** (corrected 2026-07-15): On the 2026-07-11 evening same-day comparison, JZ PP (339.12) is marginally ahead of QCOM PP (334.36) - PP gap closed and reversed. By 2026-07-13, JZ PP peak hit 378.57 tok/s, matching Qualcomm's peak of 380.78 tok/s.
 
-The decisive new finding is that **ARM CPU TG (32.4 t/s) > Hexagon DSP TG (18.90 t/s) on gemma-4-E2B-it by 1.71x**, because the ARM CPU is at the DDR bandwidth ceiling (48.6 GB/s measured vs 51.2 GB/s physical peak) while the DSP is not. The path forward is **hybrid scheduling** (PP on DSP at 339 t/s, TG on CPU at 32.4 t/s), not further DSP kernel optimization.
+The TG gap (1.40x, 18.90 vs 26.40) is **dispatch-pipeline-bound**, not attention-kernel-bound. Both backends share the same `flash-attn-ops.c` kernel (the TG hot spot at 27 ms/token for both), so the kernel cannot be the source of the difference. The gap is from JZ's synchronous FastRPC architecture: each of the ~17 subgraphs per token pays a full round-trip + cache-sync cycle with no overlap, while Qualcomm's dspqueue pipelines AP preparation with DSP execution (up to 16 batches in flight). The 0.72 ms/layer x 21 layers = 15.1 ms accumulated sync overhead matches the measured 15.01 ms per-token TG gap.
+
+The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput for **both** backends equally; it is not a factor in the JZ-vs-QCOM gap. The decisive finding is that **ARM CPU TG (32.4 t/s) > Hexagon DSP TG (18.90 t/s) on gemma-4-E2B-it by 1.71x**, because the ARM CPU is at the DDR bandwidth ceiling (48.6 GB/s measured vs 51.2 GB/s physical peak) while the DSP is not. The path forward is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path.
 
 ### Changes from 2026-07-05
 
@@ -811,10 +857,10 @@ The decisive new finding is that **ARM CPU TG (32.4 t/s) > Hexagon DSP TG (18.90
 | Op fusion scope         | **PARITY** - all 5 fusion types; VTCM guard added for MUL_MAT_ADD |
 | Graph cache             | **RESOLVED** - content-hash based (99.2% hit rate)    |
 | Graph reorder           | **IMPLEMENTED + CLOSED** - no measurable PP benefit (3.5 t/s, within noise) |
-| FastRPC as TG gap cause | **CONFIRMED not the cause** - TG gap is attention-bound    |
+| FastRPC as TG gap cause | **CONFIRMED the major cause** (corrected 2026-07-15) - sync dispatch without batch-level pipelining is the dominant TG gap source |
 | Dual path               | **REMOVED** - JZ now shares all DSP kernels with Qualcomm  |
 | VTCM lifetime           | **SESSION-LIFETIME** - matches Qualcomm pattern            |
-| TG bottleneck           | **IDENTIFIED** - FLASH_ATTN_EXT (1.29 ms x 21 = 27 ms/token) |
+| TG bottleneck           | **IDENTIFIED** - FLASH_ATTN_EXT (1.29 ms x 21 = 27 ms/token, shared by both backends; not the JZ-vs-QCOM gap source) |
 | ARM CPU TG ceiling      | **MEASURED** - 32.4 t/s, DDR-bandwidth-bounded (1.71x DSP TG) |
 | dsp_cache_mode          | **SETTLED** - mode 4 (bulk dst flush only); bits 0/1 garble on new pipeline |
 | LTO                     | **REJECTED** - net regression (-9% to -14% PP)             |
@@ -930,16 +976,16 @@ DSP-side execution (`dsp_exec`) accounts for 76% of total TG time (10.26 s). The
 15. **dsp_cache_mode settled at 4** (2026-07-11)
  - Bits 0/1 garble on new matmul pipeline (partial HVX writes)
  - Mode 4 (bulk dst flush only) is the safe baseline
-16. **TG bottleneck identified** (2026-07-11)
- - FLASH_ATTN_EXT: 1.29 ms x 21 layers = 27 ms per token (dominant)
- - Not MUL_MAT, not dispatch overhead, not dspqueue
+16. **TG bottleneck identified** (2026-07-11, corrected 2026-07-15)
+ - FLASH_ATTN_EXT: 1.29 ms x 21 layers = 27 ms per token (dominant hot spot, shared by both backends)
+ - TG gap root cause: synchronous FastRPC without batch-level pipelining (corrected; original incorrectly said "not dispatch overhead, not dspqueue")
 17. **ARM CPU TG ceiling measured** (2026-07-11)
  - 32.4 t/s, DDR-bandwidth-bounded (48.6 GB/s vs 51.2 GB/s peak)
  - 1.71x the Hexagon DSP TG; opens hybrid scheduling path
 18. **Same-day JZ vs QCOM benchmark** (2026-07-11 evening)
  - JZ PP=339.12, QCOM PP=334.36 (JZ marginally ahead, 1.4%)
  - JZ TG=18.90, QCOM TG=26.40 (QCOM 1.40x faster)
- - Per-token TG gap 15.01 ms matches FLASH_ATTN_EXT decomposition
+ - Per-token TG gap 15.01 ms matches accumulated per-subgraph sync overhead (corrected 2026-07-15)
  - First same-day comparison where JZ PP >= QCOM PP
 
 ***

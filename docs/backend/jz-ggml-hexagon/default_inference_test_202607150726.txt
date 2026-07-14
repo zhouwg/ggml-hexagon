@@ -1,0 +1,920 @@
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.1 MB/s (5172 bytes in 0.059s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+Initialized MD5 for /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so has changed or first check
+
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...l-base.so: 1 file pushed. 28.9 MB/s (8042264 bytes in 0.266s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...ml-cpu.so: 1 file pushed. 17.6 MB/s (5006592 bytes in 0.272s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...exagon.so: 1 file pushed. 27.6 MB/s (6862640 bytes in 0.237s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...ibggml.so: 1 file pushed. 29.4 MB/s (1781664 bytes in 0.058s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...ommon.so: 1 file pushed. 30.4 MB/s (66360088 bytes in 2.083s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...n-impl.so: 1 file pushed. 28.3 MB/s (1093688 bytes in 0.037s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...h-impl.so: 1 file pushed. 29.3 MB/s (3842296 bytes in 0.125s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...llama.so: 1 file pushed. 30.0 MB/s (32472152 bytes in 1.032s)
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.9 MB/s (5172 bytes in 0.006s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...el-v73.so: 1 file pushed. 29.8 MB/s (1318856 bytes in 0.042s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...el-v75.so: 1 file pushed. 27.8 MB/s (1134088 bytes in 0.039s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...el-v79.so: 1 file pushed. 29.3 MB/s (1166920 bytes in 0.038s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...el-v81.so: 1 file pushed. 29.0 MB/s (1162856 bytes in 0.038s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin...ma-completion: 1 file pushed. 2.0 MB/s (7344 bytes in 0.003s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.03.011.190 I llama_completion: llama backend init
+0.03.011.211 I llama_completion: load the model and apply lora adapter, if any
+0.04.118.191 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.04.120.901 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.04.124.724 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.04.130.722 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.07.389.447 I llama_completion: llama threadpool init, n_threads = 6
+0.07.389.797 I
+0.07.389.876 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.07.389.877 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+0.07.390.868 I sampler seed: 773096024
+0.07.390.882 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.07.390.885 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.07.390.886 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.07.390.887 I
+
+Here is a brief introduction to the movie *Once Upon a Time in America*.
+
+***
+
+*Once Upon a Time in America* (1984) is a sprawling, epic cinematic achievement that delves into the complex, morally ambiguous world of New York City in the 1920s. It is a sprawling epic that chronicles the lives of Jewish gangsters, failed entrepreneurs, disillusioned intellectuals, and ambitious young men navigating a world steeped in old-world decadence, simmering political corruption, and profound personal disillusionment.
+
+The film is less a straightforward gangster flick and more a sprawling character study, focusing on the internal struggles of its protagonists as they try to find meaning amidst a backdrop of roaring excess—from high society intrigue to visceral crime and profound loneliness. It explores themes of identity, betrayal, the corrosive nature of ambition, the search for belonging in a transient, unforgiving urban landscape.
+
+The narrative weaves together sprawling narratives that explore the legacy of immigrant experience, the shifting moral landscape of the American Dream, and the profound sense of alienation felt alienation experienced by men adrift in a society, the shifting between old-world and the inherent in the film’s of a complex relationships—between these men who often find themselves.
+
+***
+
+In a deeply
+
+0.20.669.348 I common_perf_print:    sampling time =     105.87 ms
+0.20.669.350 I common_perf_print:    samplers time =      69.40 ms /   300 tokens
+0.20.669.386 I common_perf_print:        load time =     121.91 ms
+0.20.669.395 I common_perf_print: prompt eval time =     120.43 ms /    44 tokens (    2.74 ms per token,   365.35 tokens per second)
+0.20.669.396 I common_perf_print:        eval time =   13045.58 ms /   255 runs   (   51.16 ms per token,    19.55 tokens per second)
+0.20.669.397 I common_perf_print:       total time =   13279.91 ms /   299 tokens
+0.20.669.398 I common_perf_print: unaccounted time =       8.03 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.20.669.399 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=9860660 us cum_graph=9934445 us avg_p7=2265 us avg_graph=2282 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[193, 41158] us p7=[186, 40783] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=41158 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=21342 p2=1555 p2.5=666 p3=313 p4=4644 p4.5=4162 p5=1025 p6=14877 p6.5=11608 p7.5=9780 p8=329 unaccounted=3484 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=304 dsp_exec=9860660 civac=8409 us (sum=9869373)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=82 max=149 avg=99 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   188 p50=   871 p95=  1023 max= 26544
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     3 max=     5
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   197 p50=   881 p95=  1023 max= 26647
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    38 p95=  1023 max= 13064
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:46:38
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.3 MB/s (5172 bytes in 0.016s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.6 MB/s (5172 bytes in 0.008s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 16.0 MB/s (1318856 bytes in 0.078s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 16.3 MB/s (1134088 bytes in 0.066s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 16.2 MB/s (1166920 bytes in 0.068s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 19.0 MB/s (1162856 bytes in 0.058s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 2.6 MB/s (7344 bytes in 0.003s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.02.377.202 I llama_completion: llama backend init
+0.02.377.217 I llama_completion: load the model and apply lora adapter, if any
+0.03.482.803 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.485.516 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.488.988 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.495.123 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.661.080 I llama_completion: llama threadpool init, n_threads = 6
+0.06.661.400 I
+0.06.661.468 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.661.469 I
+0.06.661.769 I sampler seed: 2695664856
+0.06.661.775 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.661.778 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.661.779 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.661.779 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+
+Hello!
+
+As a seasoned domain expert in cinema, I's delighted to guide you through the compelling narrative of **Once Upon a Time in America** (1984).
+
+This film is a sprawling, epic exploration of ambition, disillusionment, and the bittersweet nature of the American Dream, set against the backdrop of the crumbling old-world elegance of 1920s New York.
+
+At its core, the movie is a profound character study of a man adrift in a sea of ambition and regret. It follows the life of Henry Hillerman (played by Robert De Niro), a man haunted by lost loves, professional failures, and the relentless pursuit of success in a city that promises everything but delivers disillusionment.
+
+The film masterfully weaves together sprawling storylines, charting the complex lives of Jewish immigrants, gangsters, artists, and intellectuals navigating the dizzying, morally ambiguous landscape of pre-World War II New York. It’t a cinematic tapestry woven with sharp dialogue, stunning cinematography, and a melancholic mood that perfectly captures the spirit of that era's of a bygone glamour, yet a raw, gritty, gritty realism, yet poignant commentary on the themes of the corrupting.
+
+...
+
+**m**c**
+
+Here is
+
+0.19.986.809 I common_perf_print:    sampling time =     103.95 ms
+0.19.986.812 I common_perf_print:    samplers time =      68.69 ms /   300 tokens
+0.19.986.813 I common_perf_print:        load time =     120.27 ms
+0.19.986.814 I common_perf_print: prompt eval time =     119.51 ms /    44 tokens (    2.72 ms per token,   368.17 tokens per second)
+0.19.986.816 I common_perf_print:        eval time =   13095.12 ms /   255 runs   (   51.35 ms per token,    19.47 tokens per second)
+0.19.986.817 I common_perf_print:       total time =   13325.73 ms /   299 tokens
+0.19.986.818 I common_perf_print: unaccounted time =       7.16 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.986.827 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=9974110 us cum_graph=10043928 us avg_p7=2291 us avg_graph=2307 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[195, 42185] us p7=[186, 41746] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=42185 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=19618 p2=1593 p2.5=776 p3=264 p4=4447 p4.5=4173 p5=906 p6=14208 p6.5=10678 p7.5=9636 p8=347 unaccounted=3172 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=288 dsp_exec=9974110 civac=8292 us (sum=9982690)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=91 max=130 avg=103 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   187 p50=   874 p95=  1023 max= 26656
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     4 max=    43
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   196 p50=   884 p95=  1023 max= 26898
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    44 p95=  1023 max= 13267
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:47:19
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 1.6 MB/s (5172 bytes in 0.003s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.8 MB/s (5172 bytes in 0.006s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 17.0 MB/s (1318856 bytes in 0.074s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 16.3 MB/s (1134088 bytes in 0.066s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 17.1 MB/s (1166920 bytes in 0.065s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 16.8 MB/s (1162856 bytes in 0.066s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 1.3 MB/s (7344 bytes in 0.005s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.02.069.561 I llama_completion: llama backend init
+0.02.069.571 I llama_completion: load the model and apply lora adapter, if any
+0.03.167.086 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.169.821 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.173.340 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.179.679 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.328.273 I llama_completion: llama threadpool init, n_threads = 6
+0.06.328.793 I
+0.06.329.427 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.329.428 I
+0.06.329.730 I sampler seed: 24760409
+0.06.329.735 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.329.738 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.329.739 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.329.740 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+
+Here is the introduction you requested:
+
+***
+
+**Once Upon a Time in America (1984)**
+
+*A poignant and sprawling epic, this film plunges into the tumultuous landscape of 20th-century New York, chronicling the lives of immigrant Jewish gangsters as they navigate the dizzying social and moral complexities of ambition, betrayal, and the search for belonging in a city that never stops consuming its inhabitants. It is a sprawling, deeply character-driven epic that captures the tragic romance of a life lived at the intersection of high ambition and profound loneliness. It follows a group of ambitious young men whose dreams are intertwined with the intoxicating allure of American dreams, ultimately revealing the corrosive nature of ambition when divorced from morality. It is a tragic tapestry woven with themes of identity, assimilation, the clash between old-world traditions and the relentless, indifferent machinery of modern urban life.
+
+The film masterfully weaves together historical backdrop with deeply personal, tragic narratives, examining the corrosive nature of assimilation, as characters strive to forge a new identity while simultaneously clinging to the old roots and the past and the ghost of their pasts pasts, navigating the fraught choices that define a complex moral compromises they make in the face-offs a painful moral compromises, in their
+
+0.19.418.321 I common_perf_print:    sampling time =     103.71 ms
+0.19.418.323 I common_perf_print:    samplers time =      68.00 ms /   300 tokens
+0.19.418.323 I common_perf_print:        load time =     125.98 ms
+0.19.418.334 I common_perf_print: prompt eval time =     124.45 ms /    44 tokens (    2.83 ms per token,   353.55 tokens per second)
+0.19.418.335 I common_perf_print:        eval time =   12853.98 ms /   255 runs   (   50.41 ms per token,    19.84 tokens per second)
+0.19.418.336 I common_perf_print:       total time =   13090.05 ms /   299 tokens
+0.19.418.337 I common_perf_print: unaccounted time =       7.91 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.418.338 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=9776217 us cum_graph=9843766 us avg_p7=2246 us avg_graph=2261 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[194, 41210] us p7=[186, 40825] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=41210 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=19644 p2=1479 p2.5=656 p3=296 p4=4151 p4.5=3822 p5=801 p6=13634 p6.5=10029 p7.5=9470 p8=283 unaccounted=3284 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=293 dsp_exec=9776217 civac=8069 us (sum=9784579)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=71 max=79 avg=72 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   188 p50=   857 p95=  1023 max= 25894
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     3 max=     7
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   196 p50=   867 p95=  1023 max= 26204
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    38 p95=  1023 max= 12421
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:47:49
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 2.3 MB/s (5172 bytes in 0.002s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 1.1 MB/s (5172 bytes in 0.005s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 17.3 MB/s (1318856 bytes in 0.073s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 21.6 MB/s (1134088 bytes in 0.050s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 16.9 MB/s (1166920 bytes in 0.066s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 17.7 MB/s (1162856 bytes in 0.063s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 1.3 MB/s (7344 bytes in 0.005s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.02.263.812 I llama_completion: llama backend init
+0.02.263.822 I llama_completion: load the model and apply lora adapter, if any
+0.03.354.943 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.357.535 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.360.831 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.366.368 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.471.015 I llama_completion: llama threadpool init, n_threads = 6
+0.06.471.447 I
+0.06.471.503 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.471.504 I
+0.06.472.599 I sampler seed: 2138998387
+0.06.472.611 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.472.615 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.472.616 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.472.617 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+Here is the introduction you requested:
+
+---
+
+## Once Upon a Time in America (1984)
+
+**Genre:** Drama
+
+**Synopsis:** A sprawling, epic portrait of the lives of aging Jewish gangsters in New York City during the 1920s and 1930s.
+
+**Introduction:** *Once Upon a Time in America* is a sprawling, ambitious, and deeply atmospheric film that captures the decadent, melancholic, and ultimately tragic trajectory of powerful Jewish gangsters as they navigate the tumultuous social and economic landscape of pre-World War II New York City. It functions as a sprawling character study, immersing the viewer in a richly detailed world of old-school organized crime, simmering internal rivalries, existential anxieties, and the collision between old-world codes of honor and the brutal realities of modernity.
+
+**The film is less about a linear plot and more about capturing the atmosphere, the decadent lifestyle that defined this era, serving as a sweeping portrait of decline. It follows a collection of interconnected, complex characters—men whose lives are steeped in moral ambiguity, driven by ambition, regret, avarice, paranoia, ambition, betrayal, fatalistic, a slow-burn the suffocating the weight of the lives entangled in a labyrinthine
+
+0.19.922.996 I common_perf_print:    sampling time =     103.14 ms
+0.19.922.998 I common_perf_print:    samplers time =      68.04 ms /   300 tokens
+0.19.923.002 I common_perf_print:        load time =     129.25 ms
+0.19.923.004 I common_perf_print: prompt eval time =     127.59 ms /    44 tokens (    2.90 ms per token,   344.86 tokens per second)
+0.19.923.007 I common_perf_print:        eval time =   13212.91 ms /   255 runs   (   51.82 ms per token,    19.30 tokens per second)
+0.19.923.008 I common_perf_print:       total time =   13451.99 ms /   299 tokens
+0.19.923.009 I common_perf_print: unaccounted time =       8.35 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.923.009 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=10095589 us cum_graph=10164323 us avg_p7=2319 us avg_graph=2335 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[196, 42370] us p7=[187, 41978] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=42370 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=19734 p2=1370 p2.5=961 p3=276 p4=4164 p4.5=3872 p5=859 p6=13949 p6.5=10479 p7.5=9508 p8=324 unaccounted=3238 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=263 dsp_exec=10095589 civac=8166 us (sum=10104018)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=83 max=146 avg=101 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   187 p50=   886 p95=  1023 max= 26984
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     3 max=    21
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   196 p50=   896 p95=  1023 max= 27333
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    39 p95=  1023 max= 13085
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:48:22
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 1.1 MB/s (5172 bytes in 0.004s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.8 MB/s (5172 bytes in 0.006s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 17.2 MB/s (1318856 bytes in 0.073s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 17.1 MB/s (1134088 bytes in 0.063s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 16.7 MB/s (1166920 bytes in 0.067s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 16.8 MB/s (1162856 bytes in 0.066s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 1.3 MB/s (7344 bytes in 0.005s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.02.029.254 I llama_completion: llama backend init
+0.02.029.264 I llama_completion: load the model and apply lora adapter, if any
+0.03.120.656 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.123.264 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.126.517 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.131.930 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.236.457 I llama_completion: llama threadpool init, n_threads = 6
+0.06.236.904 I
+0.06.236.971 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.236.972 I
+0.06.237.264 I sampler seed: 4041448147
+0.06.237.270 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.237.274 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.237.275 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.237.275 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+
+Here is your introduction:
+
+---
+
+**Once Upon a Time in America (1984)**
+
+*A sprawling, sprawling epic that chronicles the lives of Jewish gangsters in New York City during the Prohibition era.*
+
+This film is a sprawling, sprawling epic that chronicles the lives of Jewish gangsters in New York City during the Prohibition era. It delves deep into the complex moral landscape of ambition, betrayal, and the seductive nature of the American Dream, exploring themes of assimilation, identity, and the corrosive effects of greed and violence.
+
+Set against the backdrop of the 1920s and 1950s, the film masterfully juxtaposes the glittering veneer of New York City’s high society with the gritty underbelly of organized crime. It offers a sprawling, sprawling epic that chronicles the lives of ambitious, ruthless figures—from rising ambitious young men to seasoned veterans—as they navigate the treacherous currents of ambition, betrayal, and the seductive lure of wealth.
+
+At its core, *Once Upon a Time in America* is a profound character studies the intricate tapestry of the lives of complex characters torn between the suffocating the intricate web of their lives, exploring the intricate web of deeply explores the moral ambiguities, exploring the dark facets of ambition
+
+0.19.706.770 I common_perf_print:    sampling time =     104.92 ms
+0.19.706.772 I common_perf_print:    samplers time =      68.78 ms /   300 tokens
+0.19.706.774 I common_perf_print:        load time =     130.16 ms
+0.19.706.776 I common_perf_print: prompt eval time =     129.29 ms /    44 tokens (    2.94 ms per token,   340.32 tokens per second)
+0.19.706.778 I common_perf_print:        eval time =   13228.69 ms /   255 runs   (   51.88 ms per token,    19.28 tokens per second)
+0.19.706.779 I common_perf_print:       total time =   13470.32 ms /   299 tokens
+0.19.706.780 I common_perf_print: unaccounted time =       7.41 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.706.781 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=10129136 us cum_graph=10198089 us avg_p7=2327 us avg_graph=2343 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[194, 41400] us p7=[185, 41026] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=41400 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=19646 p2=1573 p2.5=702 p3=279 p4=4368 p4.5=4382 p5=898 p6=14505 p6.5=9536 p7.5=9494 p8=339 unaccounted=3231 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=325 dsp_exec=10129136 civac=8133 us (sum=10137594)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=83 max=147 avg=100 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   189 p50=   898 p95=  1023 max= 27440
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     4 max=     4
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   197 p50=   907 p95=  1023 max= 27866
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    37 p95=  1023 max= 12127
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:48:50
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.9 MB/s (5172 bytes in 0.005s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.9 MB/s (5172 bytes in 0.006s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 17.6 MB/s (1318856 bytes in 0.072s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 17.0 MB/s (1134088 bytes in 0.064s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 16.3 MB/s (1166920 bytes in 0.068s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 17.3 MB/s (1162856 bytes in 0.064s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 2.9 MB/s (7344 bytes in 0.002s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.02.465.131 I llama_completion: llama backend init
+0.02.465.140 I llama_completion: load the model and apply lora adapter, if any
+0.03.586.052 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.588.697 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.592.016 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.597.818 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.581.111 I llama_completion: llama threadpool init, n_threads = 6
+0.06.581.497 I
+0.06.581.552 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.581.559 I
+0.06.581.865 I sampler seed: 2170705775
+0.06.581.870 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.581.874 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.581.875 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.581.875 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+Here is a brief introduction:
+
+"Once Upon a Time in America" is a sprawling, sprawling, and deeply melancholic epic that chronicles the lives of Jewish immigrants in New York City during the 1920s, delving into themes of assimilation, identity, and the bittersweet nature of memory. It follows a group of ambitious, yet ultimately doomed young men as they navigate the treacherous currents of American society, grappling with the complex tapestry of identity as they strive to forge a new identity amidst the glittering facade of the Jazz Age. It’s a profound exploration of what it means to belong—and the pain of being caught between worlds. It is a cinematic tapestry woven with themes of nostalgia, regret, and the inescapable passage of time.
+
+This film is a sprawling, sprawling, and deeply melancholic epic that chronicles the lives of Jewish immigrants in New York City during the 1920s, delving into themes of assimilation, identity, and the bittersweet nature of memory. It follows a group of ambitious, yet ultimately doomed young men as they navigate the treacherous currents of American society, grappling with the complex themes of identity, the struggle to forge a new identity, a deep exploration of what it is a tragic journey through the struggle for the themes of the central.
+
+0.19.941.588 I common_perf_print:    sampling time =     104.02 ms
+0.19.941.590 I common_perf_print:    samplers time =      68.51 ms /   300 tokens
+0.19.941.592 I common_perf_print:        load time =     129.94 ms
+0.19.941.595 I common_perf_print: prompt eval time =     129.12 ms /    44 tokens (    2.93 ms per token,   340.76 tokens per second)
+0.19.941.599 I common_perf_print:        eval time =   13119.20 ms /   255 runs   (   51.45 ms per token,    19.44 tokens per second)
+0.19.941.600 I common_perf_print:       total time =   13360.48 ms /   299 tokens
+0.19.941.601 I common_perf_print: unaccounted time =       8.14 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.941.602 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=9972192 us cum_graph=10042982 us avg_p7=2291 us avg_graph=2307 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[197, 41395] us p7=[188, 41012] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=41395 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=20059 p2=1289 p2.5=676 p3=246 p4=4621 p4.5=4119 p5=845 p6=14316 p6.5=11345 p7.5=9729 p8=352 unaccounted=3193 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=265 dsp_exec=9972192 civac=8387 us (sum=9980844)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=84 max=109 avg=93 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   188 p50=   877 p95=  1023 max= 26809
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     3 max=    51
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   197 p50=   886 p95=  1023 max= 27060
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    38 p95=  1023 max= 13239
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:49:15
+zhouwg:$ ./scripts/build-run-android.sh run_llamacli
+current working path:/home/zhouwg/develop/ggml-hexagon
+
+wget is available on host machine
+
+xzcat is available on host machine
+
+adb is available on host machine
+
+md5sum is available on host machine
+
+ninja is available on host machine
+
+Android device connected successfully: 9d231cfe
+Android NDK already exist:         /home/zhouwg/develop/ggml-hexagon/prebuilts/android-ndk-r28
+
+OpenCL SDK already exist:    /home/zhouwg/develop/ggml-hexagon/prebuilts/OpenCL_SDK
+
+Qualcomm Hexagon SDK already exist:/home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0
+
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.9 MB/s (5172 bytes in 0.005s)
+/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
+the prebuild LLM model qwen1_5-1_8b-chat-q4_0.gguf already exist on Android phone
+/sdcard/Qwen3.5-2B-Q4_0.gguf
+the prebuild LLM model Qwen3.5-2B-Q4_0.gguf already exist on Android phone
+/sdcard/gemma-4-E2B-it-Q4_0.gguf
+the prebuild LLM model gemma-4-E2B-it-Q4_0.gguf already exist on Android phone
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggml-cpu.so not changed
+
+/home/zhouwg/develop/ggml-hexagon/scripts/ggml-hexagon.cfg: 1 file pushed. 0.8 MB/s (5172 bytes in 0.006s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so /data/local/tmp/libggmldsp-skel-v73.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v73.so: 1 file pushed. 17.6 MB/s (1318856 bytes in 0.071s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so /data/local/tmp/libggmldsp-skel-v75.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v75.so: 1 file pushed. 17.1 MB/s (1134088 bytes in 0.063s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so /data/local/tmp/libggmldsp-skel-v79.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v79.so: 1 file pushed. 16.8 MB/s (1166920 bytes in 0.066s)
+adb push /home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so /data/local/tmp/libggmldsp-skel-v81.so
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/libggmldsp-skel-v81.so: 1 file pushed. 16.8 MB/s (1162856 bytes in 0.066s)
+/home/zhouwg/develop/ggml-hexagon/out/ggmlhexagon-android/bin/llama-completion: 1 file pushed. 2.2 MB/s (7344 bytes in 0.003s)
+-rwxrwxrwx 1 shell shell 8042264 2026-07-14 18:29 /data/local/tmp/libggml-base.so
+-rwxrwxrwx 1 shell shell 5006592 2026-07-14 18:29 /data/local/tmp/libggml-cpu.so
+-rwxrwxrwx 1 shell shell 6862640 2026-07-14 18:29 /data/local/tmp/libggml-hexagon.so
+/data/local/tmp/llama-completion  -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on -st -no-cnv -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
+0.01.952.122 I llama_completion: llama backend init
+0.01.952.132 I llama_completion: load the model and apply lora adapter, if any
+0.03.043.788 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.046.413 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.049.754 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.03.055.262 W load: special_eog_ids contains '<|tool_response>', removing '</s>' token from EOG list
+0.06.185.085 I llama_completion: llama threadpool init, n_threads = 6
+0.06.186.277 I
+0.06.186.475 I system_info: n_threads = 6 (n_threads_batch = 6) / 8 | CPU : NEON = 1 | ARM_FMA = 1 | FP16_VA = 1 | MATMUL_INT8 = 1 | DOTPROD = 1 | REPACK = 1 |
+0.06.186.476 I
+0.06.186.798 I sampler seed: 2199811513
+0.06.186.804 I sampler params:
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	dry_multiplier = 0.000, dry_base = 1.750, dry_allowed_length = 2, dry_penalty_last_n = -1
+	top_k = 64, top_p = 0.950, min_p = 0.050, xtc_probability = 0.000, xtc_threshold = 0.100, typical_p = 1.000, top_n_sigma = -1.000, temp = 1.000
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000, adaptive_target = -1.000, adaptive_decay = 0.900
+0.06.186.807 I sampler chain: logits -> ?penalties -> ?dry -> ?top-n-sigma -> top-k -> ?typical -> top-p -> min-p -> ?xtc -> ?temp-ext -> dist
+0.06.186.808 I generate: n_ctx = 8192, n_batch = 2048, n_predict = 256, n_keep = 1
+0.06.186.809 I
+[ggmlhexagon_init_dsp, 2016]: using Hexagon domain 3(Hexagon-cDSP)
+[ggmlhexagon_init_dsp, 2017]: unsignedpd_enabled 1
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_dsp, 2066]: succeed to open domain 3(Hexagon-cDSP)
+[ggmlhexagon_set_rpc_latency, 1521]: set rpc qos 1 (DSP default latency)
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_init_rpcmempool, 1728]: capacity of rpc memory 4032 MiB
+Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words
+
+Hello!
+
+As a seasoned observer of cinema, I's delighted to guide you through the rich tapestry of cinematic history.
+
+The film we are discussing today is **Once Upon a Time in America** (1984), a sprawling, complex epic that transcends simple categorization. It is not just a movie; it is a sprawling, melancholic epic that plunges deep into the soul of ambition, disillusionment, and the corrosive nature of ambition in the American Dream.
+
+**The Premise:**
+The film centers on the life of Henry Hill (played by Gene Hackman), a wealthy, ambitious young man who navigates the treacherous social landscape of New York City in the 1920s and 1930s. Hill is obsessed with achieving success, wealth, but his pursuit of it leads him down a path filled with moral compromises and profound personal loss.
+
+**The Core Themes:**
+* **The American Dream:** The film serves as a scathing critique of the materialistic pursuit of success, showing how the pursuit of wealth corrupting ambition can become a destructive force the very a dark, and the moral decay. It explores the cost of ambition's, the allure of the corrosive nature of ambition, leading to a profound loss
+
+0.19.636.440 I common_perf_print:    sampling time =     105.18 ms
+0.19.636.443 I common_perf_print:    samplers time =      68.94 ms /   300 tokens
+0.19.636.452 I common_perf_print:        load time =     134.20 ms
+0.19.636.453 I common_perf_print: prompt eval time =     132.42 ms /    44 tokens (    3.01 ms per token,   332.28 tokens per second)
+0.19.636.456 I common_perf_print:        eval time =   13205.40 ms /   255 runs   (   51.79 ms per token,    19.31 tokens per second)
+0.19.636.457 I common_perf_print:       total time =   13451.37 ms /   299 tokens
+0.19.636.458 I common_perf_print: unaccounted time =       8.38 ms /   0.1 %      (total - sampling - prompt eval - eval) / (total)
+0.19.636.459 I common_perf_print:    graphs reused =        253
+[ggmlhexagon_probe_dspinfo, 1894]: device info: Qualcomm SnapDragon 8 Elite, QCOM_HTP_V79, dsp arch version 0x79, system mem size 24834 MiB
+[ggmlhexagon_probe_dspinfo, 1931]: device 0 caps: has_vtcm=1,has_hvx=1,has_hmx=1,hvx_support_128b 6,unsigned pd supported 1, async fastrpc supported 0
+[ggmlhexagon_dump_perf_stats, 646]: rpc stats: batch_calls=4352 cum_p7=10073314 us cum_graph=10142881 us avg_p7=2314 us avg_graph=2330 us
+[ggmlhexagon_dump_perf_stats, 648]: graph nodes: min=17 max=767 total=346368
+[ggmlhexagon_dump_perf_stats, 651]: per-call range: graph=[196, 42248] us p7=[186, 41846] us
+[ggmlhexagon_dump_perf_stats, 653]: max graph detail: dur=42248 us n_nodes=767 n_ops=460
+[ggmlhexagon_dump_perf_stats, 677]: AP phase cumulative: p1=19825 p2=1544 p2.5=696 p3=270 p4=4460 p4.5=3988 p5=899 p6=14178 p6.5=10585 p7.5=9626 p8=316 unaccounted=3180 us
+[ggmlhexagon_dump_perf_stats, 683]: p7 3-way cumulative: rpc_setup=304 dsp_exec=10073314 civac=8228 us (sum=10081846)
+[ggmlhexagon_dump_perf_stats, 687]: rpc overhead (probe): n=6 min=82 max=142 avg=96 us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)
+[ggmlhexagon_dump_perf_stats, 693]: cgraph cache: hits=4317 misses=35 (hit_rate=99.2%) entries=35
+[ggmlhexagon_dump_perf_stats, 713]: mul_mat coverage: total=696 hmx=275 (39.5%) qkv_fused=15 (saves 6.5%) ffn_fused=56 (saves 16.1%) mm_add_fused=0 (saves 0.0%)
+[ggmlhexagon_dump_perf_stats, 729]: hmx eligibility: total=2555 pass=2005 (78.5%)
+[ggmlhexagon_dump_perf_stats, 736]: hmx basic fail: ne01_align=0 ne00_align=0 wtype=0 batched=0 permuted=0 small_n=550
+[ggmlhexagon_dump_perf_stats, 742]: hmx vtcm: pass=2005 fail=0 (0.0% of basic-pass)
+[ggmlhexagon_dump_perf_stats, 775]:   p7rpc min=     0 p50=     0 p95=     1 max=     1
+[ggmlhexagon_dump_perf_stats, 776]:   p7dsp min=   191 p50=   898 p95=  1023 max= 26676
+[ggmlhexagon_dump_perf_stats, 777]:   p7civ min=     1 p50=     2 p95=     4 max=     4
+[ggmlhexagon_dump_perf_stats, 778]:   graph min=   199 p50=   907 p95=  1023 max= 27042
+[ggmlhexagon_dump_perf_stats, 779]:   gap   min=     1 p50=    38 p95=  1023 max= 13127
+[ggmlhexagon_print_running_timestamp, 591]: ggml_hexagon_version:             0.99.3.7
+[ggmlhexagon_print_running_timestamp, 593]: offload MUL_MAT types:            F32,F16,Q4_0,Q8_0,Q4_1,IQ4_NL,MXFP4
+[ggmlhexagon_print_running_timestamp, 594]: thread_counts on CDSP:            6
+[ggmlhexagon_print_running_timestamp, 595]: ion_sync_mode:                    1
+[ggmlhexagon_print_running_timestamp, 596]: dsp_cache_mode:                   4
+[ggmlhexagon_print_running_timestamp, 597]: dsp_cache_trace_bit0:             0
+[ggmlhexagon_print_running_timestamp, 598]: dsp_cache_trace_bit1:             0
+[ggmlhexagon_print_running_timestamp, 599]: dump diag info(DSP):              0
+[ggmlhexagon_print_running_timestamp, 600]: dump diag info(AP):               0
+[ggmlhexagon_print_running_timestamp, 601]: enable graph_optimize:            1
+[ggmlhexagon_print_running_timestamp, 605]: enabled_ops:                      ALL
+[ggmlhexagon_print_running_timestamp, 606]: running timestamp:2026-07-15,06:49:42
+
