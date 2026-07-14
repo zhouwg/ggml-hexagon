@@ -157,7 +157,7 @@
     "description": "Test commands for different test types. All tests should be run locally.",
     "add_test": "./scripts/build-run-android.sh run_testop ADD",
     "mulmat_test": "./scripts/build-run-android.sh run_testop MUL_MAT",
-    "inference_test": "./scripts/build-run-android.sh run_llamacli 0",
+    "inference_test": "./scripts/build-run-android.sh run_llamacli",
     "note": "All tests must be executed locally"
   },
   "log_viewing_rules": {
