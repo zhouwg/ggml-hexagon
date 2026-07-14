@@ -76,8 +76,8 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSI
 HTP_ARCH_VERSION=v79
 HTP_ARCH_VERSION_a=V79
 #all DSP skel versions to build and deploy (AP-side lib built once with HTP_ARCH_VERSION, extra DSP skels built via make)
-#HTP_ARCH_VERSIONS="v73 v75 v79 v81"
-HTP_ARCH_VERSIONS="v79"
+HTP_ARCH_VERSIONS="v73 v75 v79 v81"
+#HTP_ARCH_VERSIONS="v79"
 
 ######## part-2: prompt and LLM models ########
 
@@ -574,19 +574,11 @@ function check_prebuilt_models()
 {
     set +e
 
-    adb shell ls /sdcard/t5-very-small-random-F32.gguf
-    if [ $? -eq 0 ]; then
-        printf "the prebuild LLM model t5-very-small-random-F32.gguf already exist on Android phone\n"
-    else
-        printf "the prebuild LLM model t5-very-small-random-F32.gguf not exist on Android phone\n"
-        adb push ${PROJECT_ROOT_PATH}/models/t5-very-small-random-F32.gguf /sdcard/
-    fi
-
     #1.12 GiB
-    #check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
+    check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
     #1.2 GiB
-    #check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+    check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
 
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
@@ -788,7 +780,8 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    #local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    local models=("gemma4" "qwen3" "qwen1")
 
     local total=${#models[@]}
     local count=0
@@ -931,7 +924,8 @@ function run_ubatchtest_all()
 {
     # Batch ubatch sweep across 5 models x 5 ubatches = 25 tests.
     # No arguments. Similar in spirit to run_llamacli_all.
-    local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    #local models=("gemma4" "qwen3" "qwen3-mtp" "qwen1" "llama3")
+    local models=("gemma4" "qwen3" "qwen1")
     local ubatch_sizes=(32 64 128 512 1024)
 
     # re-join ubatch sizes back into a comma-separated string for run_ubatchtest
@@ -1138,10 +1132,8 @@ function show_usage()
     echo "  $0 run_llamacli   [model_alias]"
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
-    echo "    qwen3-mtp     -> Qwen3.5-2B-MTP-Q4_0.gguf"
     echo "    gemma4        -> gemma-4-E2B-it-Q4_0.gguf"
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
-    echo "    llama3        -> llama-3.2-1B-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli qwen3        # test qwen3"
@@ -1156,14 +1148,14 @@ function show_usage()
     echo "      $0 run_ubatchtest                          # gemma4 + 32/64/128/512/1024"
     echo "      $0 run_ubatchtest qwen3                    # qwen3  + 32/64/128/512/1024"
     echo "      $0 run_ubatchtest qwen3 32,128,512         # qwen3  + 32/128/512"
-    echo "      $0 run_ubatchtest qwen3-mtp 64             # qwen3-mtp + 64"
+    echo "      $0 run_ubatchtest qwen3 64                 # qwen3  + 64"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
     echo "  $0 run_ubatchtest_all"
     echo "    Batch ubatch sweep across 5 models x 5 ubatches = 25 tests."
-    echo "    models:    gemma4, qwen3, qwen3-mtp, qwen1, llama3"
+    echo "    models:    gemma4, qwen3, qwen1"
     echo "    ubatches:  32, 64, 128, 512, 1024"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
