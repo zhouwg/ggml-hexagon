@@ -1732,7 +1732,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
     if (nullptr == ctx->rpc_mempool) {
         GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
-        return 2;
+        return 3;
     } else {
         GGMLHEXAGON_LOG_DEBUG("alloc rpc memorypool %p successfully %ld(%d MiB)",
                               ctx->rpc_mempool, ctx->rpc_mempool_len,
@@ -2127,7 +2127,7 @@ bail:
 }
 
 // =================================================================================================
-//  section-7: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon
+//  section-7: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon)
 // =================================================================================================
 
 // Adapters for the old htp_mm_hvx vtcm_sizes API that was replaced by
