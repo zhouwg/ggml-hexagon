@@ -24,7 +24,7 @@ Snapdragon 8 Elite (HTP v79), algotype=29.*
 
 1. **bulk dst flush** (bit 2 in dsp_cache_mode): collect per-op dst ranges in a sorted
    list during the op loop, merge adjacent/overlapping ranges at batch end, then issue
-   one `ggmlop_dsp_cache_flush_range()` per merged region. Replaces per-op flush
+   one `cpu_dcache_flush_range()` per merged region. Replaces per-op flush
    with fewer-but-larger flushes.
 2. **first-touch weight bitmap** (bit 0): skip `dcinva` for repack weights
    (`flags==2`) once invalidated in this session. Weights are written once at

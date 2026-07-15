@@ -1,21 +1,22 @@
-# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12, corrected 2026-07-15)
+# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12, corrected 2026-07-15, revised 2026-07-16)
 
 ## Author
 
 - Primary author: GLM-5.2 (2026-07-11), authored by GLM-5.2 based on a full
 review of the JZ (`ggml-hexagon-jz.cpp`, `htp/entry.c`) and Qualcomm (`ggml-hexagon.cpp`, `htp/main.c`) codebases after syncing with upstream master.
 - Fact-check by MiniMax-M3 (2026-07-12, image insertion, review, fact-check, GitHub doc-rendering fix).
-- Revised by GLM-5.2 (2026-07-15, root cause correction per Kimi-K2.7-Code 0713 analysis, added 2026-07-15 benchmark data).
 - TG gap root-cause correction by Kimi-K2.7-Code (2026-07-13, see Correction Note below).
-- Project primary author: GLM-5.2 (2026-06 to present); co-authors MiniMax-M3
-(2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to 2026-07-07, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), and Jeff Zhou (zhouwg) (2026-06-01 to present).
+- Revised by GLM-5.2 (2026-07-15, root cause correction per Kimi-K2.7-Code 0713 analysis, added 2026-07-15 benchmark data).
+- Revised by Qwen3.7-Plus (2026-07-16, fix incorrect description).
+- Project author: Jeff Zhou (zhouwg) (2024-03 to present, see timeline at https://github.com/zhouwg/ggml-hexagon/discussions/18).
+- Project co-authors: GLM-5.2 (2026-06 to present), MiniMax-M3 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to present, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), Kimi-K2.7-Code(2026-07-13 to present, fix issues in dsp_cache_mode=5/7, PP optimization, two important docs), Qwen3.7-Plus(2026-07-16 to present, review docs).
 
 ## Correction Note (2026-07-15)
 
 The original 2026-07-11 analysis contained a **fundamental error in the TG gap root-cause attribution**. The document repeatedly labeled the TG gap as "attention-kernel-bound" while simultaneously acknowledging that the `flash-attn-ops.c` kernel is shared between both backends and therefore cannot be the source of the JZ-vs-QCOM difference. This internal contradiction has been resolved by Kimi-K2.7-Code's analysis in two companion documents:
 
-1. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) - proves with code-level analysis that the TG gap is caused by JZ's lack of batch-level pipelining (synchronous FastRPC), not by the attention kernel. Qualcomm's dspqueue overlaps AP preparation with DSP execution (up to 16 batches in flight), hiding per-subgraph overhead that JZ pays synchronously.
-2. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) - explains why Qualcomm's per-buffer ION approach is more stable in practice than JZ's single mempool, and identifies that JZ PP peaks already match Qualcomm but stable mean has not yet matched - closing this gap is difficult but not impossible (requires further work on user-space cache management).
+1. [warmup-ab-test-and-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/warmup-ab-test-and-analysis-20260713.md) - proves with code-level analysis that the TG gap is caused by JZ's lack of batch-level pipelining (synchronous FastRPC), not by the attention kernel. Qualcomm's dspqueue overlaps AP preparation with DSP execution (up to 16 batches in flight), hiding per-subgraph overhead that JZ pays synchronously.
+2. [ion-mempool-vs-perbuffer-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md) - explains why Qualcomm's per-buffer ION approach is more stable in practice than JZ's single mempool, and identifies that JZ PP peaks already match Qualcomm but stable mean has not yet matched - closing this gap is difficult but not impossible (requires further work on user-space cache management).
 
 **Key corrections applied to this document**:
 - Section 3 (FastRPC Call Pattern): dspqueue IS a major TG gap factor, not "NOT the decisive factor"
@@ -120,7 +121,7 @@ The net effect on file sizes:
 > - **JZ-original AP optimizations** (JZ has, QCOM doesn't):
 >   `mm_params_cache` (section 6 - QCOM's
 >   `ggml_hexagon_precompute_matmul_params` recomputes every call,
->   JZ wraps it in a cache; the cache write path is currently disabled,
+>   JZ wraps it in a cache; the cache write path is enabled,
 >   see section 6), the full **AP-side profiler infrastructure**
 >   (section 9 - longtail profiler, mul_mat coverage tracer,
 >   dsp_cache_trace_bit0/bit1 diagnostic switch), and **AP-side cache
@@ -493,9 +494,9 @@ Both backends now cache by graph identity. Qualcomm also caches the graph reorde
 
 ***
 
-## 9. mm_params_cache (cache: JZ only, disabled: ION key collision)
+## 9. mm_params_cache (cache: JZ only, enabled)
 
-JZ caches precomputed `htp_mm_kernel_params` by a composite key (weight data pointer XOR ne11):
+JZ caches precomputed `htp_mm_kernel_params` by a composite key (src0 tensor pointer XOR weight data pointer XOR ne11):
 
 ```cpp
 const uintptr_t cache_key = (uintptr_t) src0->data ^ ((uintptr_t) ne11 << 32);
@@ -994,5 +995,5 @@ DSP-side execution (`dsp_exec`) accounts for 76% of total TG time (10.26 s). The
 
 ## 20. Related Documents
 
-1. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - JZ single ION mempool vs Qualcomm per-buffer ION; explains PP jitter and stable mean gap
-2. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - FastRPC/ION warmup A/B test; identified batch-level pipelining as TG gap root cause (corrected the 0711 attention-kernel-bound misdiagnosis)
+1. [ion-mempool-vs-perbuffer-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - JZ single ION mempool vs Qualcomm per-buffer ION; explains PP jitter and stable mean gap
+2. [warmup-ab-test-and-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/warmup-ab-test-and-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - FastRPC/ION warmup A/B test; identified batch-level pipelining as TG gap root cause (corrected the 0711 attention-kernel-bound misdiagnosis)

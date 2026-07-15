@@ -29,7 +29,7 @@ The analysis is based on reading the actual source code, not just the existing d
 
 ### JZ: strictly synchronous per subgraph
 
-JZ's only DSP dispatch point is in [`ggml-hexagon-jz.cpp:6079`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L6079):
+JZ's only DSP dispatch point is in [`ggml-hexagon-jz.cpp:6003`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L6003):
 
 ```cpp
 int hexagon_error = ggml_dsp_execute_batch(ctx->ggmlop_handle, batch_offset, total_desc_size);
@@ -47,7 +47,7 @@ sess->flush();
 
 `flush()` ([`ggml-hexagon.cpp:1601-1604`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1601-L1604)) sends the final batch and then loops on `dspqueue_read` until all pending responses are consumed. So a single `graph_compute` call also waits for completion.
 
-However, Qualcomm's `enqueue_op` ([`ggml-hexagon.cpp:1593-1598`](file:///home/hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1593-L1598)) checks batch capacity and calls `flush_batch()` ([`ggml-hexagon.cpp:1571-1591`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1571-L1591)) when the batch is full. `flush_batch()` issues a non-blocking `dspqueue_write` and immediately returns. The DSP consumes batches from the queue in its own context ([`htp/main.c:862-1008`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c#L862-L1008)). The queue depth is `opt_opqueue = 16` ([`ggml-hexagon.cpp:77`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L77)).
+However, Qualcomm's `enqueue_op` ([`ggml-hexagon.cpp:1593-1598`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1593-L1598)) checks batch capacity and calls `flush_batch()` ([`ggml-hexagon.cpp:1571-1591`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1571-L1591)) when the batch is full. `flush_batch()` issues a non-blocking `dspqueue_write` and immediately returns. The DSP consumes batches from the queue in its own context ([`htp/main.c:862-1008`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c#L862-L1008)). The queue depth is `opt_opqueue = 16` ([`ggml-hexagon.cpp:77`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L77)).
 
 Therefore:
 
@@ -88,7 +88,7 @@ TG generates 255 tokens. Each token is split by the llama.cpp scheduler into ~17
 For each subgraph JZ pays:
 
 - AP descriptor preparation
-- `DC CVAC` flush of dirty input ranges ([`ggml-hexagon-jz.cpp:5975-6026`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5975-L6026))
+- `DC CVAC` flush of dirty input ranges ([`ggml-hexagon-jz.cpp:5935-5958`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5935-L5958))
 - Synchronous FastRPC round-trip
 - DSP execution
 - `CIVAC` invalidate after return
@@ -256,7 +256,7 @@ This single run reached **PP = 378.57 t/s**, the highest JZ PP observed so far, 
 
 ## 7. Follow-up: Weights Pre-flush (P1)
 
-After the warmup commit, the next highest-ROI idea was to move the weights cache-clean cost out of the first inference batch and into model-load time. JZ already tracks `weights_dirty` and skips re-flushing clean repack weights in Phase 6.5 ([`ggml-hexagon-jz.cpp:5972-5985`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5972-L5985)). The optimization is to pre-flush each repack weight immediately after `set_tensor`/`repack`, so the first real batch sees `weights_dirty = false` and skips the weights entirely.
+After the warmup commit, the next highest-ROI idea was to move the weights cache-clean cost out of the first inference batch and into model-load time. JZ already tracks `weights_dirty` and skips re-flushing clean repack weights in Phase 6.5 ([`ggml-hexagon-jz.cpp:5910`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5910)). The optimization is to pre-flush each repack weight immediately after `set_tensor`/`repack`, so the first real batch sees `weights_dirty = false` and skips the weights entirely.
 
 ### 7.1 Change
 

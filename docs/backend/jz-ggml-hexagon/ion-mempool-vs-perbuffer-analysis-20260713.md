@@ -59,13 +59,13 @@ Your intuition that a single mempool is better is not completely wrong, but **un
 
 ### Actual disadvantages exposed by the code
 
-JZ's `rpc_mempool` is mapped with DELAYED mode ([`ggml-hexagon-jz.cpp:1737`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1737-L1744)). The first batch of each run triggers the actual mapping. Because Linux/Hexagon physical allocation is non-deterministic, **different process launches may give different DSP-side physical addresses**, causing:
+JZ's `rpc_mempool` is mapped with `FASTRPC_MAP_FD_DELAYED` mode ([`ggml-hexagon-jz.cpp:1778`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1778-L1780)). The first batch of each run triggers the actual mapping. Because Linux/Hexagon physical allocation is non-deterministic, **different process launches may give different DSP-side physical addresses**, causing:
 
 - Different L2 cache alias sets → higher miss rates on some runs.
 - Different VTCM layout decisions → variable HMX/FLASH_ATTN efficiency.
 - Same memory reused for different tensor roles → more frequent stale cache-line pollution.
 
-To compensate, JZ has to do a lot of `DC CVAC/CIVAC` work in [`ggml-hexagon-jz.cpp:5975-6026`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5975-L6026) on every batch.
+To compensate, JZ has to do a lot of `DC CVAC/CIVAC` work in [`ggml-hexagon-jz.cpp:5935-5958`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5935-L5958) on every batch.
 
 ### Why Qualcomm's per-buffer approach wins in practice
 
