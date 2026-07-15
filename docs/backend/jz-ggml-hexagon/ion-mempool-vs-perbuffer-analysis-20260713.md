@@ -95,7 +95,48 @@ Without those, per-buffer is more controllable, which is why Qualcomm is more st
 
 ---
 
-## 3. Summary
+## 3. Control-Plane Primitive Difference: dspqueue vs. Native FastRPC invoke
+
+Another way to frame the Qualcomm-vs-JZ distinction is to separate **control plane** from **data plane**.
+
+### Control plane
+
+| Aspect | Qualcomm ggml-hexagon | JZ ggml-hexagon |
+|---|---|---|
+| Primitive | `dspqueue_write/read` queue semantics | Native FastRPC `invoke` |
+| Dispatch style | AP pushes a whole op-batch; DSP is woken by packet callback | AP calls a DSP function directly with descriptors |
+| Blocking model | AP can fire-and-forget, responses drained later | Typically synchronous per call |
+| Batch handling | One `dspqueue_write` carries many ops (`htp_opbatch_req`) | One `invoke` usually corresponds to one op or a smaller batch |
+
+### Data plane
+
+The data plane is almost identical:
+
+- Both use **ION shared memory** for tensor data.
+- Both have AP write descriptors/data and DSP read descriptors/data.
+- Both need explicit **cache flush / invalidate** synchronization.
+- Both ultimately run the same HVX/HMX kernels.
+
+In the Qualcomm path the DSP entry point is [`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) (`htp_packet_callback`), which parses `htp_buf_desc[]`, `htp_tensor[]`, and `htp_op_desc[]` before dispatching to the kernels. In the JZ path the same work happens inside [`htp/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/entry.c). The high-level flow is the same:
+
+```
+AP packs descriptors -> transport to DSP -> DSP entry parses descriptors -> dispatch op execution
+```
+
+### ION management granularity
+
+| | Qualcomm ggml-hexagon | JZ ggml-hexagon |
+|---|---|---|
+| ION granularity | Per-buffer; each buffer/tensor has its own fd | Shared mem pool; one big region + offsets |
+| Mapping cost | DSP maps each fd via `HAP_mmap` / `prep_op_bufs` | Pool mapped once; subsequent ops only pass offsets |
+| Flexibility | Good for discrete large tensors | Good for compact, unified memory layout |
+
+The pool approach has lower fd and mapping overhead when batches are frequent and tensors are numerous, which is why many custom HTP backends prefer it. The trade-off is that the user-space side must take over the cache-coherency and physical-address-stability work that Qualcomm's driver does automatically with per-buffer mappings.
+
+---
+
+## 4. Summary
 
 - **JZ PP peak can already rival Qualcomm**, but stable mean leadership needs state-management work that is currently done by Qualcomm's driver.
 - **Single mempool is not fundamentally inferior**, but in the current JZ implementation it carries too much user-space responsibility. Fixing mmap strategy and cache flush batching is more important than switching to per-buffer.
+- **Control-plane primitives differ** (`dspqueue` vs. native FastRPC `invoke`), but the data plane and the descriptor-dispatch flow are fundamentally the same.
