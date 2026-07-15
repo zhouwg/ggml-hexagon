@@ -690,12 +690,27 @@ function prepare_run_on_phone()
         update_ggml_libs
         echo "${current_build_type}" > "${last_build_type_file}"
     else
+        local need_update=0
         is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
         if [ $? -eq 0 ]; then
-            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n\n"
+            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so not changed\n"
             #reuse cached/uploaded ggml runtime libs on device side to avoid time-consuming task on host side
         else
-            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n\n"
+            printf "${LOCAL_BUILD_DIR}/bin/libggml-cpu.so has changed or first check\n"
+            need_update=1
+        fi
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+            is_so_file_changed ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+            if [ $? -ne 0 ]; then
+                printf "${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so has changed or first check\n"
+                need_update=1
+            else
+                printf "${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so not changed\n"
+            fi
+        fi
+        if [ ${need_update} -eq 0 ]; then
+            printf "reuse cached/uploaded ggml runtime libs on device side\n\n"
+        else
             #upload ggml runtime libs to Android phone
             update_ggml_libs
         fi

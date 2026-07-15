@@ -107,11 +107,11 @@
 #define GGML_HEXAGON_MAX_DEVICES                        16
 #define GGML_HEXAGON_BACKEND_NAME                       "hexagon"
 
-#define GGMLHEXAGON_LOG_ALWAYS(...)                     ggmlhexagon_log_always_internal(__FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_ERROR(...)                      ggmlhexagon_log_always_internal(__FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ALWAYS(...)                     ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_NONE , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)                      ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_ERROR, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define GGMLHEXAGON_LOG_WARN(...)                       ggmlhexagon_log_internal(GGML_LOG_LEVEL_WARN , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define GGMLHEXAGON_LOG_INFO(...)                       ggmlhexagon_log_internal(GGML_LOG_LEVEL_INFO , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_VERBOSE(...)                    ggmlhexagon_log_internal(GGML_LOG_LEVEL_CONT , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_VERBOSE(...)                    ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_CONT , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #if GGMLHEXAGON_DEBUG
 #define GGMLHEXAGON_LOG_DEBUG(...)                      ggmlhexagon_log_internal(GGML_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
@@ -141,6 +141,7 @@ struct ggml_backend_hexagon_context;
 
 static bool                  ggmlhexagon_is_metadata_op(enum ggml_op op);
 static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
+static const char *          ggmlhexagon_get_htparch_desc(size_t htp_arch);
 static int                   hexagon_probe_invoke_timed(ggml_backend_hexagon_context * ctx);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
 static void                  ggmlhexagon_set_runtime_path(size_t device, const std::string & path);
@@ -520,9 +521,7 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
     GGML_UNUSED(file);
 
     if (0 == g_hexagon_appcfg.dump_debug_info) {
-        if (level != GGML_LOG_LEVEL_CONT) {
-            return;
-        }
+        return;
     }
 
     {
@@ -546,8 +545,12 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
     }
 }
 
-// Always-emit log channel. Used by GGMLHEXAGON_LOG_ERROR and GGMLHEXAGON_LOG_ALWAYS (both bypass the log-level filter).
-static void ggmlhexagon_log_always_internal(const char * file, const char * func, int line, const char * format, ...) {
+// Always-emit log channel. Bypasses dump_debug_info. The level parameter decides
+// whether the message is also printed to stdout on Android:
+//   - GGML_LOG_LEVEL_NONE  (ALWAYS)    -> adb logcat only
+//   - GGML_LOG_LEVEL_ERROR             -> adb logcat + terminal
+//   - GGML_LOG_LEVEL_CONT  (VERBOSE)   -> adb logcat + terminal
+static void ggmlhexagon_log_always_internal(ggml_log_level level, const char * file, const char * func, int line, const char * format, ...) {
     static std::mutex s_log_mutex;
     static char s_log_buf[GGMLHEXAGON_LOGBUF_LEN];
 
@@ -562,7 +565,11 @@ static void ggmlhexagon_log_always_internal(const char * file, const char * func
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
             __android_log_print(ANDROID_LOG_INFO, PROJECT_NAME, "%s\n", s_log_buf);
+            if (GGML_LOG_LEVEL_ERROR == level || GGML_LOG_LEVEL_CONT == level) {
+                printf("%s\n", s_log_buf);
+            }
 #else
+            //for Snapdragon based WoA(Windows on ARM) device or Linux
             printf("%s\n", s_log_buf);
 #endif
         }
@@ -639,6 +646,14 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     if (nullptr == ctx) {
         return;
     }
+    // Logging convention in this function (inverted from the usual level names):
+    //   VERBOSE -> terminal + adb logcat (key summary for immediate visibility)
+    //   ALWAYS  -> adb logcat only (detailed diagnostics for post-analysis)
+    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d",
+                             ctx->device, ctx->name,
+                             ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
+                             ctx->socinfo.vtcm_size_in_mb,
+                             (int)ctx->has_hvx, (int)ctx->has_hmx);
     GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
                              (unsigned long long)ctx->rpc_batch_call_count,
                              (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
@@ -704,7 +719,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         const double qkv_pct  = total > 0 ? 100.0 * (3 * ctx->n_fused_qkv_cum) / total : 0.0;
         const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
         const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
-        GGMLHEXAGON_LOG_VERBOSE("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
+        GGMLHEXAGON_LOG_ALWAYS("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
                                "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
                                (unsigned long long)ctx->n_mul_mat_total_cum,
                                (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
@@ -723,18 +738,18 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              + ctx->n_hmx_basic_fail_permuted
                              + ctx->n_hmx_basic_fail_small_n;
         if (basic_total > 0) {
-            GGMLHEXAGON_LOG_VERBOSE("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
+            GGMLHEXAGON_LOG_ALWAYS("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
                                      (unsigned long long)basic_total,
                                      (unsigned long long)ctx->n_hmx_basic_pass,
                                      basic_total > 0 ? 100.0 * ctx->n_hmx_basic_pass / basic_total : 0.0);
-            GGMLHEXAGON_LOG_VERBOSE("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
+            GGMLHEXAGON_LOG_ALWAYS("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
                                      (unsigned long long)ctx->n_hmx_basic_fail_ne01,
                                      (unsigned long long)ctx->n_hmx_basic_fail_ne00,
                                      (unsigned long long)ctx->n_hmx_basic_fail_wtype,
                                      (unsigned long long)ctx->n_hmx_basic_fail_batched,
                                      (unsigned long long)ctx->n_hmx_basic_fail_permuted,
                                      (unsigned long long)ctx->n_hmx_basic_fail_small_n);
-            GGMLHEXAGON_LOG_VERBOSE("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
+            GGMLHEXAGON_LOG_ALWAYS("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
                                      (unsigned long long)ctx->n_hmx_vtcm_pass,
                                      (unsigned long long)ctx->n_hmx_vtcm_fail,
                                      ctx->n_hmx_basic_pass > 0
@@ -749,34 +764,29 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         const int n = ctx->perf_hist_count;
         GGMLHEXAGON_LOG_ALWAYS("---- per-call distribution over last %d calls (us) ----", n);
 
-        #define DUMP_PHASE_HIST(NAME, ARR, IS_FORGROUND_LOG) do { \
+        #define DUMP_PHASE_HIST(NAME, ARR) do { \
             ggmlhexagon_compute_hist_stats((ARR), n, mn, p50, p95, mx); \
-            if (IS_FORGROUND_LOG) { \
-                GGMLHEXAGON_LOG_VERBOSE("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
-                    (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
-            } else { \
-                GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
-                    (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
-            } \
+            GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
+                (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
         } while (0)
-        DUMP_PHASE_HIST("p1",   ctx->p1_hist,   false);
-        DUMP_PHASE_HIST("p2",   ctx->p2_hist,   false);
-        DUMP_PHASE_HIST("p2.5", ctx->p25_hist,  false);
-        DUMP_PHASE_HIST("p3",   ctx->p3_hist,   false);
-        DUMP_PHASE_HIST("p4",   ctx->p4_hist,   false);
-        DUMP_PHASE_HIST("p4.5", ctx->p45_hist,  false);
-        DUMP_PHASE_HIST("p5",   ctx->p5_hist,   false);
-        DUMP_PHASE_HIST("p6",   ctx->p6_hist,   false);
-        DUMP_PHASE_HIST("p6.5", ctx->p65_hist,  false);
-        DUMP_PHASE_HIST("p7",   ctx->p7_hist,   false);
-        DUMP_PHASE_HIST("p7.5", ctx->p75_hist,  false);
-        DUMP_PHASE_HIST("p8",   ctx->p8_hist,   false);
-        DUMP_PHASE_HIST("unaccounted", ctx->unaccounted_hist, false);
-        DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist, true);
-        DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist, true);
-        DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist, true);
-        DUMP_PHASE_HIST("graph", ctx->graph_us_hist, true);
-        DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist, true);
+        DUMP_PHASE_HIST("p1",   ctx->p1_hist);
+        DUMP_PHASE_HIST("p2",   ctx->p2_hist);
+        DUMP_PHASE_HIST("p2.5", ctx->p25_hist);
+        DUMP_PHASE_HIST("p3",   ctx->p3_hist);
+        DUMP_PHASE_HIST("p4",   ctx->p4_hist);
+        DUMP_PHASE_HIST("p4.5", ctx->p45_hist);
+        DUMP_PHASE_HIST("p5",   ctx->p5_hist);
+        DUMP_PHASE_HIST("p6",   ctx->p6_hist);
+        DUMP_PHASE_HIST("p6.5", ctx->p65_hist);
+        DUMP_PHASE_HIST("p7",   ctx->p7_hist);
+        DUMP_PHASE_HIST("p7.5", ctx->p75_hist);
+        DUMP_PHASE_HIST("p8",   ctx->p8_hist);
+        DUMP_PHASE_HIST("unaccounted", ctx->unaccounted_hist);
+        DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist);
+        DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist);
+        DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist);
+        DUMP_PHASE_HIST("graph", ctx->graph_us_hist);
+        DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist);
         #undef DUMP_PHASE_HIST
         // n_nodes / n_ops are int32_t in ctx, use the i32 variant
         ggmlhexagon_compute_hist_stats_i32(ctx->n_nodes_hist, n, mn, p50, p95, mx);
@@ -798,7 +808,7 @@ public:
 
     void dump(std::function<void(const std::string &, const std::string &, const std::string &)> worker) {
         if (!_load_success) {
-            GGMLHEXAGON_LOG_INFO("hexagon cfg file %s not loaded", _cfg_filename.c_str());
+            GGMLHEXAGON_LOG_WARN("hexagon cfg file %s not loaded", _cfg_filename.c_str());
             return;
         }
         auto iter = _hexagon_appcfg.begin();
@@ -965,7 +975,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.dump([](const std::string & section, const std::string & key, const std::string value) {
         std::ostringstream  tmposs;
         tmposs << "section[" << std::setw(10) << std::left << section << "],[" << std::setw(25) << std::left << key << "] = [" << value << "]";
-        GGMLHEXAGON_LOG_ALWAYS("%s", tmposs.str().c_str());
+        GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
     hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99");
@@ -1006,7 +1016,7 @@ static void ggmlhexagon_load_cfg() {
                              g_hexagon_appcfg.ndev, GGML_HEXAGON_MAX_DEVICES);
         g_hexagon_appcfg.ndev = 1;
     }
-    GGMLHEXAGON_LOG_INFO("ndev=%d (from cfg, env GGML_HEXAGON_NDEV overrides if set)", g_hexagon_appcfg.ndev);
+    GGMLHEXAGON_LOG_ALWAYS("ndev=%d (from cfg, env GGML_HEXAGON_NDEV overrides if set)", g_hexagon_appcfg.ndev);
 
     ggmlhexagon_set_runtime_path(0, g_hexagon_appcfg.runtime_libpath);
 
@@ -1723,15 +1733,13 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
         }
     }
     ctx->rpc_mempool_capacity = candidate_size * SIZE_IN_MB;
-    GGMLHEXAGON_LOG_DEBUG("rpc memory capacity %ld(%d MiB) for device %d",
+    GGMLHEXAGON_LOG_ALWAYS("rpc memory capacity %ld(%d MiB) for device %d",
                           ctx->rpc_mempool_capacity, ctx->rpc_mempool_capacity / SIZE_IN_MB, ctx->device);
-    GGMLHEXAGON_LOG_VERBOSE("capacity of rpc memory %d MiB", ctx->rpc_mempool_capacity / SIZE_IN_MB);
-
     GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
     ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
     ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
     if (nullptr == ctx->rpc_mempool) {
-        GGMLHEXAGON_LOG_WARN("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
+        GGMLHEXAGON_LOG_ERROR("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
         return 3;
     } else {
         GGMLHEXAGON_LOG_DEBUG("alloc rpc memorypool %p successfully %ld(%d MiB)",
@@ -1739,122 +1747,117 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                               ctx->rpc_mempool_len / SIZE_IN_MB);
     }
     ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
-    GGMLHEXAGON_LOG_WARN("rpc mempool handle %d", ctx->rpc_mempool_handle);
-    GGMLHEXAGON_LOG_WARN("rpc mempool addr %p", ctx->rpc_mempool);
-    GGMLHEXAGON_LOG_WARN("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
-    {
-        // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
-        // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
-        // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
-        // Without this registration, invoke() still triggers implicit fd_mmap_create.
-        int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
-                                     ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
-                                     FASTRPC_MAP_FD_DELAYED);
-        if (mmap_err != 0) {
-            GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
-                                 mmap_err, ctx->rpc_mempool_handle);
-        } else {
-            GGMLHEXAGON_LOG_WARN("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
-                                 ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
-        }
+    GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", ctx->rpc_mempool_handle);
+    GGMLHEXAGON_LOG_INFO("rpc mempool addr %p", ctx->rpc_mempool);
+    GGMLHEXAGON_LOG_INFO("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
+    // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
+    // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
+    // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
+    // Without this registration, invoke() still triggers implicit fd_mmap_create.
+    int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
+                                 ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
+                                 FASTRPC_MAP_FD_DELAYED);
+    if (mmap_err != 0) {
+        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
+                             mmap_err, ctx->rpc_mempool_handle);
+    } else {
+        GGMLHEXAGON_LOG_INFO("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
+                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+    }
 
-        // Register ION pool on DSP side via pure-scalar IDL call.
-        // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
-        // implicit fd_mmap_create when dsptensor.data pointers are passed.
-        // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
-        uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
-        uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
-        uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
+    // Register ION pool on DSP side via pure-scalar IDL call.
+    // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
+    // implicit fd_mmap_create when dsptensor.data pointers are passed.
+    // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
+    uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
+    uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
+    uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
 
-        int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
-        if (reg_err != AEE_SUCCESS) {
-            GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
-        } else {
-            GGMLHEXAGON_LOG_ALWAYS("registered ION base via scalar call: fd=%d, size=%dMB",
-                                 ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
-        }
+    int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+    if (reg_err != AEE_SUCCESS) {
+        GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
+    } else {
+        GGMLHEXAGON_LOG_ALWAYS("registered ION base via scalar call: fd=%d, size=%dMB",
+                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+    }
+    GGMLHEXAGON_LOG_ALWAYS("ION layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);
+    int probe_err = hexagon_probe_invoke_timed(ctx);
+    // [ION-PROBE] Verify bidirectional ION shared memory access.
+    // Call with batch_size=0 --> DSP enters probe mode: writes 0xAB at base+0,
+    // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
+    if (0) {
+        if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
+            // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
+            __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
 
-        GGMLHEXAGON_LOG_ALWAYS("ION layout: total=%zuMB",
-                             ctx->rpc_mempool_len / SIZE_IN_MB);
-
-        // [ION-PROBE] Verify bidirectional ION shared memory access.
-        // Call with batch_size=0 --> DSP enters probe mode: writes 0xAB at base+0,
-        // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
-        {
-            int probe_err = hexagon_probe_invoke_timed(ctx);
-            if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
-                // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
-                __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
-
-                const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
-                bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
-                bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
-                GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
-                                     p[0], p[1], p[2], p[3],
-                                     ok_ab ? "PASS" : "FAIL");
-                GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
-                                     p[64], p[65], p[66], p[67],
-                                     ok_cd ? "PASS" : "FAIL");
-                if (ok_ab && ok_cd) {
-                    GGMLHEXAGON_LOG_ALWAYS("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
-                } else {
-                    GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
-                }
-                // Clean up probe patterns
-                memset((void *)p, 0, 16);
-                memset((void *)(p + 64), 0, 16);
+            const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
+            bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
+            bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
+            GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
+                                 p[0], p[1], p[2], p[3],
+                                 ok_ab ? "PASS" : "FAIL");
+            GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
+                                 p[64], p[65], p[66], p[67],
+                                 ok_cd ? "PASS" : "FAIL");
+            if (ok_ab && ok_cd) {
+                GGMLHEXAGON_LOG_ALWAYS("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
             } else {
-                GGMLHEXAGON_LOG_ERROR("[AP-PROBE] dsp_execute_batch probe failed: 0x%x", probe_err);
+                GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
+            }
+            // Clean up probe patterns
+            memset((void *)p, 0, 16);
+            memset((void *)(p + 64), 0, 16);
+        } else {
+            GGMLHEXAGON_LOG_ERROR("[AP-PROBE] dsp_execute_batch probe failed: 0x%x", probe_err);
+        }
+
+        // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
+        // Call dsp_execute_batch N times with different write patterns.
+        // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
+        {
+            const int N_ROUNDS = 5;
+            bool multi_ok = true;
+
+            for (int round = 0; round < N_ROUNDS; round++) {
+                uint8_t pattern = (uint8_t)(0xA0 + round);
+                // Write pattern from AP side first (AP --> DSP direction)
+                memset((void *)ctx->rpc_mempool, pattern, 16);
+                __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                        (char *)ctx->rpc_mempool + 16);
+
+                int err = hexagon_probe_invoke_timed(ctx);
+                if (err != AEE_SUCCESS) {
+                    GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
+                                          round + 1, N_ROUNDS, err);
+                    multi_ok = false;
+                    break;
+                }
+
+                // Read back DSP-written data (DSP --> AP direction)
+                __builtin___clear_cache((char *)ctx->rpc_mempool,
+                                        (char *)ctx->rpc_mempool + 80);
+                const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
+                if (r[0] != 0xAB || r[64] != 0xCD) {
+                    GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
+                                          "base+0=0x%02x base+64=0x%02x",
+                                          round + 1, N_ROUNDS, r[0], r[64]);
+                    multi_ok = false;
+                    break;
+                }
+
+                GGMLHEXAGON_LOG_VERBOSE("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
+                                     round + 1, N_ROUNDS);
+
+                // Clean up for next round
+                memset((void *)r, 0, 16);
+                memset((void *)(r + 64), 0, 16);
             }
 
-            // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
-            // Call dsp_execute_batch N times with different write patterns.
-            // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
-            {
-                const int N_ROUNDS = 5;
-                bool multi_ok = true;
-
-                for (int round = 0; round < N_ROUNDS; round++) {
-                    uint8_t pattern = (uint8_t)(0xA0 + round);
-                    // Write pattern from AP side first (AP --> DSP direction)
-                    memset((void *)ctx->rpc_mempool, pattern, 16);
-                    __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                            (char *)ctx->rpc_mempool + 16);
-
-                    int err = hexagon_probe_invoke_timed(ctx);
-                    if (err != AEE_SUCCESS) {
-                        GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
-                                              round + 1, N_ROUNDS, err);
-                        multi_ok = false;
-                        break;
-                    }
-
-                    // Read back DSP-written data (DSP --> AP direction)
-                    __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                            (char *)ctx->rpc_mempool + 80);
-                    const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
-                    if (r[0] != 0xAB || r[64] != 0xCD) {
-                        GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
-                                              "base+0=0x%02x base+64=0x%02x",
-                                              round + 1, N_ROUNDS, r[0], r[64]);
-                        multi_ok = false;
-                        break;
-                    }
-
-                    GGMLHEXAGON_LOG_ALWAYS("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
-                                         round + 1, N_ROUNDS);
-
-                    // Clean up for next round
-                    memset((void *)r, 0, 16);
-                    memset((void *)(r + 64), 0, 16);
-                }
-
-                if (multi_ok) {
-                    GGMLHEXAGON_LOG_ALWAYS("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
-                                         N_ROUNDS);
-                } else {
-                    GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
-                }
+            if (multi_ok) {
+                GGMLHEXAGON_LOG_ALWAYS("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
+                                     N_ROUNDS);
+            } else {
+                GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
             }
         }
     }
@@ -1934,7 +1937,7 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     int hexagon_error  = AEE_SUCCESS;
-    GGMLHEXAGON_LOG_INFO("enter %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
     if (0 != ctx->ggmlop_handle) {
         hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
         if (AEE_SUCCESS != hexagon_error) {
@@ -1947,7 +1950,7 @@ static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     ggmlhexagon_probe_dspinfo(ctx);
     ggmlhexagon_dump_perf_stats(ctx);
     ctx->domain_id             = -1;
-    GGMLHEXAGON_LOG_INFO("leave %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
 }
 
 static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
@@ -2002,7 +2005,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         }
         ctx->session_id = n.session_id;
         domain_id       = n.effective_domain_id;
-        GGMLHEXAGON_LOG_INFO("reserved new session: device=%d session_id=%d effective_domain_id=%d",
+        GGMLHEXAGON_LOG_VERBOSE("reserved new session: device=%d session_id=%d effective_domain_id=%d",
                              ctx->device, ctx->session_id, domain_id);
     }
 
@@ -2013,8 +2016,8 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     }
 
     ctx->domain_id = domain_id;
-    GGMLHEXAGON_LOG_VERBOSE("using Hexagon domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
-    GGMLHEXAGON_LOG_VERBOSE("unsignedpd_enabled %d", is_unsignedpd_enabled);
+    GGMLHEXAGON_LOG_ALWAYS("using Hexagon domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
+    GGMLHEXAGON_LOG_ALWAYS("unsignedpd_enabled %d", is_unsignedpd_enabled);
     if (is_unsignedpd_enabled) {
         struct remote_rpc_control_unsigned_module data;
         data.enable = 1;
@@ -2050,7 +2053,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         int err = remote_session_control(FASTRPC_GET_URI, (void *) &u, sizeof(u));
         if (err == AEE_SUCCESS) {
             got_uri = true;
-            GGMLHEXAGON_LOG_INFO("session URI for session_id=%d: %s", ctx->session_id, final_uri);
+            GGMLHEXAGON_LOG_DEBUG("session URI for session_id=%d: %s", ctx->session_id, final_uri);
         } else {
             GGMLHEXAGON_LOG_WARN("FASTRPC_GET_URI failed for session_id=%d: error 0x%x, fallback to %s%s",
                                  ctx->session_id, err, ggmldsp_uri, uri);
@@ -2068,7 +2071,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         //ggmlhexagon_set_rpc_priority(domain_id, 64);
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
-            GGMLHEXAGON_LOG_INFO("failed to init rpc mempool");
+            GGMLHEXAGON_LOG_ERROR("failed to init rpc mempool");
             goto bail;
         }
         // Push DSP-side cache optimization bitmask via execute_batch(0xFFFC)
@@ -2097,7 +2100,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
                 g_hexagon_appcfg.dsp_cache_trace_bit0 = 0;
                 g_hexagon_appcfg.dsp_cache_trace_bit1 = 0;
             } else {
-                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
+                GGMLHEXAGON_LOG_VERBOSE("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
                                        mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
                                        g_hexagon_appcfg.dsp_cache_trace_bit1, payload);
             }
@@ -2107,13 +2110,13 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
              * so the first real batch does not pay cold-state penalty. */
             int warmup_err = ggml_dsp_execute_batch(ctx->ggmlop_handle, 0, 0xFFFB);
             if (AEE_SUCCESS != warmup_err) {
-                GGMLHEXAGON_LOG_WARN("warmup execute_batch failed: 0x%x", warmup_err);
+                GGMLHEXAGON_LOG_ERROR("warmup execute_batch failed: 0x%x", warmup_err);
             } else {
                 GGMLHEXAGON_LOG_ALWAYS("[AP-WARMUP] FastRPC/ION warmup done");
             }
         }
     } else {
-        GGMLHEXAGON_LOG_INFO("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,
+        GGMLHEXAGON_LOG_ERROR("error 0x%x: failed to open domain %d(%s)", hexagon_error, domain_id,
                              ggmlhexagon_get_dsp_name(domain_id));
         goto bail;
     }
@@ -4558,7 +4561,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     static int set_tensor_call_count = 0;
     bool is_repack = ggml_backend_buffer_is_hexagon_repack(buffer);
     if (set_tensor_call_count < 10 || is_repack) {
-        GGMLHEXAGON_LOG_ALWAYS("[SET_TENSOR] #%d name=%s type=%d ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+        GGMLHEXAGON_LOG_INFO("[SET_TENSOR] #%d name=%s type=%d ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
                                set_tensor_call_count, tensor->name, (int)tensor->type,
                                (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
@@ -4722,7 +4725,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
            ggml_backend_buffer_type_t buft, size_t size) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
-    GGMLHEXAGON_LOG_WARN("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
+    GGMLHEXAGON_LOG_ALWAYS("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
     ggml_backend_hexagon_buffer_context * buffer_ctx = new ggml_backend_hexagon_buffer_context;
     buffer_ctx->backend_ctx = ctx;
     buffer_ctx->is_ion_buffer = true;
@@ -4736,7 +4739,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         size_aligned += (size_page - (size_aligned % size_page));
     }
 
-    GGMLHEXAGON_LOG_DEBUG("device %d(%s)", ctx->device, ctx->name);
+    GGMLHEXAGON_LOG_ALWAYS("device %d(%s)", ctx->device, ctx->name);
     GGML_ASSERT(nullptr != ctx->rpc_mempool);
     GGMLHEXAGON_LOG_ALWAYS("device=%d size %ld(%d MiB), rpc_mempool_usage %ld(%d MiB), rpc_mempool_len %ld(%d MiB)",
                           ctx->device, size, size / SIZE_IN_MB, ctx->rpc_mempool_usage, ctx->rpc_mempool_usage / SIZE_IN_MB,
@@ -4797,7 +4800,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         GGMLHEXAGON_LOG_ERROR("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
         return nullptr;
     } else {
-        GGMLHEXAGON_LOG_DEBUG("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
+        GGMLHEXAGON_LOG_ALWAYS("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
     }
     // Report allocation result and current mempool state
     if (buffer_ctx->is_ion_buffer) {
@@ -5258,9 +5261,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             for (const auto & o : hex_ops) {
                 op_count[ggml_op_name((ggml_op)o.opcode)]++;
             }
-            GGMLHEXAGON_LOG_ALWAYS("LARGE-BATCH diag: n_ops=%zu op_dist:", hex_ops.size());
+            GGMLHEXAGON_LOG_INFO("LARGE-BATCH diag: n_ops=%zu op_dist:", hex_ops.size());
             for (const auto & [k, v] : op_count) {
-                GGMLHEXAGON_LOG_ALWAYS("  %-12s = %d", k.c_str(), v);
+                GGMLHEXAGON_LOG_INFO("  %-12s = %d", k.c_str(), v);
             }
             s_dumped_large = true;
         }
@@ -5331,43 +5334,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // htp_arch>=V73 is required because op_matmul_qkv/ffn use HMX instructions.
         bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73
                                 && g_hexagon_appcfg.enable_opfusion);
-#if 0
-        // dbg: list all ops (kept for future fusion analysis)
-        size_t n_mulmat = 0;
-        for (size_t i = 0; i < hex_ops.size(); i++) {
-            const hex_op_desc & o = hex_ops[i];
-            if (o.opcode == GGML_OP_MUL_MAT) n_mulmat++;
-            const ggml_tensor * node = tensor_src[o.dst_idx[0]];
-            const char * node_name = node ? ggml_get_name(node) : nullptr;
-            GGMLHEXAGON_LOG_INFO("DBG op[%zu] %-12s node=%s dst[t%d]",
-                                    i, ggml_op_name((ggml_op)o.opcode),
-                                    node_name ? node_name : "(unnamed)",
-                                    o.dst_idx[0]);
-        }
-        GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
-
-        // dbg: list MUL_MAT ops for op-fusion analysis
-        size_t n_mulmat = 0;
-        for (size_t i = 0; i < hex_ops.size(); i++) {
-            const hex_op_desc & o = hex_ops[i];
-            if (o.opcode != GGML_OP_MUL_MAT) continue;
-            n_mulmat++;
-            const ggml_tensor * node = tensor_src[o.dst_idx[0]];
-            const ggml_tensor * w    = (o.src_idx[0] >= 0) ? tensor_src[o.src_idx[0]] : nullptr;
-            const ggml_tensor * x    = (o.src_idx[1] >= 0) ? tensor_src[o.src_idx[1]] : nullptr;
-            const char * node_name = node ? ggml_get_name(node) : nullptr;
-            const char * w_name    = w    ? ggml_get_name(w)    : nullptr;
-            const int    x_type    = x    ? (int)x->type         : -1;
-            const int    hmx       = node ? (int)mm_is_hmx_eligible(node) : -1;
-            GGMLHEXAGON_LOG_VERBOSE("DBG batch MUL_MAT[%zu] node=%s W=%s(src1.type=%d) hmx=%d",
-                                    i,
-                                    node_name ? node_name : "(unnamed)",
-                                    w_name    ? w_name    : "(unnamed)",
-                                    x_type, hmx);
-        }
-        GGMLHEXAGON_LOG_VERBOSE("DBG batch: %zu ops, %zu MUL_MAT", hex_ops.size(), n_mulmat);
-#endif
-
         for (size_t i = 0; i < hex_ops.size(); i++) {
             hex_op_desc op = hex_ops[i];
 
@@ -5460,7 +5426,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                                          q_dst, op_k->dst_idx[0], op_v->dst_idx[0]);
                                 continue;
                             } else {
-                                GGMLHEXAGON_LOG_ALWAYS("skip QKV fusion: VTCM needed (%d) > budget (%zu)",
+                                GGMLHEXAGON_LOG_INFO("skip QKV fusion: VTCM needed (%d) > budget (%zu)",
                                                       (int)kparams.vtcm_size, vtcm_budget);
                             }
                         }
@@ -5545,7 +5511,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 ctx->n_fused_mm_add_cum++;
                                 continue;
                             } else {
-                                GGMLHEXAGON_LOG_ALWAYS("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
+                                GGMLHEXAGON_LOG_INFO("skip MUL_MAT_ADD fusion: VTCM needed (%d) > budget (%zu)",
                                                       (int) kparams_mm->vtcm_size, vtcm_budget);
                                 n_mm_add_skip_vtcm++;
                             }
@@ -5626,45 +5592,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         uint32_t data_len;
     };
     std::vector<ion_mirror> mirrors;
-
-#if 0
-    // ---- Dump cgraph structure for first 30 calls ----
-    // Helps diagnose ubatch-related correctness issues by exposing the
-    // actual shape contract that the cgraph provides to Phase 4/4.5/6.
-    static int s_verify_call_count = 0;
-    if (s_verify_call_count < 30) {
-        int vc = s_verify_call_count;
-        GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] n_tensors=%u n_ops=%u cgraph_n_nodes=%d",
-                               vc, n_tensors, n_ops, cgraph->n_nodes);
-        for (uint32_t i = 0; i < n_tensors && i < 64; i++) {
-            ggml_tensor * t = tensor_src[i];
-            if (!t) continue;
-            const char * dp = (const char *)t->data;
-            const char * loc = (dp && dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) ? "ION" : "HEAP";
-            GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] tsrc[%u] type=%d ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%zu loc=%s",
-                                   vc, i, (int)t->type,
-                                   t->ne[0], t->ne[1], t->ne[2], t->ne[3],
-                                   t->nb[0], t->nb[1], t->nb[2], t->nb[3],
-                                   (size_t)ggml_nbytes(t), loc);
-        }
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            ggml_tensor * node = cgraph->nodes[i];
-            if (!node) continue;
-            char srcbuf[320] = {0};
-            int  spos = 0;
-            for (int j = 0; j < GGML_MAX_SRC && node->src[j]; j++) {
-                ggml_tensor * s = node->src[j];
-                spos += snprintf(srcbuf + spos, sizeof(srcbuf) - spos,
-                                 "src%d=[%lld,%lld,%lld,%lld] ", j,
-                                 s->ne[0], s->ne[1], s->ne[2], s->ne[3]);
-            }
-            GGMLHEXAGON_LOG_ALWAYS("[VERIFY-#%d] node[%d] op=%s ne=[%lld,%lld,%lld,%lld] %s",
-                                   vc, i, ggml_op_name(node->op),
-                                   node->ne[0], node->ne[1], node->ne[2], node->ne[3], srcbuf);
-        }
-        s_verify_call_count++;
-    }
-#endif
 
     // Step 1: Collect unique data pointers and max sizes
     struct buffer_mirror_info {
@@ -6102,37 +6029,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }  // end else (do_dc_cvac)
     }
 
-    // AP-side PRE-CALL diagnostic: log first op's src0 first 4 floats after DC CVAC.
-    // Compare with [DSP-DIAG] POST-INVAL to pinpoint cache coherency issues.
-    // (Removed for perf: the entire block fires every batch; with 4352 batches
-    // that's ~10ms of pure overhead from log calls + vector iteration over
-    // mirrors. Re-enable when investigating cache coherency issues.)
-#if 0
-    if (n_ops > 0) {
-        const hex_op_desc & first_op = hex_ops[0];
-        uint32_t s0_idx = first_op.src_idx[0];
-        if (s0_idx < n_tensors) {
-            ggml_tensor * s0_t = tensor_src[s0_idx];
-            if (s0_t && s0_t->data) {
-                const char * dp = (const char *)s0_t->data;
-                uint32_t s0_off = 0xFFFFFFFFu;
-                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                    s0_off = (uint32_t)(dp - ion_base);
-                } else {
-                    for (const auto & m : mirrors) {
-                        if ((uint32_t)m.tensor_idx == s0_idx) { s0_off = m.mirror_offset; break; }
-                    }
-                }
-                if (s0_off != 0xFFFFFFFFu) {
-                    const float * fv = (const float *)((const char *)ctx->rpc_mempool + s0_off);
-                    GGMLHEXAGON_LOG_WARN("[AP-PRE] batch first-op src0[tensor%u]: ION_off=0x%x f32=[%.4f, %.4f, %.4f, %.4f]",
-                                         s0_idx, s0_off, fv[0], fv[1], fv[2], fv[3]);
-                }
-            }
-        }
-    }
-#endif
-
     // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
     // 3-way split for fine-grained perf:
     //   rpc_setup: AP-side work between Phase 6.5 end and invoke() entry
@@ -6166,104 +6062,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     PERF_RECORD(t_p7, ctx->p7_hist);
     ctx->cum_p7_dsp_exec_us  += t_p7;
     ctx->p7_dsp_exec_hist[ctx->perf_hist_idx] = t_p7;
-#if 0
-    // [LONGTAIL-PROBE 2026-07-11] log batch_call + op summary when dsp_exec > 5ms.
-    // Helps identify which subgraph(s) cause the heavy tail (max=27ms in recent tests).
-    // Throttled: at most one log per 100ms wall-clock to avoid log flood.
-    if (t_p7 > 5000) {
-        static int64_t s_last_longtail_log_us = 0;
-        int64_t now_us = ggml_time_us();
-        if (now_us - s_last_longtail_log_us > 100000) {
-            s_last_longtail_log_us = now_us;
-            // Summarize op types in this batch (count per op code).
-            int op_count[GGML_OP_COUNT] = {0};
-            for (uint32_t k = 0; k < n_ops; k++) {
-                int opc = (int) hex_ops[k].opcode;
-                if (opc >= 0 && opc < GGML_OP_COUNT) {
-                    op_count[opc]++;
-                }
-            }
-            char op_summary[512];
-            int  op_summary_len = 0;
-            for (int op = 0; op < GGML_OP_COUNT; op++) {
-                if (op_count[op] > 0) {
-                    op_summary_len += snprintf(op_summary + op_summary_len,
-                                               sizeof(op_summary) - op_summary_len,
-                                               "%s%s=%d",
-                                               op_summary_len ? "," : "",
-                                               ggml_op_name((enum ggml_op) op),
-                                               op_count[op]);
-                }
-            }
-            // MUL_MAT breakdown: walk tensor_src via src_idx, gather src0->ne[1] (=N)
-            // and src1->ne[1] (=M, rows of activation).
-            int mat_n_rows_sum = 0, mat_n_cols_sum = 0, mat_count = 0;
-            int mat_ne11_min = 999999, mat_ne11_max = 0;
-            for (uint32_t k = 0; k < n_ops; k++) {
-                if ((int) hex_ops[k].opcode != GGML_OP_MUL_MAT) continue;
-                uint32_t s0_idx = hex_ops[k].src_idx[0];
-                uint32_t s1_idx = hex_ops[k].src_idx[1];
-                if (s0_idx >= n_tensors || s1_idx >= n_tensors) continue;
-                ggml_tensor * src0 = tensor_src[s0_idx];
-                ggml_tensor * src1 = tensor_src[s1_idx];
-                if (!src0 || !src1) continue;
-                int ne11 = (int) src1->ne[1];
-                int ne01 = (int) src0->ne[1];
-                mat_n_rows_sum += ne11;
-                mat_n_cols_sum += ne01;
-                mat_count++;
-                if (ne11 < mat_ne11_min) mat_ne11_min = ne11;
-                if (ne11 > mat_ne11_max) mat_ne11_max = ne11;
-            }
-            GGMLHEXAGON_LOG_ALWAYS("[LONGTAIL-PROBE] batch_call#%llu dsp_exec=%lldus n_ops=%u ops=[%s] mm=%d mm_ne11[min=%d max=%d avg=%.1f] mm_ne01[sum=%d]",
-                                   (unsigned long long) ctx->rpc_batch_call_count, (long long) t_p7, n_ops, op_summary,
-                                   mat_count, mat_ne11_min, mat_ne11_max,
-                                   mat_count ? (double) mat_n_rows_sum / mat_count : 0.0,
-                                   mat_n_cols_sum);
-        }
-    }
-#endif
     // rpc_setup = AP-side cost between Phase 6.5 end and the invoke entry
     int64_t p7_rpc_setup = t_p7_pre - t_prev;
     ctx->cum_p7_rpc_setup_us  += p7_rpc_setup;
     ctx->p7_rpc_setup_hist[ctx->perf_hist_idx] = p7_rpc_setup;
     t_prev = ggml_time_us();
-
-    // ---- Phase 7.3: Post-invoke AP-side verification ----
-    // (Removed for perf: per-batch "AP-POST" log + the surrounding block
-    // (mirror loop + ion_off probe + float read) fires 4352 times/PP run.
-    // The log itself is ~2us; the supporting work adds another ~1us. Total
-    // ~13ms of pure overhead for a 24s run. Re-enable when investigating
-    // post-invoke cache coherency or data corruption.)
-#if 0
-    if (hexagon_error == AEE_SUCCESS && n_ops > 0) {
-        // Log LAST op's dst tensor for general verification
-        const hex_op_desc & last_op = hex_ops[n_ops - 1];
-        uint32_t last_dst_idx = last_op.dst_idx[0];
-        if (last_dst_idx < n_tensors) {
-            ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
-            if (dst_tensor && dst_tensor->data) {
-                // Find this tensor's ION offset from mirrors
-                uint32_t ion_off = 0;
-                for (const auto & m : mirrors) {
-                    if ((uint32_t)m.tensor_idx == last_dst_idx) { ion_off = m.mirror_offset; break; }
-                }
-                // If not mirrored (already in ION), try to compute from data pointer
-                if (ion_off == 0 && dst_tensor->data >= (void *)ion_base && dst_tensor->data < (void *)(ion_base + ion_size)) {
-                    ion_off = (uint32_t)((const char *)dst_tensor->data - ion_base);
-                }
-                const char * ion_data = (const char *)ctx->rpc_mempool + ion_off;
-                const float * ion_vals = (const float *)ion_data;
-                const float * ptr_vals  = (const float *)dst_tensor->data;
-                GGMLHEXAGON_LOG_WARN("[AP-POST] batch last-op[%u] dst[tensor%u]: ION_f32=[%.4f, %.4f, %.4f, %.4f] PTR_f32=[%.4f, %.4f, %.4f, %.4f] ion_off=0x%x ptr=%p",
-                                     n_ops - 1, last_dst_idx,
-                                     ion_vals[0], ion_vals[1], ion_vals[2], ion_vals[3],
-                                     ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3],
-                                     ion_off, (void *)dst_tensor->data);
-            }
-        }
-    }
-#endif
 
     // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
     // civac is now tracked separately via t_civac so the AP-side cache-coherency
@@ -6687,7 +6490,7 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
 static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
 
 static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
-    GGMLHEXAGON_LOG_ALWAYS("enter %s\n", __func__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
     int dev_index = 0;
 
     ggmlhexagon_load_cfg();
@@ -6706,14 +6509,14 @@ static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_
             dev_index = 0;
         }
     } else {
-        GGMLHEXAGON_LOG_ALWAYS("program specified param is not nullptr");
+        GGMLHEXAGON_LOG_VERBOSE("program specified param is not nullptr");
         //user's program calling ggml_backend_hexagon_device_init_backend directly
         dev_index = (int)(intptr_t)params;
         if (dev_index < 0) {
-            GGMLHEXAGON_LOG_ALWAYS("it shouldn't happend\n");
+            GGMLHEXAGON_LOG_VERBOSE("it shouldn't happend\n");
             dev_index = 0;
         }
-        GGMLHEXAGON_LOG_ALWAYS("program specified dev_index %d\n", dev_index);
+        GGMLHEXAGON_LOG_VERBOSE("program specified dev_index %d\n", dev_index);
     }
     if (dev_index >= GGML_HEXAGON_MAX_DEVICES) {
         GGMLHEXAGON_LOG_ERROR("invalid dev_index %d", dev_index);
@@ -6721,7 +6524,7 @@ static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_
     }
     GGMLHEXAGON_LOG_ALWAYS("dev_index=%d", dev_index);
     ggml_backend_t hexagon_backend = ggml_backend_hexagon_init_ext(dev_index, g_hexagon_appcfg.runtime_libpath);
-    GGMLHEXAGON_LOG_ALWAYS("leave %s\n", __func__);
+    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
 
     return hexagon_backend;
 }
@@ -6907,7 +6710,7 @@ static const ggml_backend_reg_i ggml_backend_hexagon_reg_interface = {
 ggml_backend_reg_t ggml_backend_hexagon_reg() {
     static ggml_backend_reg reg;
     static bool initialized = false;
-    GGMLHEXAGON_LOG_ALWAYS("enter %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     ggmlhexagon_load_cfg();
     if (!ggmlhexagon_check_valid_appcfg()) {
@@ -6927,16 +6730,16 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
             ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
 
             int ndev = g_hexagon_appcfg.ndev;
-            GGMLHEXAGON_LOG_ALWAYS("registering %d Hexagon device(s), ndev=%d", ndev, g_hexagon_appcfg.ndev);
+            GGMLHEXAGON_LOG_VERBOSE("registering %d Hexagon device(s), ndev=%d", ndev, g_hexagon_appcfg.ndev);
 
             for (int i = 0; i < ndev; i++) {
                 if (i >= GGML_HEXAGON_MAX_DEVICES) {
-                    GGMLHEXAGON_LOG_ALWAYS("ndev=%d exceeds GGML_HEXAGON_MAX_DEVICES=%d, only %d devices registered",
+                    GGMLHEXAGON_LOG_WARN("ndev=%d exceeds GGML_HEXAGON_MAX_DEVICES=%d, only %d devices registered",
                                          ndev, GGML_HEXAGON_MAX_DEVICES, i);
                     break;
                 }
 
-                GGMLHEXAGON_LOG_ALWAYS("create backend device for device %d", i);
+                GGMLHEXAGON_LOG_VERBOSE("create backend device for device %d", i);
                 // Create device struct first so we can pass it to the context constructor
                 // (matches qcom's ggml_hexagon_session pattern: session owns DSP handle,
                 //  buft is a member initialized with the owning device pointer).
@@ -6953,7 +6756,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 g_hexagon_mgr[i] = hctx;
 
                 if (0 == hctx->ggmlop_handle) {
-                    GGMLHEXAGON_LOG_ALWAYS("init hexagon dsp failure for device %d", i);
+                    GGMLHEXAGON_LOG_WARN("init hexagon dsp failure for device %d", i);
                     // constructor already logged the error; keep the device registered
                     // so get_memory/get_buffer_type do not crash, but return nullptr
                 }
@@ -6973,7 +6776,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
         initialized = true;
     }
-    GGMLHEXAGON_LOG_ALWAYS("leave ggml_backend_hexagon_reg");
+    GGMLHEXAGON_LOG_DEBUG("leave ggml_backend_hexagon_reg");
 
     return &reg;
 }
@@ -6987,7 +6790,7 @@ static const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
 }
 
 static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath) {
-    GGMLHEXAGON_LOG_ALWAYS("enter %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     //case-3: calling ggml_backend_hexagon_init() directly in user's code
     ggmlhexagon_load_cfg();
@@ -7012,11 +6815,11 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
     }
 
     if (nullptr != g_hexagon_mgr[device] && nullptr != g_hexagon_mgr[device]->backend) {
-        GGMLHEXAGON_LOG_ALWAYS("backend %d(%s) already loaded", device,
+        GGMLHEXAGON_LOG_VERBOSE("backend %d(%s) already loaded", device,
                          ggml_backend_hexagon_get_devname(device));
         ggml_backend_hexagon_interface.graph_optimize =
             g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
-        GGMLHEXAGON_LOG_ALWAYS("leave %s", __func__);
+        GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
         return g_hexagon_mgr[device]->backend;
     }
 
@@ -7040,7 +6843,7 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
 
     ctx->backend = hexagon_backend;
     // DSP init already done in ggml_backend_hexagon_context constructor
-    GGMLHEXAGON_LOG_ALWAYS("leave %s", __func__);
+    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
 
     return hexagon_backend;
 }
