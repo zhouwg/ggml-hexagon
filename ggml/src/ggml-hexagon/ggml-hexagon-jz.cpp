@@ -392,6 +392,7 @@ struct hexagon_appcfg_t {
     int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on CDSP side
     int ndev;                   // number of Hexagon devices (PDs), from GGML_HEXAGON_NDEV env
     int ion_sync_mode;          // 0=both(DC CVAC+ion_sync, default), 1=ion_sync only, 2=DC CVAC only
+    int rpc_mmap_mode;          // 0=FASTRPC_MAP_FD_DELAYED (default), 1=FASTRPC_MAP_FD (eager pinning)
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int dsp_cache_mode;         // DSP-side entry.c cache optimization bitmask, pushed to DSP at init via
@@ -430,6 +431,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dump_diag_info         = 0,
         .ndev                   = 1,
         .ion_sync_mode          = 1,
+        .rpc_mmap_mode          = 0,
         .enable_opfusion        = 1,
         .fa_select              = 2,
         .dsp_cache_mode         = 4,
@@ -608,6 +610,8 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
     GGMLHEXAGON_LOG_VERBOSE("thread_counts on CDSP:            %d", g_hexagon_appcfg.thread_counts);
     GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
+    GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d (%s)", g_hexagon_appcfg.rpc_mmap_mode,
+                            (g_hexagon_appcfg.rpc_mmap_mode == 1) ? "EAGER" : "DELAYED");
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit1:             %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
@@ -998,6 +1002,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "dump_diag_info", g_hexagon_appcfg.dump_diag_info, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "ndev", g_hexagon_appcfg.ndev, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "ion_sync_mode", g_hexagon_appcfg.ion_sync_mode, 1);
+    hexagoncfg_instance.get_intvalue("cdsp", "rpc_mmap_mode", g_hexagon_appcfg.rpc_mmap_mode, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_opfusion", g_hexagon_appcfg.enable_opfusion, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "fa_select", g_hexagon_appcfg.fa_select, 2);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 4);
@@ -1763,35 +1768,40 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", ctx->rpc_mempool_handle);
     GGMLHEXAGON_LOG_INFO("rpc mempool addr %p", ctx->rpc_mempool);
     GGMLHEXAGON_LOG_INFO("rpc mempool size %lld(%dMB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len/ SIZE_IN_MB);
-    // Register ION buffer with FastRPC kernel driver using DELAYED mapping.
-    // FASTRPC_MAP_FD_DELAYED: registers fd but does NOT create immediate mapping.
-    // Actual DSP-side mapping is deferred until DSP calls HAP_mmap2(fd).
-    // Without this registration, invoke() still triggers implicit fd_mmap_create.
+    // Register ION buffer with FastRPC kernel driver.
+    // rpc_mmap_mode = 0: FASTRPC_MAP_FD_DELAYED (default), defers DSP-side mapping until HAP_mmap2().
+    // rpc_mmap_mode = 1: FASTRPC_MAP_FD (eager), creates immediate kernel-level mapping and pins pages.
+    enum fastrpc_map_flags mmap_flags = (g_hexagon_appcfg.rpc_mmap_mode == 1)
+                                        ? FASTRPC_MAP_FD
+                                        : FASTRPC_MAP_FD_DELAYED;
+    const char * mmap_mode_str = (g_hexagon_appcfg.rpc_mmap_mode == 1) ? "EAGER" : "DELAYED";
     int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle,
                                  ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
-                                 FASTRPC_MAP_FD_DELAYED);
+                                 mmap_flags);
     if (mmap_err != 0) {
-        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(DELAYED) returned %d (fd=%d), continuing...",
-                             mmap_err, ctx->rpc_mempool_handle);
+        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(%s) returned %d (fd=%d), continuing...",
+                             mmap_mode_str, mmap_err, ctx->rpc_mempool_handle);
     } else {
-        GGMLHEXAGON_LOG_INFO("fastrpc_mmap(DELAYED) OK: fd=%d, size=%dMB",
-                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+        GGMLHEXAGON_LOG_INFO("fastrpc_mmap(%s) OK: fd=%d, size=%dMB",
+                             mmap_mode_str, ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
     }
 
     // Register ION pool on DSP side via pure-scalar IDL call.
     // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
     // implicit fd_mmap_create when dsptensor.data pointers are passed.
-    // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA,
+    // The DSP will call HAP_mmap2(fd) to get a user-space-accessible VA.
     uint32_t ion_fd = (uint32_t)ctx->rpc_mempool_handle;
     uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
     uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
 
+    int64_t t0_reg = ggml_time_us();
     int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+    int64_t dt_reg = ggml_time_us() - t0_reg;
     if (reg_err != AEE_SUCCESS) {
         GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
     } else {
-        GGMLHEXAGON_LOG_ALWAYS("registered ION base via scalar call: fd=%d, size=%dMB",
-                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+        GGMLHEXAGON_LOG_ALWAYS("registered ION base via scalar call: fd=%d, size=%dMB, time=%lld us",
+                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB, (long long)dt_reg);
     }
     GGMLHEXAGON_LOG_ALWAYS("ION layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);
     // Prime the RPC overhead profiler with a few no-op warmup calls to get

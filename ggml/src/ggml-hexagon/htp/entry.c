@@ -1748,11 +1748,13 @@ AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t siz
     GGMLHEXAGON_LOG_INFO("[ION-REG] fd=%d, size=%llu bytes (%dMB)",
                          fd, (unsigned long long)size, (int32_t)(size >> 20));
 
+    int64_t t0_mmap = ggml_time_us();
 #if __HVX_ARCH__ > 73
     void * va = HAP_mmap2(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
 #else
     void * va = HAP_mmap(NULL, (size_t)size, HAP_PROT_READ | HAP_PROT_WRITE, 0, fd, 0);
 #endif
+    int64_t dt_mmap = ggml_time_us() - t0_mmap;
 
     if (va == (void *)-1) {
         g_dsp_ctx->ion_dsp_base = NULL;
@@ -1762,7 +1764,8 @@ AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t siz
 
     g_dsp_ctx->ion_dsp_base = va;
     g_dsp_ctx->ion_dsp_size = (size_t)size;
-    GGMLHEXAGON_LOG_INFO("[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB)", va, fd, g_dsp_ctx->ion_dsp_size / (1024*1024));
+    // Use FARF(ALWAYS) so the timing log is visible via adb logcat on all builds
+    FARF(ALWAYS, "[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB, time=%lld us)", va, fd, g_dsp_ctx->ion_dsp_size / (1024*1024), (long long)dt_mmap);
 
     return AEE_SUCCESS;
 }
