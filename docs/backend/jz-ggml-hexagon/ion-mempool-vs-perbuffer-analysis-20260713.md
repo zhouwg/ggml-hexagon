@@ -106,7 +106,7 @@ Another way to frame the Qualcomm-vs-JZ distinction is to separate **control pla
 | Primitive | `dspqueue_write/read` queue semantics | Native FastRPC `invoke` |
 | Dispatch style | AP pushes a whole op-batch; DSP is woken by packet callback | AP calls a DSP function directly with descriptors |
 | Blocking model | AP can fire-and-forget, responses drained later | Typically synchronous per call |
-| Batch handling | One `dspqueue_write` carries many ops (`htp_opbatch_req`) | One `invoke` usually corresponds to one op or a smaller batch |
+| Batch handling | One `dspqueue_write` carries many ops (`htp_opbatch_req`) | One `invoke` carries a whole graph batch, sometimes hundreds of ops |
 
 ### Data plane
 
