@@ -142,7 +142,7 @@ struct ggml_backend_hexagon_context;
 static bool                  ggmlhexagon_is_metadata_op(enum ggml_op op);
 static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 static const char *          ggmlhexagon_get_htparch_desc(size_t htp_arch);
-static int                   hexagon_probe_invoke_timed(ggml_backend_hexagon_context * ctx);
+static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
 static void                  ggmlhexagon_set_runtime_path(size_t device, const std::string & path);
 static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
@@ -577,12 +577,14 @@ static void ggmlhexagon_log_always_internal(ggml_log_level level, const char * f
     }
 }
 
-// Invoke probe (batch_size=0) and record FastRPC transport overhead timing.
-// probe mode does minimal DSP work, so measured time is an upper bound of
-// pure FastRPC transport overhead. Used at init only, no per-graph overhead.
-static int hexagon_probe_invoke_timed(ggml_backend_hexagon_context * ctx) {
+// Invoke one no-op warmup call and record FastRPC transport overhead timing.
+// The 0xFFFB warmup mode does no DSP work, so measured time is an upper bound
+// of pure FastRPC transport overhead. Used at init only, no per-graph overhead.
+static int hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx) {
     int64_t t0 = ggml_time_us();
-    int err = ggml_dsp_execute_batch(ctx->ggmlop_handle, 0, 0);
+    // Use the existing no-op warmup mode (0xFFFB) instead of the legacy
+    // batch_size==0 probe mode so no marker bytes are written to the pool.
+    int err = ggml_dsp_execute_batch(ctx->ggmlop_handle, 0, 0xFFFB);
     int64_t dt = ggml_time_us() - t0;
     ctx->rpc_overhead_sum_us += dt;
     ctx->rpc_overhead_count++;
@@ -696,7 +698,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              (long long)ctx->cum_p7_dsp_exec_us,
                              (long long)ctx->cum_p7_civac_us,
                              (long long)(ctx->cum_p7_rpc_setup_us + ctx->cum_p7_dsp_exec_us + ctx->cum_p7_civac_us));
-    GGMLHEXAGON_LOG_VERBOSE("rpc overhead (probe): n=%u min=%lld max=%lld avg=%lld us (upper bound, includes DSP-side cache flush+memset+LOG_INFO)",
+    GGMLHEXAGON_LOG_VERBOSE("rpc overhead (warmup): n=%u min=%lld max=%lld avg=%lld us (upper bound, pure FastRPC/ION transport overhead)",
                              ctx->rpc_overhead_count,
                              (long long)ctx->rpc_overhead_min_us, (long long)ctx->rpc_overhead_max_us,
                              ctx->rpc_overhead_count ? (long long)(ctx->rpc_overhead_sum_us / (int64_t)ctx->rpc_overhead_count) : 0);
@@ -1781,85 +1783,10 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                              ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
     }
     GGMLHEXAGON_LOG_ALWAYS("ION layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);
-    int probe_err = hexagon_probe_invoke_timed(ctx);
-    // [ION-PROBE] Verify bidirectional ION shared memory access.
-    // Call with batch_size=0 --> DSP enters probe mode: writes 0xAB at base+0,
-    // 0xCD at base+64. AP then reads back to confirm DSP writes are visible.
-    if (0) {
-        if (probe_err == AEE_SUCCESS && ctx->rpc_mempool) {
-            // Invalidate AP-side cache before reading DSP-written data (ION is non-coherent)
-            __builtin___clear_cache((char *)ctx->rpc_mempool, (char *)ctx->rpc_mempool + 80);
-
-            const uint8_t * p = (const uint8_t *)ctx->rpc_mempool;
-            bool ok_ab = (p[0] == 0xAB && p[1] == 0xAB && p[2] == 0xAB && p[3] == 0xAB);
-            bool ok_cd = (p[64] == 0xCD && p[65] == 0xCD && p[66] == 0xCD && p[67] == 0xCD);
-            GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+0 = %02x %02x %02x %02x (expect AB) -> %s",
-                                 p[0], p[1], p[2], p[3],
-                                 ok_ab ? "PASS" : "FAIL");
-            GGMLHEXAGON_LOG_ALWAYS("[AP-PROBE] read back: base+64 = %02x %02x %02x %02x (expect CD) -> %s",
-                                 p[64], p[65], p[66], p[67],
-                                 ok_cd ? "PASS" : "FAIL");
-            if (ok_ab && ok_cd) {
-                GGMLHEXAGON_LOG_ALWAYS("=== ION BIDIRECTIONAL R/W VERIFIED: DSP can write, AP can read! ===");
-            } else {
-                GGMLHEXAGON_LOG_ERROR("=== ION PROBE FAILED: DSP writes NOT visible on AP side ===");
-            }
-            // Clean up probe patterns
-            memset((void *)p, 0, 16);
-            memset((void *)(p + 64), 0, 16);
-        } else {
-            GGMLHEXAGON_LOG_ERROR("[AP-PROBE] dsp_execute_batch probe failed: 0x%x", probe_err);
-        }
-
-        // [ION-MULTI-INVOKE] Test: verify no repeated mmap/munmap on subsequent invokes.
-        // Call dsp_execute_batch N times with different write patterns.
-        // Check DSP log for "fastrpc_invoke_fd_mmap_create" — should NOT appear after 1st call.
-        {
-            const int N_ROUNDS = 5;
-            bool multi_ok = true;
-
-            for (int round = 0; round < N_ROUNDS; round++) {
-                uint8_t pattern = (uint8_t)(0xA0 + round);
-                // Write pattern from AP side first (AP --> DSP direction)
-                memset((void *)ctx->rpc_mempool, pattern, 16);
-                __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                        (char *)ctx->rpc_mempool + 16);
-
-                int err = hexagon_probe_invoke_timed(ctx);
-                if (err != AEE_SUCCESS) {
-                    GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d invoke FAILED: 0x%x",
-                                          round + 1, N_ROUNDS, err);
-                    multi_ok = false;
-                    break;
-                }
-
-                // Read back DSP-written data (DSP --> AP direction)
-                __builtin___clear_cache((char *)ctx->rpc_mempool,
-                                        (char *)ctx->rpc_mempool + 80);
-                const uint8_t * r = (const uint8_t *)ctx->rpc_mempool;
-                if (r[0] != 0xAB || r[64] != 0xCD) {
-                    GGMLHEXAGON_LOG_ERROR("[MULTI-PROBE] round %d/%d data mismatch: "
-                                          "base+0=0x%02x base+64=0x%02x",
-                                          round + 1, N_ROUNDS, r[0], r[64]);
-                    multi_ok = false;
-                    break;
-                }
-
-                GGMLHEXAGON_LOG_VERBOSE("[MULTI-PROBE] round %d/%d PASS (invoke OK, data verified)",
-                                     round + 1, N_ROUNDS);
-
-                // Clean up for next round
-                memset((void *)r, 0, 16);
-                memset((void *)(r + 64), 0, 16);
-            }
-
-            if (multi_ok) {
-                GGMLHEXAGON_LOG_ALWAYS("=== MULTI-INVOKE TEST PASSED: %d rounds, NO repeated mmap ===",
-                                     N_ROUNDS);
-            } else {
-                GGMLHEXAGON_LOG_ERROR("=== MULTI-INVOKE TEST FAILED ===");
-            }
-        }
+    // Prime the RPC overhead profiler with a few no-op warmup calls to get
+    // a meaningful min/max/avg distribution without polluting the pool.
+    for (int i = 0; i < 6; i++) {
+        (void)hexagon_warmup_invoke_timed(ctx);
     }
 
     return 0;

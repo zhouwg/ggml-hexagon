@@ -1778,26 +1778,6 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 
     const char * base = (const char *)g_dsp_ctx->ion_dsp_base;
 
-    /* Probe mode: verify bidirectional ION access */
-    if (batch_size == 0) {
-        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] testing ION R/W at base=%p", g_dsp_ctx->ion_dsp_base);
-
-        // Step 1: Read what AP wrote (AP->DSP direction)
-        // Invalidate DSP cache before reading
-        Q6_dccleaninva_A((void *)base);
-        uint8_t ap_val = ((const uint8_t *)base)[0];
-        GGMLHEXAGON_LOG_INFO("[DSP-PROBE] AP->DSP: read base+0 = 0x%02x", ap_val);
-
-        // Step 2: Write pattern for AP to verify (DSP->AP direction)
-        memset((void *)base, 0xAB, 16);
-        memset((void *)(base + 64), 0xCD, 16);
-        // Flush DSP L2 cache so AP can see the written data (ION is non-coherent)
-        Q6_dccleaninva_A((void *)base);
-        Q6_dccleaninva_A((void *)(base + 64));
-        __asm__ __volatile__("" ::: "memory");
-        return AEE_SUCCESS;
-    }
-
     /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
      *   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
      *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
