@@ -994,19 +994,5 @@ DSP-side execution (`dsp_exec`) accounts for 76% of total TG time (10.26 s). The
 
 ## 20. Related Documents
 
-> **Note on file name staleness**: The companion documents below were authored around 2026-07-10/11, mostly before or during the dual path removal rename (`6c11b225d` + `ba4fd0104`). They contain ~8 file references to `ggml-hexagon.cpp` / `ggml-hexagon-qcom.cpp` that predate the rename. In current code, `ggml-hexagon.cpp` (in those docs) refers to **JZ** code (now at `ggml-hexagon-jz.cpp`), and `ggml-hexagon-qcom.cpp` (in those docs) refers to **QCOM** code (now at `ggml-hexagon.cpp`). References in those companion documents are not retroactively updated; readers should mentally translate when consulting them.
-
-> **Key documents**: #1 (GLM-5.2, 0705 baseline), #11-12 (Kimi-K2.7-Code, 0713 root cause correction). This document itself (#0711, GLM-5.2) supersedes #1; #11-12 supersede the TG root cause analysis in Section 6.3 of this document.
-
-1. [algotype29-perf-analysis-en.md](algotype29-perf-analysis-en.md) **[Key]** - *Author: GLM-5.2* - 2026-07-05 baseline snapshot (PP=105.6 / TG=18.6, pre-optimization)
-2. [tg-pp-optimization-attempts-20260711.md](tg-pp-optimization-attempts-20260711.md) - *Author: MiniMax-M3* - Six TG/PP optimization experiments; identified FLASH_ATTN_EXT as TG hot spot and ARM CPU TG ceiling at 32.4 t/s
-3. [pp-regression-misdiagnosis-20260711.md](pp-regression-misdiagnosis-20260711.md) - *Author: MiniMax-M3* - Dual path removal "regression" was a measurement artifact; the 362 PP mean was not reproducible
-4. [pp-cache-optimization-deadends-20260711.md](pp-cache-optimization-deadends-20260711.md) - *Author: MiniMax-M3* - dsp_cache_mode 5/6/7 garble; graph reorder no-op; three dead ends
-5. [vtcm-session-lifetime-20260711.md](vtcm-session-lifetime-20260711.md) - *Author: MiniMax-M3* - VTCM session-lifetime refactor + HEX_OP_PROF compile switch
-6. [algotype29-perf-cache-mode-comparison-20260710.md](algotype29-perf-cache-mode-comparison-20260710.md) - *Author: MiniMax-M3* - 2026-07-10 morning data (362 PP mean, not reproducible)
-7. [p2-hmx-min-nrows-bench-20260710.md](p2-hmx-min-nrows-bench-20260710.md) - *Author: MiniMax-M3* - HTP_MM_HMX_MIN_NROWS sweep; value=4 is optimal
-8. [pp-subgraph-analysis-20260713-zh.md](pp-subgraph-analysis-20260713-zh.md) - PP sub-graph splitting analysis (zh)
-9. [beb36c4b-pp-regression-analysis-20260713-zh.md](beb36c4b-pp-regression-analysis-20260713-zh.md) - *Author: MiniMax-M3* - PP regression analysis for commit beb36c4b (zh)
-10. [576f7eef-pp-restore-20260713-zh.md](576f7eef-pp-restore-20260713-zh.md) - *Author: MiniMax-M3* - PP restore after 576f7eef screenshot reproduction (zh)
-11. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - JZ single ION mempool vs Qualcomm per-buffer ION; explains PP jitter and stable mean gap
-12. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - FastRPC/ION warmup A/B test; identified batch-level pipelining as TG gap root cause (corrected the 0711 attention-kernel-bound misdiagnosis)
+1. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - JZ single ION mempool vs Qualcomm per-buffer ION; explains PP jitter and stable mean gap
+2. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) **[Key]** - *Author: Kimi-K2.7-Code* - FastRPC/ION warmup A/B test; identified batch-level pipelining as TG gap root cause (corrected the 0711 attention-kernel-bound misdiagnosis)
