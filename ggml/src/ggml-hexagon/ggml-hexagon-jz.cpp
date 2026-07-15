@@ -243,6 +243,12 @@ struct ggml_backend_hexagon_context {
     int64_t  min_p7_us;             // shortest single FastRPC call
     int64_t  max_p7_us;             // longest single FastRPC call
 
+    // Per-call AP-side overhead (graph_dur - p7). Tracks how much time each
+    // graph_compute_batch call spends outside of pure DSP execution.
+    int64_t  min_rpc_overhead_us;
+    int64_t  max_rpc_overhead_us;
+    int64_t  sum_rpc_overhead_us;
+
     // AP-side per-phase cumulative time
     int64_t  cum_p1_us;       // Phase 1: collect unique tensor objects
     int64_t  cum_p2_us;       // Phase 2: build op descriptors
@@ -666,6 +672,11 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p7=[%lld, %lld] us",
                              (long long)ctx->min_graph_us, (long long)ctx->max_graph_us,
                              (long long)ctx->min_p7_us, (long long)ctx->max_p7_us);
+    GGMLHEXAGON_LOG_VERBOSE("per-call overhead: n=%llu min=%lld max=%lld avg=%lld us (graph_dur - p7)",
+                             (unsigned long long)ctx->rpc_batch_call_count,
+                             (long long)ctx->min_rpc_overhead_us,
+                             (long long)ctx->max_rpc_overhead_us,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->sum_rpc_overhead_us / (int64_t)ctx->rpc_batch_call_count) : 0);
     GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
                              (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
     // TEMP DIAG: dump first N (sub-)graphs to see how PP is split
@@ -3215,6 +3226,9 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       max_graph_n_ops(0),
       min_p7_us(0),
       max_p7_us(0),
+      min_rpc_overhead_us(0),
+      max_rpc_overhead_us(0),
+      sum_rpc_overhead_us(0),
       cum_p4_us(0),
       cum_p45_us(0),
       cum_p6_us(0),
@@ -6182,6 +6196,17 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // per-call min/max
     if (ctx->min_p7_us == 0 || t_p7 < ctx->min_p7_us)    ctx->min_p7_us = t_p7;
     if (t_p7 > ctx->max_p7_us)                            ctx->max_p7_us = t_p7;
+    {
+        int64_t rpc_overhead = graph_dur - t_p7;
+        if (rpc_overhead < 0) rpc_overhead = 0;
+        if (ctx->min_rpc_overhead_us == 0 || rpc_overhead < ctx->min_rpc_overhead_us) {
+            ctx->min_rpc_overhead_us = rpc_overhead;
+        }
+        if (rpc_overhead > ctx->max_rpc_overhead_us) {
+            ctx->max_rpc_overhead_us = rpc_overhead;
+        }
+        ctx->sum_rpc_overhead_us += rpc_overhead;
+    }
     if (ctx->min_graph_us == 0 || graph_dur < ctx->min_graph_us) ctx->min_graph_us = graph_dur;
     if (graph_dur > ctx->max_graph_us) {
         ctx->max_graph_us     = graph_dur;
