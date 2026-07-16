@@ -767,7 +767,7 @@ static AEEResult hap_probe_dsp(remote_handle64 h) {
 }
 
 // =================================================================================================
-// Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon
+// Qualcomm compatibility layer (ported from Qualcomm's ggml-hexagon)
 // =================================================================================================
 // begin translation layer {
 
@@ -1840,11 +1840,6 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * session (matches Qualcomm htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
 
-    // (Removed for perf: per-batch and per-op LOG_INFO calls below were firing
-    // ggml_log_always() with 4-arg pushes for 50 ops * 4352 batches ~= 217K
-    // function-call/return sequences per inference. Even with dump_diag_info=0
-    // early-return, the call setup is non-zero on Hexagon. Re-enable with
-    // -DGGMLHEXAGON_DEBUG or set dsp_cache_trace_bit0=1 when actively debugging.)
     GGMLHEXAGON_LOG_DEBUG("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
     /* Reset per-batch dst trackers.

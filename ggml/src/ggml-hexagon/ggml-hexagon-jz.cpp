@@ -312,14 +312,13 @@ struct ggml_backend_hexagon_context {
     int64_t  p7_dsp_exec_hist[PERF_HIST_CAP];  // pure DSP execution time inside the sync call
     int64_t  p7_civac_hist[PERF_HIST_CAP];     // AP cache invalidate after DSP reply
 
-    // FastRPC transport overhead calibration (measured via probe invokes at init).
-    // probe mode (batch_size=0) does minimal DSP work (1 byte read, 32 bytes write,
-    // 2 cache line flushes, 2x LOG_INFO), so measured time is an upper bound of
+    // FastRPC transport overhead calibration (measured via 0xFFFB warmup invokes at init).
+    // The 0xFFFB warmup mode does no DSP work, so measured time is an upper bound of
     // pure FastRPC transport overhead (invoke round-trip: AP -> DSP -> AP).
-    int64_t  rpc_overhead_min_us;  // shortest probe invoke
-    int64_t  rpc_overhead_max_us;  // longest probe invoke
-    int64_t  rpc_overhead_sum_us;  // sum of all probe invokes (for avg)
-    uint32_t rpc_overhead_count;   // number of probe invokes measured
+    int64_t  rpc_overhead_min_us;  // shortest warmup invoke
+    int64_t  rpc_overhead_max_us;  // longest warmup invoke
+    int64_t  rpc_overhead_sum_us;  // sum of all warmup invokes (for avg)
+    uint32_t rpc_overhead_count;   // number of warmup invokes measured
 
     // Cumulative MUL_MAT counters (PP optimization diagnostics).
     // Tracked in ctx so we can read rates after a sweep run without
@@ -610,8 +609,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
     GGMLHEXAGON_LOG_VERBOSE("thread_counts on CDSP:            %d", g_hexagon_appcfg.thread_counts);
     GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
-    GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d (%s)", g_hexagon_appcfg.rpc_mmap_mode,
-                            (g_hexagon_appcfg.rpc_mmap_mode == 1) ? "EAGER" : "DELAYED");
+    GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d", g_hexagon_appcfg.rpc_mmap_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_trace_bit1:             %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
@@ -1155,7 +1153,8 @@ static int ion_sync_for_direction(int fd, int direction) {
 }
 
 static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
-    // range-based DC CVAC with 8x loop unrolling (matching QCOM hex_l2flush pattern)
+#if defined(__ANDROID__) || defined(__linux__)
+    // range-based DC CVAC with 8x loop unrolling
     if (size == 0) return;
     {
         const size_t line_size = 64;
@@ -1179,10 +1178,12 @@ static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend
         __asm__ volatile("dsb ish" ::: "memory");
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+#endif
 }
 
 static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend_ctx, int ion_fd, const void * p, size_t size) {
-    // range-based DC CIVAC with 8x loop unrolling (matching QCOM hex_l2flush pattern)
+#if defined(__ANDROID__) || defined(__linux__)
+    // range-based DC CIVAC with 8x loop unrolling
     if (size == 0) return;
     {
         const size_t line_size = 64;
@@ -1207,6 +1208,7 @@ static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend
         __asm__ volatile("isb" ::: "memory");
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+#endif
 }
 
 // True for metadata-only ops that never execute on CDSP.
@@ -1220,7 +1222,6 @@ static bool ggmlhexagon_is_metadata_op(enum ggml_op op) {
         case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE:
         case GGML_OP_REPEAT:
-        //case GGML_OP_CONT:
             return true;
         default:
             return false;
@@ -1557,41 +1558,6 @@ bail:
     return;
 }
 
-/**
- * set FastRPC thread priority (default unchanged at 192)
- * priority values range from 1 to 255, with smaller values representing higher priorities
- * Unprivileged clients: 64 through 254 (CDSP only)
- * Privileged clients:   1  through 254
- *
- * ref:file:///opt/qcom/Hexagon_SDK/6.2.0.1/docs/software/system_integration.html#priority-levels
- */
-static int ggmlhexagon_set_rpc_priority(int domain, int priority) {
-    int err = 0;
-
-    if (priority < 1) {
-        priority = 1;
-    }
-    if (priority > 255) {
-        priority = 255;
-    }
-
-    if (remote_session_control) {
-        struct remote_rpc_thread_params data;
-        data.domain     = domain;
-        data.prio       = priority;
-        data.stack_size = -1;
-        err = remote_session_control(FASTRPC_THREAD_PARAMS, (void *)&data, sizeof(data));
-        if (err != AEE_SUCCESS) {
-            GGMLHEXAGON_LOG_WARN("remote_session_control failed with 0x%x when setting thread priority\n", err);
-        } else {
-            GGMLHEXAGON_LOG_VERBOSE("thread priority set to %d", priority);
-        }
-    } else {
-        GGMLHEXAGON_LOG_WARN("cannot set thread priority");
-    }
-    return err;
-}
-
 static int ggmlhexagon_get_hmx_support_info(int domain, uint32_t attr, uint32_t * capability) {
     int hexagon_error = AEE_SUCCESS;
     *capability = 0;
@@ -1862,19 +1828,14 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     uint32_t hvx_support_128b = 0;
     ggmlhexagon_get_hvx_support_info(ctx->domain_id, HVX_SUPPORT_128B, &hvx_support_128b);
     ctx->has_hvx = (hvx_support_128b > 0);
-
     ctx->has_hmx = (hmx_depth > 0 || hmx_spatial > 0);
-    // Fallback: DSPRPC_GET_DSP_INFO may not report HMX on some drivers
-    // (returns EUNSUPPORTEDAPI, leaving capability 0). HMX is present on
-    // V73+ (Snapdragon 8 Gen 2 and later); the DSP skel is built with -mhmx.
+    // Fallback: DSPRPC_GET_DSP_INFO may not report HMX on some devices
+    // HMX is present on V73+ (Snapdragon 8 Gen 2 and later); the DSP skel is built with -mhmx.
     if (!ctx->has_hmx && htp_arch >= V73) {
         ctx->has_hmx = true;
     }
-
     GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
-    //FIXME: the log output is "hmx_depth 0 hmx_spatial 0", this is not correct
-    //GGMLHEXAGON_LOG_VERBOSE("hmx_depth %d hmx_spatial %d", hmx_depth, hmx_spatial);
-
+    //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
     GGMLHEXAGON_LOG_VERBOSE("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
                             "unsigned pd supported %d, async fastrpc supported %d",
                                 ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
@@ -2017,7 +1978,6 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         GGMLHEXAGON_LOG_VERBOSE("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
         ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, 2, 29, g_hexagon_appcfg.thread_counts);
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
-        //ggmlhexagon_set_rpc_priority(domain_id, 64);
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
             GGMLHEXAGON_LOG_ERROR("failed to init rpc mempool");
             goto bail;
@@ -3301,7 +3261,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
 
     // Pre-size the cgraph cache to avoid rehashing during inference. With
     // max_load_factor=0.5 and reserve(1024) the bucket array can hold ~1024
-    // entries before rehash; observed peak is ~227 (qwen3), so this keeps the
+    // entries before rehash; observed peak is ~227 (gemma-4/qwen3), so this keeps the
     // load low and lookup latency stable.
     cgraph_cache.max_load_factor(0.5f);
     cgraph_cache.reserve(1024);
@@ -3348,21 +3308,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_MXFP4:
-#if 0
-        case GGML_TYPE_Q5_1:
-        case GGML_TYPE_Q4_K:
-        case GGML_TYPE_Q6_K:
-        case GGML_TYPE_Q2_K:
-        case GGML_TYPE_Q3_K:
-        case GGML_TYPE_Q5_K:
-        case GGML_TYPE_NVFP4:
-        case GGML_TYPE_IQ4_XS:
-        case GGML_TYPE_IQ3_XXS:
-        case GGML_TYPE_IQ2_XXS:
-        case GGML_TYPE_IQ2_XS:
-        case GGML_TYPE_IQ2_S:
-        case GGML_TYPE_IQ1_S:
-#endif
         {
             // src0 (weights) must be repacked. In test-backend-ops tensors
             // are allocated in the main buffer, so this filters quantized MUL_MAT test cases
@@ -3435,23 +3380,20 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
             return false;
     }
 
+    // Precompute kernel params to get the actual VTCM size
+    hex_op_desc tmp_op;
+    memset(&tmp_op, 0, sizeof(tmp_op));
+    tmp_op.opcode = dst->op;
+    bool is_matmul_id = (dst->op == GGML_OP_MUL_MAT_ID);
+    ggml_hexagon_precompute_mm_params(ctx, dst, tmp_op, is_matmul_id);
+    const struct htp_mm_kernel_params * kparams =
+        (const struct htp_mm_kernel_params *)tmp_op.kernel_params;
 
-    {
-        // Precompute kernel params to get the actual VTCM size
-        hex_op_desc tmp_op;
-        memset(&tmp_op, 0, sizeof(tmp_op));
-        tmp_op.opcode = dst->op;
-        bool is_matmul_id = (dst->op == GGML_OP_MUL_MAT_ID);
-        ggml_hexagon_precompute_mm_params(ctx, dst, tmp_op, is_matmul_id);
-        const struct htp_mm_kernel_params * kparams =
-            (const struct htp_mm_kernel_params *)tmp_op.kernel_params;
-
-        const size_t vtcm_budget = (size_t)ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
-        if ((size_t)kparams->vtcm_size > vtcm_budget) {
-            GGMLHEXAGON_LOG_ALWAYS("MUL_MAT VTCM too small: needed=%d budget=%zu\n",
-                                   kparams->vtcm_size, vtcm_budget);
-            return false;
-        }
+    const size_t vtcm_budget = (size_t)ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
+    if ((size_t)kparams->vtcm_size > vtcm_budget) {
+        GGMLHEXAGON_LOG_ALWAYS("MUL_MAT VTCM too small: needed=%d budget=%zu\n",
+                               kparams->vtcm_size, vtcm_budget);
+        return false;
     }
 
     return true;
@@ -4900,12 +4842,9 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
 
-// MODE 1: FastRPC-based op-batch (support has been removed)
-
-
-// MODE 2: ION-based op-batch — packs all ops into ION shared memory,
-//         passes only (offset, size) via FastRPC as doorbell.
-//         Avoids FastRPC scatter-gather limits entirely.
+// ION-based op-batch — packs all ops into ION shared memory,
+// passes only (offset, size) via FastRPC as doorbell.
+// avoids FastRPC scatter-gather limits entirely.
 static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
 
     enum ggml_status result         = GGML_STATUS_SUCCESS;
@@ -4953,11 +4892,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->diag_n_calls++;
     }
 
-    // ====================================================================
-    // ION-based multi-op offload: pack all ops into ION shared memory,
-    // then pass only (offset, size) via FastRPC as doorbell.
-    // This avoids FastRPC's scatter-gather limits on large batches.
-    // ====================================================================
     size_t saved_mempool_usage = ctx->rpc_mempool_usage;
     if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
         GGMLHEXAGON_LOG_WARN("special: no ION mempool, falling back to per-op");
@@ -4970,11 +4904,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // Track temporary ION regions (mirrors, batch descriptors, repacked weights)
     // for cleanup after Phase 8. Mark them as free (no tail compaction).
     std::vector<size_t> temp_region_indices;
-
-    // FP16 weight cache is keyed by (src0_data, M, K, type). Static weight
-    // tensors keep stable ION addresses across graph_compute calls, so cached
-    // tiles remain valid and TG can reuse them (first call miss, later hit).
-    // Do NOT reset cache here: resetting kills TG hit rate.
 
     // Storage for cache-miss path; on cache hit we reference cached vectors
     // directly to avoid copying ~20-110 KB of descriptors per call.
@@ -4994,7 +4923,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t t_p1, t_p2, t_p25, t_p3, t_p4, t_p45, t_p5, t_p6, t_p65, t_p7, t_p75, t_p8;
     int64_t t_start = ggml_time_us();
 
-    // ---- cgraph content-hash check for Phase 1/2/2.5 cache hit ----
+    // ---- Phase 1: collect unique tensor objects + cgraph cache lookup ----
     // Hash over each node's {op, ne[4], nb[4], non-null src[0..3] ptr, data ptr}.
     // The src slot index is folded into the value so that NULL slots do not
     // collide with real tensors at different positions. The node's own data
@@ -5062,20 +4991,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     if (!cache_hit) {
         // ---- collect supported ops (cache miss only) ----
-        // (Removed for perf: GGMLHEXAGON_LOG_WARN per-cgraph + per-node forces
-        // std::string allocation and ggmlhexagon_get_opkey_from_op even when
-        // dump_debug_info=0. With 17+ nodes * 4352 cgraph calls, this is
-        // ~hundreds of ms of pure overhead. Re-add only when actively debugging.)
-        // GGMLHEXAGON_LOG_WARN("cgraph has %d total nodes (gap_from_prev=%lld us)", cgraph->n_nodes, (long long)gap_from_prev);
-
         supported_nodes.reserve(cgraph->n_nodes);
         for (int i = 0; i < cgraph->n_nodes; i++) {
             ggml_tensor * node = cgraph->nodes[i];
-
-            // (Removed for perf: per-node key construction)
-            // std::string node_name;
-            // ggmlhexagon_get_opkey_from_op(node, node_name);
-            // GGMLHEXAGON_LOG_WARN("node[%d]:%s", i, node_name.c_str());
 
             if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE
                 || node->op == GGML_OP_TRANSPOSE || node->op == GGML_OP_VIEW
@@ -5964,18 +5882,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         int was_weights_dirty = ctx->weights_dirty ? 1 : 0;
         ctx->weights_dirty = false;
-        // (Removed for perf: per-batch phase6.5 summary fires 4352 times/PP
-        // run; with 9-arg va_list preparation each call costs ~2us even at
-        // dump_debug_info=0. Useful only when investigating cache coherency.)
-        // GGMLHEXAGON_LOG_WARN("ion-batch: phase6.5 DC CVAC %u ranges, %u bytes flushed "
-        //                      "(t=%u/%llu m=%llu ri=%llu b=%llu c=%u/%llu dirty=%d)",
-        //                      n_flush, flush_bytes,
-        //                      dbg_ranges_tensor, (unsigned long long)dbg_bytes_tensor,
-        //                      (unsigned long long)dbg_bytes_mirror,
-        //                      (unsigned long long)dbg_bytes_repack_ion,
-        //                      (unsigned long long)dbg_bytes_batch,
-        //                      dbg_ranges_cgraph, (unsigned long long)dbg_bytes_cgraph,
-        //                      was_weights_dirty);
         (void)was_weights_dirty;
         }  // end else (do_dc_cvac)
     }
@@ -5990,11 +5896,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     t_p65 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     PERF_RECORD(t_p65, ctx->p65_hist);
     ctx->rpc_batch_call_count++;
-    // (Removed for perf: per-batch "batch_call #N" log fires
-    // ggmlhexagon_log_internal even with dump_debug_info=0; with 4352
-    // batches * 2.3us per call that's ~10ms of pure overhead per PP run.
-    // Re-enable when actively debugging the FastRPC pipeline.)
-    // GGMLHEXAGON_LOG_WARN("batch_call #%llu n_ops=%u", ctx->rpc_batch_call_count, n_ops);
 
     // n_ops_hist: record at FastRPC dispatch time (most relevant for p7 breakdown)
     ctx->n_ops_hist[ctx->perf_hist_idx] = (int32_t)n_ops;
@@ -6574,7 +6475,7 @@ static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .graph_optimize          = */ nullptr,
 };
 
-//FIXME: this guid is not make sense
+//FIXME: this guid does not make sense
 static ggml_guid_t ggml_backend_hexagon_guid() {
     static ggml_guid guid = {
             0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70, 0x81,
