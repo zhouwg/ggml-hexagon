@@ -608,10 +608,9 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 
 - master
   https://github.com/zhouwg/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
-- self-build
-  https://github.com/zhouwg/ggml-hexagon/tree/self-build, track Qualcomm's ggml-hexagon in the upstream.
+
 - self-build-jz
-  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, jeff zhou/jz's ggml-hexagon backend can be found in this branch.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, Qualcomm's ggml-hexagon & jz(jeff zhou)'s ggml-hexagon can be found in this branch.
 
 ## Why jz's ggml-hexagon backend is still meaningful?
 - The implementation of the prebuilt `libggmldsp-skel.so` is complicated&dirty: last year I built a closed-source version by porting a full ggml-core to Qualcomm's DSP/NPU side (supporting fully quantized & non-quantized mulmat op, theoretically supporting all ggml ops). The open-source code of `libggmldsp-skel.so` can now be found in JZ's ggml-hexagon at [`ggml/src/ggml-hexagon/htp/`](ggml/src/ggml-hexagon/htp/) - including the FastRPC entry point ([`entry.c`](ggml/src/ggml-hexagon/htp/entry.c)) and session context ([`dsp-ctx.h`](ggml/src/ggml-hexagon/htp/dsp-ctx.h)).
