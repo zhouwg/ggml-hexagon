@@ -25,7 +25,7 @@ LDFLAGS=-m${HTP_ARCH_VERSION} -Wl,--defsym=ISDB_TRUSTED_FLAG=2 -Wl,--defsym=ISDB
 
 # Qualcomm execute_op kernels (binary-ops.c, matmul-ops.c, etc.) live in this directory.
 # entry.c dispatches all ops through the execute_op path (algotype=29).
-SRCS = ggml_dsp_skel.c entry.c worker-pool.c hex-dma.c hmx-queue.c binary-ops.c unary-ops.c sum-rows-ops.c softmax-ops.c act-ops.c rope-ops.c set-rows-ops.c get-rows-ops.c cpy-ops.c repeat-ops.c argsort-ops.c ssm-conv.c cumsum-ops.c fill-ops.c concat-ops.c diag-ops.c solve-tri-ops.c gated-delta-net-ops.c pad-ops.c matmul-ops.c flash-attn-ops.c
+SRCS = ggml_dsp_skel.c entry.c work-queue.c dma-queue.c hmx-queue.c htp-tensor.c binary-ops.c unary-ops.c sum-rows-ops.c softmax-ops.c act-ops.c rope-ops.c set-rows-ops.c get-rows-ops.c cpy-ops.c repeat-ops.c argsort-ops.c ssm-conv.c cumsum-ops.c fill-ops.c concat-ops.c diag-ops.c solve-tri-ops.c gated-delta-net-ops.c pad-ops.c matmul-ops.c flash-attn-ops.c
 OBJS = $(patsubst %.c, %.o, $(patsubst %.cpp, %.o, $(SRCS)))
 
 ALL:$(OBJS)

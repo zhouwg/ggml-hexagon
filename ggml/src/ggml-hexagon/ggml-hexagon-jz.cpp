@@ -1887,7 +1887,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
     GGMLHEXAGON_LOG_DEBUG("init Hexagon CDSP with backend %d(%s)", ctx->device, ctx->name);
     ctx->ggmlop_handle = 0;
-    my_domain = get_domain(domain_id);
+    my_domain = htpdrv_get_domain(domain_id);
     if (NULL == my_domain) {
         GGMLHEXAGON_LOG_ERROR("unable to get domain struct %d", domain_id);
         goto bail;
@@ -2684,133 +2684,21 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     if (is_batched_val && wtype == GGML_TYPE_F16 && group_size > 1) {
         // Try grouped path first
         const bool use_dma_activation = (src1->nb[1]/sizeof(float) > (size_t)ne00_padded);
-        size_t best_mblocks = SIZE_MAX;
-        int best_act_threads = 0;
-        size_t best_m_chunk = 0;
-        size_t best_n_chunk = 0;
-        size_t best_vtcm_size = 0;
-
-        int act_threads = n_threads;
-        while (act_threads >= 1) {
-            const size_t f32_scratch_size = use_dma_activation
-                ? hex_align_up((size_t)act_threads * HTP_MM_DMA_ACT_MULTIPLIER * ne00_padded * sizeof(float), HTP_MM_HMX_TILE_SIZE)
-                : 0;
-            size_t group_overhead = 256 + f32_scratch_size;
-            size_t group_size_per_n, group_size_per_m, group_size_per_mn;
-            htp_mm_hmx_get_batched_chunk_costs(ne00_padded, group_size,
-                &group_size_per_n, &group_size_per_m, &group_size_per_mn);
-
-            size_t m_chunk_candidate = 0;
-            size_t n_chunk_candidate = 0;
-            size_t vtcm_size_candidate = 0;
-
-            if (htp_mm_hmx_compute_chunks(vtcm_budget, group_overhead,
-                    group_size_per_n, group_size_per_m, group_size_per_mn,
-                    (size_t)hex_align_up(ne11, 32), (size_t)ne01_padded,
-                    (size_t) ne01_padded * HTP_MM_HMX_COST_W_DEQUANT,
-                    (size_t) ne11 * HTP_MM_HMX_COST_A_CONVERT,
-                    &m_chunk_candidate, &n_chunk_candidate,
-                    &vtcm_size_candidate) == 0) {
-                size_t exact_size = htp_mm_hmx_get_batched_vtcm_size(
-                    wtype, ne00_padded, m_chunk_candidate, n_chunk_candidate,
-                    group_size, use_dma_activation, pipeline, act_threads);
-                if (exact_size <= vtcm_budget) {
-                    size_t mblocks = ((size_t) ne11 + m_chunk_candidate - 1) / m_chunk_candidate;
-                    if (mblocks < best_mblocks ||
-                        (mblocks == best_mblocks && act_threads > best_act_threads)) {
-                        best_mblocks = mblocks;
-                        best_act_threads = act_threads;
-                        best_m_chunk = m_chunk_candidate;
-                        best_n_chunk = n_chunk_candidate;
-                        best_vtcm_size = exact_size;
-                    }
-                }
-            }
-            if (act_threads == 1) {
-                act_threads = 0;
-            } else {
-                act_threads /= 2;
-            }
-        }
-
-        if (best_act_threads > 0) {
-            m_chunk = best_m_chunk;
-            n_chunk = best_n_chunk;
-            vtcm_size = best_vtcm_size;
-            act_threads_selected = best_act_threads;
+        if (htp_mm_hmx_solve_batched_params(wtype, ne00_padded, ne01_padded, ne11,
+                    group_size, use_dma_activation, n_threads, pipeline,
+                    vtcm_budget, &m_chunk, &n_chunk,
+                    &act_threads_selected, &vtcm_size)) {
             use_grouped = true;
         }
     }
 
     if (!use_grouped) {
         // Fallback to simple 2D path (group_size = 1)
-        size_t best_mblocks = SIZE_MAX;
-        int best_act_threads = 0;
-        size_t best_m_chunk = 0;
-        size_t best_n_chunk = 0;
-        size_t best_vtcm_size = 0;
-
-        // For MUL_MAT_ID the kernel runs one 2D matmul per expert, with M
-        // equal to the number of rows routed to that expert. A single expert
-        // can receive up to all routed rows (dst->ne[1]*dst->ne[2]), so size
-        // the chunk search for that upper bound rather than ne12 (token
-        // positions only). We recompute m_chunk per expert against the actual
-        // count in the NPU kernel.
-        const int m_id_rows    = (int) ((size_t) dst->ne[1] * dst->ne[2]);
-        const int m_for_chunks = is_matmul_id ? hex_align_up(m_id_rows, 32) : ne11_padded;
-        const int m_for_cost   = is_matmul_id ? m_id_rows : ne11;
-
-        int act_threads = n_threads;
-        while (act_threads >= 1) {
-            const size_t act_f32_size = is_matmul_id
-                ? 0
-                : hex_align_up((size_t)act_threads * HTP_MM_DMA_ACT_MULTIPLIER * ne00_padded * sizeof(float), HTP_MM_HMX_TILE_SIZE);
-            size_t simple_2d_overhead = 256 + act_f32_size;
-            size_t simple_2d_size_per_n, simple_2d_size_per_m, simple_2d_size_per_mn;
-            htp_mm_hmx_get_2d_chunk_costs(wtype, ne00_padded, pipeline,
-                aligned_tile_size, &simple_2d_size_per_n,
-                &simple_2d_size_per_m, &simple_2d_size_per_mn);
-
-            size_t m_chunk_candidate = 0;
-            size_t n_chunk_candidate = 0;
-            size_t vtcm_size_candidate = 0;
-
-            if (htp_mm_hmx_compute_chunks(vtcm_budget, simple_2d_overhead,
-                    simple_2d_size_per_n, simple_2d_size_per_m,
-                    simple_2d_size_per_mn, (size_t)m_for_chunks,
-                    (size_t)ne01_padded,
-                    (size_t) ne01_padded * HTP_MM_HMX_COST_W_DEQUANT,
-                    (size_t) m_for_cost * HTP_MM_HMX_COST_A_CONVERT,
-                    &m_chunk_candidate, &n_chunk_candidate,
-                    &vtcm_size_candidate) == 0) {
-                size_t exact_size = htp_mm_hmx_get_2d_vtcm_size(
-                    wtype, ne00_padded, m_chunk_candidate, n_chunk_candidate,
-                    pipeline, is_matmul_id ? 0 : act_threads, aligned_tile_size);
-                if (exact_size <= vtcm_budget) {
-                    size_t mblocks = ((size_t) m_for_cost + m_chunk_candidate - 1) / m_chunk_candidate;
-                    if (mblocks < best_mblocks ||
-                        (mblocks == best_mblocks && act_threads > best_act_threads)) {
-                        best_mblocks = mblocks;
-                        best_act_threads = act_threads;
-                        best_m_chunk = m_chunk_candidate;
-                        best_n_chunk = n_chunk_candidate;
-                        best_vtcm_size = exact_size;
-                    }
-                }
-            }
-            if (act_threads == 1) {
-                act_threads = 0;
-            } else {
-                act_threads /= 2;
-            }
-        }
-
-        if (best_act_threads > 0) {
-            m_chunk = best_m_chunk;
-            n_chunk = best_n_chunk;
-            vtcm_size = best_vtcm_size;
-            act_threads_selected = best_act_threads;
-        } else {
+        const int m_id_rows = (int) ((size_t) dst->ne[1] * dst->ne[2]);
+        if (!htp_mm_hmx_solve_2d_params(wtype, ne00_padded, m_id_rows,
+                    ne01_padded, ne11_padded, ne11, n_threads, pipeline,
+                    is_matmul_id, aligned_tile_size, vtcm_budget,
+                    &m_chunk, &n_chunk, &act_threads_selected, &vtcm_size)) {
             return false;
         }
     }
@@ -2826,10 +2714,12 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     kparams->src1_row_size = (int32_t)((wtype == GGML_TYPE_Q4_1)
         ? htp_mm_q8_1_tiled_row_size(ne10)
         : htp_mm_q8_0_tiled_row_size(ne10));
-    kparams->vtcm_size = (int32_t) vtcm_size;
-    kparams->vtcm_src0_size = 0;
-    kparams->vtcm_src1_size = 0;
-    kparams->vtcm_dst_size = 0;
+    kparams->vtcm_size          = (int32_t) vtcm_size;
+    kparams->vtcm_src0_size     = 0;
+    kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) act_threads_selected);
+    kparams->div_ne00_padded    = init_fastdiv_values((uint32_t) ne00_padded);
+    kparams->vtcm_src1_size     = 0;
+    kparams->vtcm_dst_size      = 0;
 
     if (is_batched && !is_matmul_id) {
         kparams->kernel_type = HTP_MM_KERNEL_HMX_F16_BATCHED;
@@ -6353,7 +6243,6 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
 static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
 
 static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s\n", __func__);
     int dev_index = 0;
 
     ggmlhexagon_load_cfg();
@@ -6387,7 +6276,6 @@ static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_
     }
     GGMLHEXAGON_LOG_ALWAYS("dev_index=%d", dev_index);
     ggml_backend_t hexagon_backend = ggml_backend_hexagon_init_ext(dev_index, g_hexagon_appcfg.runtime_libpath);
-    GGMLHEXAGON_LOG_DEBUG("leave %s\n", __func__);
 
     return hexagon_backend;
 }
@@ -6399,7 +6287,6 @@ static ggml_backend_buffer_type_t ggml_backend_hexagon_buffer_type(size_t device
                               device_index);
         return nullptr;
     }
-    // buft is owned by the context and initialized in its constructor (no lazy init)
     return &g_hexagon_mgr[device_index]->buffer_type;
 }
 
@@ -6422,19 +6309,11 @@ static ggml_backend_buffer_type_t * ggml_backend_hexagon_device_get_extra_buffer
 }
 
 static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    // Both main and repack bufts share the same ION mempool. Accept either;
-    // the repack buft is needed so that GGML core routes quantized weights
-    // through set_tensor (which does the in-place tile repack), instead of
-    // writing canonical Q4_0/Q8_0 blocks directly.
     if (ggml_backend_buft_is_hexagon(buft) || ggml_backend_buft_is_hexagon_repack(buft)) {
         ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
         ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
         return buft_ctx->device == dev_ctx->device;
     }
-    // ATTENTION: in ION mempool mode, only support hexagon buffer type (ION memory).
-    // Do NOT accept host buffer type, otherwise the scheduler will allocate
-    // tensors on the heap, requiring ION mirror + copy-back which has
-    // unsolvable cache coherency issues on ARM64 (no DC IVAC in user-space).
     return false;
 }
 
@@ -6573,7 +6452,6 @@ static const ggml_backend_reg_i ggml_backend_hexagon_reg_interface = {
 ggml_backend_reg_t ggml_backend_hexagon_reg() {
     static ggml_backend_reg reg;
     static bool initialized = false;
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
 
     ggmlhexagon_load_cfg();
     if (!ggmlhexagon_check_valid_appcfg()) {
@@ -6639,8 +6517,6 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
         initialized = true;
     }
-    GGMLHEXAGON_LOG_DEBUG("leave ggml_backend_hexagon_reg");
-
     return &reg;
 }
 
@@ -6653,9 +6529,6 @@ static const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
 }
 
 static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
-
-    //case-3: calling ggml_backend_hexagon_init() directly in user's code
     ggmlhexagon_load_cfg();
     if (!ggmlhexagon_check_valid_appcfg()) {
         return nullptr;
@@ -6705,9 +6578,6 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
     };
 
     ctx->backend = hexagon_backend;
-    // DSP init already done in ggml_backend_hexagon_context constructor
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
-
     return hexagon_backend;
 }
 

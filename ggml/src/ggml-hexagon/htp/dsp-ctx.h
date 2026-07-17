@@ -22,8 +22,20 @@ extern "C" {
 #define HEX_TENSOR_ALIGN    128
 #define HEX_OP_ALIGN        128
 
-// Forward declarations for types used in dsp_context
-struct hmx_queue;
+// HTP_TENSOR_FLUSHED was removed in upstream b2dd28a3b: per-tensor flush
+// flags were replaced by htp_context.dirty_map, maintained by Qualcomm's
+// scheduler in main.c (kernels never flush L2 themselves). JZ's entry.c
+// replaces that scheduler and does its own cache management, so
+// htp_tensor.flags is never read on this path. Defined as 0 to keep the
+// legacy assignments in entry.c compiling.
+#ifndef HTP_TENSOR_FLUSHED
+#define HTP_TENSOR_FLUSHED 0
+#endif
+
+// Forward declarations for types used in dsp_context.
+// Note: hmx_queue_t is `struct hmx_queue_s *` (typedef in hmx-queue.h), so the
+// forward declaration must use the _s suffix to match the new Qualcomm API.
+struct hmx_queue_s;
 struct htp_context;
 
 typedef struct dsptensor dsptensor;
@@ -115,7 +127,10 @@ struct dsp_context {
 
     // HMX
     int hmx_available;
-    struct hmx_queue * hmx_queue;
+    struct hmx_queue_s * hmx_queue;
+    // Backing buffer for hmx_queue (NULL if hmx_queue is owned externally).
+    // Allocated via memalign in ggml_dsp_setclocks and freed in ggml_dsp_close.
+    void * hmx_queue_buf;
 
     // ION
     void * ion_dsp_base;
@@ -159,6 +174,18 @@ struct dsp_context {
 
     // htp_context for calling Qualcomm's execute_op.
     struct htp_context * htp_ctx;
+
+    // Backing buffers for queues owned by this dsp_context (allocated via
+    // memalign in ggml_dsp_setclocks, freed in ggml_dsp_close). The new
+    // Qualcomm API (b2dd28a3b) requires callers to provide pre-allocated
+    // memory to *_queue_init and does not free it in *_queue_free, so we
+    // must track these buffers separately to avoid leaking them.
+    //   work_queue_buf         : backing for htp_ctx->work_queue
+    //   dma_queue_bufs[i]      : backing for htp_ctx->dma_cached[i] (NULL when slot unused)
+    //   dma_alias_bufs[i]      : backing for htp_ctx->dma[i] alias (NULL when slot unused)
+    void * work_queue_buf;
+    void * dma_queue_bufs[16];  // HTP_MAX_NTHREADS == 10, but use 16 for safety
+    void * dma_alias_bufs[16];
 };
 
 #ifdef  __cplusplus

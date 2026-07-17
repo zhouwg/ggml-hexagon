@@ -47,6 +47,16 @@
 
 #define DSP_OPT_MAX_TENSORS             2048
 
+// Queue capacity/stack sizes for JZ-owned work/hmx queues. Mirror the defaults
+// in Qualcomm's htp/main.c (HMX_QUEUE_CAPACITY=16, HMX_QUEUE_STACK_SIZE=16384,
+// WORK_QUEUE_CAPACITY=16, WORK_QUEUE_STACK_SIZE=16384). main.c keeps these as
+// file-local #defines; we replicate them here with a JZ_ prefix so the JZ
+// entry.c path can construct queues with the same geometry.
+#define JZ_HMX_QUEUE_CAPACITY        16
+#define JZ_HMX_QUEUE_STACK_SIZE      16384
+#define JZ_WORK_QUEUE_CAPACITY       16
+#define JZ_WORK_QUEUE_STACK_SIZE     16384
+
 /* Maximum dst length eligible for prior-dst skip (bit 1). Strategy 2: only
  * allow skipping invalidation when the prior dst fits within a single L2
  * cacheline. Anything larger may have been produced through async DMA/HMX
@@ -905,8 +915,8 @@ static inline void hex_tensor_to_dsptensor(const hex_tensor_desc * ht,
 
 // Convert hex_tensor_desc directly to htp_tensor. Eliminates the intermediate
 // dsptensor step for op dispatch. Mirrors Qualcomm's prep_tensor: data pointer
-// is computed from ION base + offset, and HTP_TENSOR_FLUSHED is set so that
-// Qualcomm's proc_op_req skips L2 flush (we handle cache ourselves).
+// is computed from ION base + offset. flags is never read on the JZ path;
+// cache coherency is handled by entry.c itself.
 static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
                                              const char * ion_base,
                                              struct htp_tensor * htp) {
@@ -927,8 +937,8 @@ static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
 
 // Hexagon DSP is 32-bit address space: pointer fits in uint32_t.
 // htp_tensor.data is uint32_t offset, but Qualcomm's prep_tensor replaces
-// it with actual pointer. We set it directly to the pointer value and mark
-// HTP_TENSOR_FLUSHED so proc_op_req skips L2 flush (we handle cache ourselves).
+// it with actual pointer. We set it directly to the pointer value; flags is
+// never read on the JZ path (we handle cache ourselves).
 static inline void dsptensor_to_htp_tensor(const dsptensor * dt,
                                             struct htp_tensor * ht) {
     ht->data  = (uint32_t)(uintptr_t)dt->data;
@@ -1163,6 +1173,10 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
     kparams->n_prefetch         = 16;
     kparams->kernel_type        = is_batched ? HTP_MM_KERNEL_HMX_F16_BATCHED
                                              : HTP_MM_KERNEL_HMX_2D;
+    // HMX kernels consume these two fastdivs for activation DMA/work split
+    // (matmul-ops.c); mirror Qualcomm's AP-side precompute.
+    kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) best_act_threads);
+    kparams->div_ne00_padded    = init_fastdiv_values((uint32_t) ne00_padded);
     return true;
 }
 
@@ -1580,19 +1594,40 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         }
     }
 
-    /* Step 3.5: Create async HMX queue for pipeline overlap (DMA/HVX/HMX) */
+    /* Step 3.5: Create async HMX queue for pipeline overlap (DMA/HVX/HMX).
+     * New Qualcomm API (b2dd28a3b) requires a pre-allocated backing buffer;
+     * we memalign it here and track it in dsp_context.hmx_queue_buf for
+     * cleanup in ggml_dsp_close. Capacity/stack_size match main.c defaults. */
     if (g_dsp_ctx->hmx_available && g_dsp_ctx->compute_res_ctx_id != 0) {
         if (g_dsp_ctx->hmx_queue != NULL) {
             GGMLHEXAGON_LOG_INFO("hmx_queue already exists, deleting old one\n");
-            hmx_queue_delete(g_dsp_ctx->hmx_queue);
-            g_dsp_ctx->hmx_queue = NULL;
+            hmx_queue_free(g_dsp_ctx->hmx_queue);
+            free(g_dsp_ctx->hmx_queue_buf);
+            g_dsp_ctx->hmx_queue     = NULL;
+            g_dsp_ctx->hmx_queue_buf = NULL;
         }
-        g_dsp_ctx->hmx_queue = hmx_queue_create(16, g_dsp_ctx->compute_res_ctx_id);
-        if (g_dsp_ctx->hmx_queue) {
-            GGMLHEXAGON_LOG_INFO("async HMX queue created (capacity %u, rctx %u)\n",
-                                 hmx_queue_capacity(g_dsp_ctx->hmx_queue), g_dsp_ctx->compute_res_ctx_id);
+        size_t hmx_size  = hmx_queue_sizeof(JZ_HMX_QUEUE_CAPACITY, JZ_HMX_QUEUE_STACK_SIZE);
+        size_t hmx_align = hmx_queue_alignof();
+        void * hmx_buf   = memalign(hmx_align, hmx_size);
+        if (hmx_buf) {
+            // Trace slot mirrors main.c (&ctx->trace[HTP_MAX_NTHREADS]): must be a
+            // valid (zeroed) htp_thread_trace, htp_trace_event_start/stop dereference
+            // it unconditionally on every HMX descriptor completion.
+            g_dsp_ctx->hmx_queue = hmx_queue_init(hmx_buf, JZ_HMX_QUEUE_CAPACITY,
+                                                  JZ_HMX_QUEUE_STACK_SIZE,
+                                                  g_dsp_ctx->compute_res_ctx_id,
+                                                  &g_dsp_ctx->htp_ctx->trace[HTP_MAX_NTHREADS]);
+            if (g_dsp_ctx->hmx_queue) {
+                g_dsp_ctx->hmx_queue_buf = hmx_buf;
+                GGMLHEXAGON_LOG_INFO("async HMX queue created (capacity %u, rctx %u)\n",
+                                     hmx_queue_capacity(g_dsp_ctx->hmx_queue), g_dsp_ctx->compute_res_ctx_id);
+            } else {
+                free(hmx_buf);
+                g_dsp_ctx->hmx_queue_buf = NULL;
+                GGMLHEXAGON_LOG_INFO("hmx_queue_init failed, HMX path will run synchronously\n");
+            }
         } else {
-            GGMLHEXAGON_LOG_INFO("hmx_queue_create failed, HMX path will run synchronously\n");
+            GGMLHEXAGON_LOG_INFO("memalign for hmx_queue failed, HMX path will run synchronously\n");
         }
     } else {
         GGMLHEXAGON_LOG_INFO("HMX not available (hmx=%d, rctx=%u), skipping hmx_queue creation\n",
@@ -1637,16 +1672,34 @@ int ggml_dsp_close(remote_handle64 handle) {
     struct dsp_context * ctx = (struct dsp_context *)handle;
     if (!ctx) return 0;
 
-    // Cleanup htp_context resources (worker_pool + dma queues)
+    // Cleanup htp_context resources (work_queue + dma queues).
+    // New Qualcomm API (b2dd28a3b): *_queue_free() does not free the backing
+    // buffer, so we track them in dsp_context and free them explicitly here.
     if (ctx->htp_ctx) {
-        if (ctx->htp_ctx->worker_pool) {
-            worker_pool_release(&ctx->htp_ctx->worker_pool);
-            ctx->htp_ctx->worker_pool = NULL;
+        if (ctx->htp_ctx->work_queue) {
+            work_queue_free(ctx->htp_ctx->work_queue);
+            ctx->htp_ctx->work_queue = NULL;
+        }
+        if (ctx->work_queue_buf) {
+            free(ctx->work_queue_buf);
+            ctx->work_queue_buf = NULL;
         }
         for (int i = 0; i < HTP_MAX_NTHREADS; i++) {
             if (ctx->htp_ctx->dma[i]) {
-                dma_queue_delete(ctx->htp_ctx->dma[i]);
+                dma_queue_alias_free(ctx->htp_ctx->dma[i]);
                 ctx->htp_ctx->dma[i] = NULL;
+            }
+            if (ctx->dma_alias_bufs[i]) {
+                free(ctx->dma_alias_bufs[i]);
+                ctx->dma_alias_bufs[i] = NULL;
+            }
+            if (ctx->htp_ctx->dma_cached[i]) {
+                dma_queue_free(ctx->htp_ctx->dma_cached[i]);
+                ctx->htp_ctx->dma_cached[i] = NULL;
+            }
+            if (ctx->dma_queue_bufs[i]) {
+                free(ctx->dma_queue_bufs[i]);
+                ctx->dma_queue_bufs[i] = NULL;
             }
         }
         free(ctx->htp_ctx);
@@ -1654,8 +1707,12 @@ int ggml_dsp_close(remote_handle64 handle) {
     }
 
     if (ctx->hmx_queue != NULL) {
-        hmx_queue_delete(ctx->hmx_queue);
+        hmx_queue_free(ctx->hmx_queue);
         ctx->hmx_queue = NULL;
+        if (ctx->hmx_queue_buf) {
+            free(ctx->hmx_queue_buf);
+            ctx->hmx_queue_buf = NULL;
+        }
         GGMLHEXAGON_LOG_INFO("released async HMX queue");
     }
 
@@ -1696,6 +1753,9 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 offl
 
     // Initialize htp_context for calling Qualcomm's execute_op.
     // Shares our already-acquired VTCM and HMX queue.
+    // New Qualcomm API (b2dd28a3b) requires pre-allocated backing buffers for
+    // work_queue and dma queues; we memalign them here and track the pointers
+    // in dsp_context for cleanup in ggml_dsp_close.
     if (g_dsp_ctx->thread_counts >= 1) {
         memset(g_dsp_ctx->htp_ctx, 0, sizeof(*g_dsp_ctx->htp_ctx));
         g_dsp_ctx->htp_ctx->vtcm_base      = (uint8_t *)g_dsp_ctx->vtcm_base;
@@ -1703,15 +1763,80 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 offl
         g_dsp_ctx->htp_ctx->vtcm_rctx      = g_dsp_ctx->compute_res_ctx_id;
         g_dsp_ctx->htp_ctx->hmx_queue      = g_dsp_ctx->hmx_queue;
         g_dsp_ctx->htp_ctx->n_threads      = (uint32_t)g_dsp_ctx->thread_counts;
+        g_dsp_ctx->htp_ctx->n_threads_div  = init_fastdiv_values((uint32_t)g_dsp_ctx->thread_counts);
         g_dsp_ctx->htp_ctx->hmx_enabled    = g_dsp_ctx->hmx_available ? true : false;
 
-        AEEResult wp = worker_pool_init(&g_dsp_ctx->htp_ctx->worker_pool, (uint32_t)g_dsp_ctx->thread_counts);
-        printf("htp_ctx worker_pool_init returned %d (n_threads=%d)\n", wp, g_dsp_ctx->thread_counts);
-
-        for (int i = 0; i < g_dsp_ctx->thread_counts; i++) {
-            g_dsp_ctx->htp_ctx->dma[i] = dma_queue_create(256);
+        // work_queue: backing buffer holds worker stacks + queue struct.
+        size_t wq_size  = work_queue_sizeof((uint32_t)g_dsp_ctx->thread_counts,
+                                            JZ_WORK_QUEUE_CAPACITY, JZ_WORK_QUEUE_STACK_SIZE);
+        size_t wq_align = work_queue_alignof();
+        void * wq_buf   = memalign(wq_align, wq_size);
+        AEEResult wp    = AEE_SUCCESS;
+        if (wq_buf) {
+            g_dsp_ctx->htp_ctx->work_queue = work_queue_init(wq_buf,
+                                                              (uint32_t)g_dsp_ctx->thread_counts,
+                                                              JZ_WORK_QUEUE_CAPACITY,
+                                                              JZ_WORK_QUEUE_STACK_SIZE);
+            if (g_dsp_ctx->htp_ctx->work_queue) {
+                g_dsp_ctx->work_queue_buf = wq_buf;
+            } else {
+                free(wq_buf);
+                g_dsp_ctx->work_queue_buf = NULL;
+                wp = AEE_EFAILED;
+            }
+        } else {
+            g_dsp_ctx->htp_ctx->work_queue = NULL;
+            g_dsp_ctx->work_queue_buf      = NULL;
+            wp = AEE_ENOMEMORY;
         }
-        printf("htp_ctx dma_queue created x%d\n", g_dsp_ctx->thread_counts);
+        printf("htp_ctx work_queue_init returned %d (n_threads=%d)\n", wp, g_dsp_ctx->thread_counts);
+
+        // dma queues: one main queue (dma_cached) + one nocache alias (dma) per
+        // thread, mirroring main.c. Ops use the alias with nocache=1 so DMA DDR
+        // accesses bypass L2 (same semantics as the pre-b2dd28a3b hex-dma, which
+        // hardcoded bypass=1) and stay coherent with our manual dcinva/dccleaninva
+        // cache management. dma_queue_init must get a valid (zeroed) trace:
+        // htp_trace_event_start/stop dereference it unconditionally on every
+        // push/pop.
+        size_t dma_size       = dma_queue_sizeof(256);
+        size_t dma_alias_size = dma_queue_alias_sizeof();
+        size_t dma_align      = dma_queue_alignof();
+        for (int i = 0; i < g_dsp_ctx->thread_counts; i++) {
+            void * dma_buf = memalign(dma_align, dma_size);
+            if (dma_buf) {
+                g_dsp_ctx->htp_ctx->dma_cached[i] = dma_queue_init(dma_buf, 256,
+                                                                   (uintptr_t)g_dsp_ctx->vtcm_base,
+                                                                   g_dsp_ctx->vtcm_size,
+                                                                   &g_dsp_ctx->htp_ctx->trace[i]);
+                if (g_dsp_ctx->htp_ctx->dma_cached[i]) {
+                    g_dsp_ctx->dma_queue_bufs[i] = dma_buf;
+                } else {
+                    free(dma_buf);
+                    dma_buf = NULL;
+                    g_dsp_ctx->dma_queue_bufs[i] = NULL;
+                }
+            } else {
+                g_dsp_ctx->htp_ctx->dma_cached[i] = NULL;
+                g_dsp_ctx->dma_queue_bufs[i]      = NULL;
+            }
+
+            void * alias_buf = memalign(dma_align, dma_alias_size);
+            if (alias_buf && g_dsp_ctx->htp_ctx->dma_cached[i]) {
+                g_dsp_ctx->htp_ctx->dma[i] = dma_queue_alias_init(alias_buf,
+                                                                  g_dsp_ctx->htp_ctx->dma_cached[i], 1);
+                if (g_dsp_ctx->htp_ctx->dma[i]) {
+                    g_dsp_ctx->dma_alias_bufs[i] = alias_buf;
+                } else {
+                    free(alias_buf);
+                    g_dsp_ctx->dma_alias_bufs[i] = NULL;
+                }
+            } else {
+                if (alias_buf) free(alias_buf);
+                g_dsp_ctx->htp_ctx->dma[i]   = NULL;
+                g_dsp_ctx->dma_alias_bufs[i] = NULL;
+            }
+        }
+        printf("htp_ctx dma_queue created x%d (main+alias)\n", g_dsp_ctx->thread_counts);
     }
 
     g_dsp_ctx->hexagon_power_ctx = (void *)(handle);
@@ -1768,6 +1893,32 @@ AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t siz
     FARF(ALWAYS, "[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB, time=%lld us)", va, fd, g_dsp_ctx->ion_dsp_size / (1024*1024), (long long)dt_mmap);
 
     return AEE_SUCCESS;
+}
+
+// Wake/suspend the work_queue + hmx_queue worker threads around a batch,
+// mirroring main.c htp_packet_callback. Without wakeup the workers stay in
+// qurt_futex_wait and (depending on QuRT futex semantics) can miss seqn
+// bumps; without hmx_queue_flush the batch can return while HMX descriptors
+// are still in flight, so AP reads back incomplete dst tensors.
+static void dsp_queues_wakeup(void) {
+    struct htp_context * htp = g_dsp_ctx->htp_ctx;
+    if (htp->work_queue) {
+        work_queue_wakeup(htp->work_queue);
+    }
+    if (htp->hmx_queue) {
+        hmx_queue_wakeup(htp->hmx_queue);
+    }
+}
+
+static void dsp_queues_suspend(void) {
+    struct htp_context * htp = g_dsp_ctx->htp_ctx;
+    if (htp->hmx_queue) {
+        hmx_queue_suspend(htp->hmx_queue);
+        hmx_queue_flush(htp->hmx_queue);
+    }
+    if (htp->work_queue) {
+        work_queue_suspend(htp->work_queue);
+    }
 }
 
 /*
@@ -1875,6 +2026,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * to 1 when written as dst (dirtied). */
     memset(g_batch_tensor_needs_inval, 1, hdr->n_tensors);
 
+    dsp_queues_wakeup();
+
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
 
@@ -1950,6 +2103,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             htp_op = (enum htp_op_code) op->htp_opcode;
         } else if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
             GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
+            dsp_queues_suspend();
             return AEE_EUNSUPPORTED;
         }
 
@@ -1962,6 +2116,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             const int32_t kp_kernel_type = octx.kernel_params[0];
             if (kp_kernel_type == 0) {
                 if (build_mm_kernel_params(&octx) != 0) {
+                    dsp_queues_suspend();
                     return AEE_EFAILED;
                 }
             }
@@ -1971,6 +2126,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             const int32_t kp_kernel_type = octx.kernel_params[0];
             if (kp_kernel_type == HTP_FA_KERNEL_UNSUPPORTED) {
                 if (build_fa_kernel_params(&octx) != 0) {
+                    dsp_queues_suspend();
                     return AEE_EFAILED;
                 }
             }
@@ -2039,6 +2195,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                 (op_ret == HTP_STATUS_VTCM_TOO_SMALL) ? "VTCM_TOO_SMALL" : "UNKNOWN";
             GGMLHEXAGON_LOG_ERROR("ion-op %u: execute_op returned %d/%s (htp_op=%d)",
                                   i, op_ret, st_name, htp_op);
+            dsp_queues_suspend();
             return AEE_EFAILED;
         }
 
@@ -2078,6 +2235,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     }
 
     GGMLHEXAGON_LOG_DEBUG("ion-batch: all %u ops done", hdr->n_ops);
+
+    dsp_queues_suspend();
 
     /* bit 2: bulk dst flush. Sort + merge collected ranges, then flush once
      * per merged region. Flushes happen here (after all ops in the batch
