@@ -250,46 +250,46 @@ struct ggml_backend_hexagon_context {
     int64_t  sum_rpc_overhead_us;
 
     // AP-side per-phase cumulative time
-    int64_t  cum_p1_us;       // Phase 1: collect unique tensor objects
-    int64_t  cum_p2_us;       // Phase 2: build op descriptors
-    int64_t  cum_p25_us;      // Phase 2.5: op fusion
-    int64_t  cum_p3_us;       // Phase 3: compute layout sizes
-    int64_t  cum_p4_us;       // Phase 4: tensor mirroring
-    int64_t  cum_p45_us;      // Phase 4.5: weight repack
-    int64_t  cum_p5_us;       // Phase 5: allocate batch descriptor in ION
-    int64_t  cum_p6_us;       // Phase 6: descriptor construction
-    int64_t  cum_p65_us;      // Phase 6.5: cache flush
-    int64_t  cum_p75_us;      // Phase 7.5: cache inval
-    int64_t  cum_p8_us;       // Phase 8: ION->heap copy-back
-    int64_t  cum_unaccounted_us; // wall-clock not covered by p1..p8 (gaps, scheduler, etc.)
+    int64_t  cum_p1_us;             // Phase 1: collect unique tensor objects
+    int64_t  cum_p2_us;             // Phase 2: build op descriptors
+    int64_t  cum_p25_us;            // Phase 2.5: op fusion
+    int64_t  cum_p3_us;             // Phase 3: compute layout sizes
+    int64_t  cum_p4_us;             // Phase 4: tensor mirroring
+    int64_t  cum_p45_us;            // Phase 4.5: weight repack
+    int64_t  cum_p5_us;             // Phase 5: allocate batch descriptor in ION
+    int64_t  cum_p6_us;             // Phase 6: descriptor construction
+    int64_t  cum_p65_us;            // Phase 6.5: cache flush
+    int64_t  cum_p75_us;            // Phase 7.5: cache inval
+    int64_t  cum_p8_us;             // Phase 8: ION->heap copy-back
+    int64_t  cum_unaccounted_us;    // wall-clock not covered by p1..p8 (gaps, scheduler, etc.)
 
     // Per-call fine-grained profiling (ring buffer, capacity 1024).
     // Captures per-call durations so dump_perf_stats can compute
     // min/p50/p95/max and reveal distribution that cumulative averages hide.
     static constexpr int PERF_HIST_CAP = 1024;
-    int      perf_hist_count;     // number of valid samples (<= PERF_HIST_CAP)
-    int      perf_hist_idx;       // next ring slot (mod PERF_HIST_CAP)
-    int64_t  p1_hist[PERF_HIST_CAP];   // Phase 1: collect unique tensor objects
-    int64_t  p2_hist[PERF_HIST_CAP];   // Phase 2: build op descriptors
-    int64_t  p25_hist[PERF_HIST_CAP];  // Phase 2.5: op fusion
-    int64_t  p3_hist[PERF_HIST_CAP];   // Phase 3: compute layout sizes
-    int64_t  p4_hist[PERF_HIST_CAP];   // Phase 4: tensor mirroring
-    int64_t  p45_hist[PERF_HIST_CAP];  // Phase 4.5: weight repack
-    int64_t  p5_hist[PERF_HIST_CAP];   // Phase 5: allocate batch descriptor in ION
-    int64_t  p6_hist[PERF_HIST_CAP];   // Phase 6: descriptor construction
-    int64_t  p65_hist[PERF_HIST_CAP];  // Phase 6.5: cache flush
-    int64_t  p7_hist[PERF_HIST_CAP];   // Phase 7: FastRPC + DSP exec + cache inval (cumulative; see 3-way split below)
-    int64_t  p75_hist[PERF_HIST_CAP];  // Phase 7.5: cache inval
-    int64_t  p8_hist[PERF_HIST_CAP];   // Phase 8: ION->heap copy-back
-    int64_t  unaccounted_hist[PERF_HIST_CAP]; // wall-clock not covered by p1..p8
-    int64_t  graph_us_hist[PERF_HIST_CAP];   // total wall-clock per graph_compute_batch call
-    int32_t  n_nodes_hist[PERF_HIST_CAP];    // cgraph->n_nodes at entry
-    int32_t  n_ops_hist[PERF_HIST_CAP];      // offloaded DSP ops at FastRPC dispatch
+    int      perf_hist_count;                   // number of valid samples (<= PERF_HIST_CAP)
+    int      perf_hist_idx;                     // next ring slot (mod PERF_HIST_CAP)
+    int64_t  p1_hist[PERF_HIST_CAP];            // Phase 1: collect unique tensor objects
+    int64_t  p2_hist[PERF_HIST_CAP];            // Phase 2: build op descriptors
+    int64_t  p25_hist[PERF_HIST_CAP];           // Phase 2.5: op fusion
+    int64_t  p3_hist[PERF_HIST_CAP];            // Phase 3: compute layout sizes
+    int64_t  p4_hist[PERF_HIST_CAP];            // Phase 4: tensor mirroring
+    int64_t  p45_hist[PERF_HIST_CAP];           // Phase 4.5: weight repack
+    int64_t  p5_hist[PERF_HIST_CAP];            // Phase 5: allocate batch descriptor in ION
+    int64_t  p6_hist[PERF_HIST_CAP];            // Phase 6: descriptor construction
+    int64_t  p65_hist[PERF_HIST_CAP];           // Phase 6.5: cache flush
+    int64_t  p7_hist[PERF_HIST_CAP];            // Phase 7: FastRPC + DSP exec + cache inval (cumulative; see 3-way split below)
+    int64_t  p75_hist[PERF_HIST_CAP];           // Phase 7.5: cache inval
+    int64_t  p8_hist[PERF_HIST_CAP];            // Phase 8: ION->heap copy-back
+    int64_t  unaccounted_hist[PERF_HIST_CAP];   // wall-clock not covered by p1..p8
+    int64_t  graph_us_hist[PERF_HIST_CAP];      // total wall-clock per graph_compute_batch call
+    int32_t  n_nodes_hist[PERF_HIST_CAP];       // cgraph->n_nodes at entry
+    int32_t  n_ops_hist[PERF_HIST_CAP];         // offloaded DSP ops at FastRPC dispatch
     int64_t  gap_from_prev_hist[PERF_HIST_CAP]; // us between consecutive graph_compute calls (sampler)
 
     // ---- TEMP DIAG: first-N sub-graph counters (PP split analysis) ----
     // Captures per-call n_nodes, n_tensors, graph_us, gap_us for the first
-    // 32 graph_compute_batch calls. Output via GGML_HEXAGON_VERBOSE=1.
+    // 32 graph_compute_batch calls.
     // Safe to keep enabled (no-op after 32 calls; no perf impact on the
     // hot path; if no longer needed, grep `TEMP DIAG` to remove).
     static constexpr int DIAG_FIRST_N = 32;
@@ -299,18 +299,15 @@ struct ggml_backend_hexagon_context {
     int64_t  diag_first_graph_us [DIAG_FIRST_N];
     int64_t  diag_first_gap_us   [DIAG_FIRST_N];
     int64_t  diag_first_unaccounted_us[DIAG_FIRST_N];
-    // Also a once-per-session LARGE-BATCH op distribution dump (n_ops > 500),
-    // to identify whether a huge sub-graph is 1 mega-op or many small layers.
-    // -----------------------------------------------------------------------
 
     // p7 3-way breakdown: split the FastRPC + DSP exec + cache inval window
     // so we can tell AP-side cache-coherency cost apart from DSP-side work.
-    int64_t  cum_p7_rpc_setup_us;  // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
-    int64_t  cum_p7_dsp_exec_us;   // pure DSP execution time inside the sync call
-    int64_t  cum_p7_civac_us;     // AP cache invalidate after DSP reply
-    int64_t  p7_rpc_setup_hist[PERF_HIST_CAP]; // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
-    int64_t  p7_dsp_exec_hist[PERF_HIST_CAP];  // pure DSP execution time inside the sync call
-    int64_t  p7_civac_hist[PERF_HIST_CAP];     // AP cache invalidate after DSP reply
+    int64_t  cum_p7_rpc_setup_us;               // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
+    int64_t  cum_p7_dsp_exec_us;                // pure DSP execution time inside the sync call
+    int64_t  cum_p7_civac_us;                   // AP cache invalidate after DSP reply
+    int64_t  p7_rpc_setup_hist[PERF_HIST_CAP];  // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
+    int64_t  p7_dsp_exec_hist[PERF_HIST_CAP];   // pure DSP execution time inside the sync call
+    int64_t  p7_civac_hist[PERF_HIST_CAP];      // AP cache invalidate after DSP reply
 
     // FastRPC transport overhead calibration (measured via 0xFFFB warmup invokes at init).
     // The 0xFFFB warmup mode does no DSP work, so measured time is an upper bound of
@@ -330,15 +327,15 @@ struct ggml_backend_hexagon_context {
     uint64_t n_fused_mm_add_cum  = 0;        // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
 
     // HMX eligibility diagnostic counters (why MUL_MATs fall back to HVX)
-    uint64_t n_hmx_basic_pass      = 0;  // passed basic HMX eligibility
-    uint64_t n_hmx_basic_fail_ne01 = 0;  // ne01_padded %% 32 != 0
-    uint64_t n_hmx_basic_fail_ne00 = 0;  // ne00 %% 32 != 0
-    uint64_t n_hmx_basic_fail_wtype = 0; // weight type not HMX-compatible
-    uint64_t n_hmx_basic_fail_batched = 0; // batched non-F16
-    uint64_t n_hmx_basic_fail_permuted = 0; // nb[0] > nb[1] (permuted)
-    uint64_t n_hmx_basic_fail_small_n = 0; // ne11 <= HTP_MM_HMX_MIN_NROWS
-    uint64_t n_hmx_vtcm_pass         = 0;  // HMX VTCM precompute succeeded
-    uint64_t n_hmx_vtcm_fail         = 0;  // HMX VTCM precompute failed
+    uint64_t n_hmx_basic_pass          = 0;  // passed basic HMX eligibility
+    uint64_t n_hmx_basic_fail_ne01     = 0;  // ne01_padded %% 32 != 0
+    uint64_t n_hmx_basic_fail_ne00     = 0;  // ne00 %% 32 != 0
+    uint64_t n_hmx_basic_fail_wtype    = 0;  // weight type not HMX-compatible
+    uint64_t n_hmx_basic_fail_batched  = 0;  // batched non-F16
+    uint64_t n_hmx_basic_fail_permuted = 0;  // nb[0] > nb[1] (permuted)
+    uint64_t n_hmx_basic_fail_small_n  = 0;  // ne11 <= HTP_MM_HMX_MIN_NROWS
+    uint64_t n_hmx_vtcm_pass           = 0;  // HMX VTCM precompute succeeded
+    uint64_t n_hmx_vtcm_fail           = 0;  // HMX VTCM precompute failed
 
     // Buffer type owned by this context (each device has its own buft)
     struct ggml_backend_buffer_type buffer_type;
@@ -375,7 +372,7 @@ struct ggml_backend_hexagon_context {
         std::vector<ggml_tensor *> tensor_src;
         std::vector<ggml_tensor *> supported_nodes;
         std::vector<hex_op_desc>   hex_ops;
-        std::vector<uint8_t>       is_weight;      // per-tensor boolean, replaces unordered_set count()
+        std::vector<uint8_t>       is_weight;      // per-tensor boolean
     };
     std::unordered_map<uint64_t, cgraph_cache_entry> cgraph_cache;
     uint64_t cgraph_cache_hits   = 0;
@@ -434,6 +431,8 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .enable_opfusion        = 1,
         .fa_select              = 2,
         .dsp_cache_mode         = 4,
+        .dsp_cache_trace_bit0   = 0,
+        .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
@@ -803,6 +802,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         DUMP_PHASE_HIST("graph", ctx->graph_us_hist);
         DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist);
         #undef DUMP_PHASE_HIST
+
         // n_nodes / n_ops are int32_t in ctx, use the i32 variant
         ggmlhexagon_compute_hist_stats_i32(ctx->n_nodes_hist, n, mn, p50, p95, mx);
         GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
@@ -816,7 +816,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
 // =================================================================================================
 //  section-4: configuration class and helper functions
 // =================================================================================================
-//a simple class to load/set running configurations in ggml-hexagon.cfg
+//a simple class to load running configurations in ggml-hexagon.cfg
 class hexagon_appcfg {
 public:
     hexagon_appcfg() {}
@@ -1846,12 +1846,10 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     int hexagon_error  = AEE_SUCCESS;
-    GGMLHEXAGON_LOG_DEBUG("enter %s", __func__);
-    if (0 != ctx->ggmlop_handle) {
-        hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
-        if (AEE_SUCCESS != hexagon_error) {
-            GGMLHEXAGON_LOG_WARN("error 0x%x: failed to close ggmlop dsp handle", hexagon_error);
-        }
+    GGML_ASSERT(0 != ctx->ggmlop_handle);
+    hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
+    if (AEE_SUCCESS != hexagon_error) {
+        GGMLHEXAGON_LOG_ERROR("error 0x%x: failed to close ggmlop dsp handle", hexagon_error);
         ctx->ggmlop_handle = 0;
     }
     ggmlhexagon_deinit_rpcmempool(ctx);
@@ -1859,7 +1857,6 @@ static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     ggmlhexagon_probe_dspinfo(ctx);
     ggmlhexagon_dump_perf_stats(ctx);
     ctx->domain_id             = -1;
-    GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
 }
 
 static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
@@ -1941,7 +1938,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
     // Probe arch and build the versioned dsp skel URI
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
-    GGML_ASSERT(htp_arch != 0);
+    GGML_ASSERT(0 != htp_arch);
 
     snprintf(ggmldsp_uri, sizeof(ggmldsp_uri),
              "file:///libggmldsp-skel-v%u.so?ggml_dsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1",
@@ -2041,8 +2038,6 @@ bail:
 //  section-7: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon)
 // =================================================================================================
 
-// Adapters for the old htp_mm_hvx vtcm_sizes API that was replaced by
-// htp_mm_hvx_vtcm_layout_build in upstream htp/matmul-ops.h.
 static inline size_t htp_mm_hvx_get_vtcm_sizes(
     int kernel_type, int wtype, uint32_t ne10, uint32_t src1_nrows,
     uint32_t n_threads,
@@ -2050,14 +2045,14 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
     uint32_t n_prefetch,
     size_t * vtcm_src0_size, size_t * vtcm_src1_size, size_t * vtcm_dst_size
 ) {
-    struct htp_mm_hvx_vtcm_layout L;
-    htp_mm_hvx_vtcm_layout_build(&L, kernel_type, wtype, ne10, src1_nrows, n_threads,
+    struct htp_mm_hvx_vtcm_layout vtcm_layout;
+    htp_mm_hvx_vtcm_layout_build(&vtcm_layout, kernel_type, wtype, ne10, src1_nrows, n_threads,
                                  dst_row_size, src0_row_size, src1_row_size, n_prefetch,
                                  false, false, false);
-    *vtcm_src0_size = L.src0_bytes;
-    *vtcm_src1_size = L.src1_bytes;
-    *vtcm_dst_size  = L.dst_bytes;
-    return L.total_bytes;
+    *vtcm_src0_size = vtcm_layout.src0_bytes;
+    *vtcm_src1_size = vtcm_layout.src1_bytes;
+    *vtcm_dst_size  = vtcm_layout.dst_bytes;
+    return vtcm_layout.total_bytes;
 }
 
 static inline size_t htp_mm_hvx_id_get_vtcm_sizes(
@@ -2065,14 +2060,14 @@ static inline size_t htp_mm_hvx_id_get_vtcm_sizes(
     size_t src0_row_size, uint32_t n_prefetch,
     size_t * vtcm_src0_size, size_t * vtcm_src1_size, size_t * vtcm_dst_size
 ) {
-    struct htp_mm_hvx_vtcm_layout L;
-    htp_mm_hvx_vtcm_layout_build(&L, 0, wtype, ne10, src1_nrows, n_threads,
+    struct htp_mm_hvx_vtcm_layout vtcm_layout;
+    htp_mm_hvx_vtcm_layout_build(&vtcm_layout, 0, wtype, ne10, src1_nrows, n_threads,
                                  0, src0_row_size, 0, n_prefetch,
                                  true, false, false);
-    *vtcm_src0_size = L.src0_bytes;
-    *vtcm_src1_size = L.src1_bytes;
-    *vtcm_dst_size  = L.dst_bytes;
-    return L.total_bytes;
+    *vtcm_src0_size = vtcm_layout.src0_bytes;
+    *vtcm_src1_size = vtcm_layout.src1_bytes;
+    *vtcm_dst_size  = vtcm_layout.dst_bytes;
+    return vtcm_layout.total_bytes;
 }
 
 // FA kernel selection: 2 = HMX -> HVX -> CPU, 1 = HVX -> CPU, 0 = CPU (unsupported)
@@ -2237,12 +2232,6 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
 // Precompute htp_unary_kernel_params on AP side for unary ops (NORM, RMS_NORM,
 // RMS_NORM_MUL, SCALE, SQR, SQRT, UNARY_*, L2_NORM, TRI). Ported from
 // Qualcomm's ggml-hexagon::ggml_hexagon_precompute_unary_params.
-//
-// After commit fb30ba9a6, the DSP-side op_unary requires these fields to be
-// filled by the host: n_threads, col_tile, vtcm_*_size_per_thread,
-// src/dst_row_size_aligned, fastdiv helpers, etc. JZ previously did not call
-// this, leaving kparams zeroed - op_unary then computed 0-sized VTCM
-// allocations and n_threads=0, garbling the output.
 static void ggml_hexagon_precompute_unary_params(
     const ggml_backend_hexagon_context * ctx,
     uint32_t op,
@@ -2377,15 +2366,17 @@ static bool ggml_hexagon_mm_is_hmx_eligible_shared(
 // Returns true when src0/src1 shapes/types are suitable for HMX.
 //
 // NOTE: this gate only controls QKV/FFN *fusion eligibility*, NOT the actual
-// HMX dispatch. HMX dispatch is decided independently on the DSP side by
-// build_mm_kernel_params() in entry.c (which tries HMX first, then falls
-// back to HVX). mm_is_hmx_eligible is consulted only by is_mergeable_mul_mat
+// HMX dispatch. HMX dispatch is decided independently by
+// ggml_hexagon_precompute_mm_params (HMX first, then HVX fallback); the DSP
+// side consumes the precomputed kernel_type, with build_mm_kernel_params()
+// in entry.c as fallback when the AP side left kernel_type == 0.
+// mm_is_hmx_eligible is consulted only by is_mergeable_mul_mat
 // to avoid merging MUL_MATs that would otherwise benefit from HMX.
 //
 // For a single MUL_MAT that is NOT part of a QKV/FFN pattern:
 //   - fusion does not apply regardless of this gate
-//   - dispatch still goes through execute_op -> op_matmul, and may use HMX
-//     if build_mm_kernel_params on DSP side selects an HMX kernel
+//   - dispatch still goes through execute_op -> op_matmul, using the kernel
+//     type precomputed on the AP side (HMX or HVX)
 //
 // For MUL_MATs that ARE part of a QKV/FFN pattern:
 //   - if this gate returns true:  fusion is skipped, each MUL_MAT goes through
@@ -2668,7 +2659,11 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     struct htp_mm_kernel_params * kparams
 ) {
     const int aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
-    const bool pipeline = is_matmul_id ? false : htp_mm_hmx_pipeline(ne11);
+    // Force the pipelined path for plain MUL_MAT (MUL_MAT_ID keeps the
+    // non-pipelined setting, matching upstream): the synchronous (m<=32)
+    // branch yields corrupted, non-deterministic output in this integration
+    // (observed with ubatch<=32); upstream's own backend is unaffected.
+    const bool pipeline = is_matmul_id ? false : true;
     const int n_threads = (int) ctx->n_threads;
     const int ne10 = src1->ne[0];
 
@@ -2747,12 +2742,8 @@ static void ggml_hexagon_precompute_hvx_mm_params(
 ) {
     kparams->n_hmx = 0;
 
-    const bool is_quant = (wtype != GGML_TYPE_F16 && wtype != GGML_TYPE_F32);
-    const int src1_nrows = ne11 * ne12 * ne13;
-
-    // opt_mm_select equivalent: algotype 29 means HMX-enabled (select >= 3),
-    // algotype 29/32 both mean tiled HVX enabled (select >= 2)
-    const bool opt_mm_tiled = true;
+    const bool is_quant     = (wtype != GGML_TYPE_F16 && wtype != GGML_TYPE_F32);
+    const int src1_nrows    = ne11 * ne12 * ne13;
 
     if (is_quant) {
         // Quantized HVX
@@ -2796,8 +2787,7 @@ static void ggml_hexagon_precompute_hvx_mm_params(
             kparams->vtcm_src1_size = (int32_t) vtcm_src1_size;
             kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
         } else {
-            bool try_tiled = (k_align && opt_mm_tiled);
-            if (try_tiled) {
+            if (k_align) {
                 kparams->src1_row_size = (int32_t)((wtype == GGML_TYPE_Q4_1)
                     ? htp_mm_q8_1_tiled_row_size(ne10)
                     : htp_mm_q8_0_tiled_row_size(ne10));
@@ -3261,7 +3251,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                 return false;
             }
             if (ggml_nrows(src1) > 1024) {
-                //GGMLHEXAGON_LOG_WARN("no huge batches");
+                GGMLHEXAGON_LOG_WARN("no huge batches");
                 return false;  // no huge batches (for now)
             }
             break;
@@ -4732,7 +4722,7 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
 
-// ION-based op-batch — packs all ops into ION shared memory,
+// ION-based op-batch - packs all ops into ION shared memory,
 // passes only (offset, size) via FastRPC as doorbell.
 // avoids FastRPC scatter-gather limits entirely.
 static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
@@ -6468,9 +6458,8 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 return nullptr;
             }
 
-            ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
-
             int ndev = g_hexagon_appcfg.ndev;
+            ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
             GGMLHEXAGON_LOG_VERBOSE("registering %d Hexagon device(s), ndev=%d", ndev, g_hexagon_appcfg.ndev);
 
             for (int i = 0; i < ndev; i++) {
@@ -6493,15 +6482,9 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 // Constructor performs full DSP init (ggmlhexagon_init_dsp) and
                 // initializes buffer_type with context = this, device = dev.
                 auto * hctx = new ggml_backend_hexagon_context(i, dev);
+                GGML_ASSERT(0 != hctx->ggmlop_handle);
                 dev->context = hctx;
                 g_hexagon_mgr[i] = hctx;
-
-                if (0 == hctx->ggmlop_handle) {
-                    GGMLHEXAGON_LOG_WARN("init hexagon dsp failure for device %d", i);
-                    // constructor already logged the error; keep the device registered
-                    // so get_memory/get_buffer_type do not crash, but return nullptr
-                }
-
                 ctx->devices.push_back(dev);
             }
 
@@ -6561,8 +6544,7 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
 
     ggml_backend_hexagon_interface.graph_optimize =
         g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
-    GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s",
-                           g_hexagon_appcfg.enable_graph_optimize ? "enabled" : "disabled");
+    GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s", g_hexagon_appcfg.enable_graph_optimize ? "enabled" : "disabled");
     // Context (and DSP session) was already created by ggml_backend_hexagon_reg().
     // Just attach the backend handle to the existing context.
     ggml_backend_hexagon_context * ctx = g_hexagon_mgr[device];

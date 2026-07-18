@@ -826,7 +826,7 @@ function run_ubatchtest()
     #   model_alias    default: gemma4
     #   ubatch_sizes   default: 32,64,128,512,1024
     local model_alias="gemma4"
-    local ubatch_sizes=(32 64 128 512 1024)
+    local ubatch_sizes=(8 16 22 32 64 128 512 1024)
     local save_params="${running_params}"
 
     if [ $# -ge 1 ] && [ "$1" != "help" ] && [ "$1" != "-h" ]; then
