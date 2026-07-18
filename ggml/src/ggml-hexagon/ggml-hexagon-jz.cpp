@@ -3489,7 +3489,7 @@ static bool hexagon_validate_set_rows(ggml_backend_hexagon_context *ctx, const g
     GGML_UNUSED(ctx);
     const ggml_tensor *src0 = op->src[0];
     const ggml_tensor *src1 = op->src[1];
-    if (!src1 || src1->type != GGML_TYPE_I32)
+    if (!src1 || (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64))
         return false;
     if (src0->type != GGML_TYPE_F32)
         return false;
@@ -4680,7 +4680,8 @@ static bool ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const 
     }
     ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
     ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
-    return buft_ctx == dev_ctx;
+    // same logic as ggml_backend_hexagon_device_supports_buft
+    return buft_ctx->device == dev_ctx->device;
 }
 
 // All srcs and the dst of the op must be mapped to the same hexagon session
