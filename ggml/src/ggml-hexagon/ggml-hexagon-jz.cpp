@@ -3199,12 +3199,9 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                 return false;
             }
 
-            if (ggml_nrows(src0) > 16 * 1024) {
-                return false;  // typically the lm-head which would be too large for VTCM
-            }
-
-            if (ggml_nrows(src1) > 1024 || src1->ne[2] != 1 || src1->ne[3] != 1) {
-                return false;  // no huge batches or broadcasting (for now)
+            // hardcoded limit to refuse the lm-head for now
+            if (src0->ne[1] > 32768) {
+                return false;
             }
 
             if (src1->ne[2] != 1 || src1->ne[3] != 1) {
@@ -3233,9 +3230,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                 GGMLHEXAGON_LOG_WARN("src1 broadcasting not supported\n");
                 return false;
             }
-            if (ggml_nrows(src1) > 1024) {
-                //return false;
-            }
             break;
 
         case GGML_TYPE_F32:
@@ -3249,10 +3243,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
             if (src1->ne[2] < src0->ne[2] || src1->ne[3] < src0->ne[3]) {
                 GGMLHEXAGON_LOG_WARN("src1 broadcasting not supported\n");
                 return false;
-            }
-            if (ggml_nrows(src1) > 1024) {
-                GGMLHEXAGON_LOG_WARN("no huge batches");
-                return false;  // no huge batches (for now)
             }
             break;
 

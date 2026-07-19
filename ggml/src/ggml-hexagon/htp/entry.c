@@ -61,7 +61,14 @@
  * allow skipping invalidation when the prior dst fits within a single L2
  * cacheline. Anything larger may have been produced through async DMA/HMX
  * paths and risks stale scalar L2 reads. The op-type whitelist provides an
- * extra safety net. */
+ * extra safety net.
+ *
+ * Note: experiments with 8KB and 64KB limits (2026-07-18) caused garbled
+ * output and immediate [end of text] emission. The deferred-flush pattern
+ * (bit 2) is unsafe to combine with bit 1 on any meaningful range, because
+ * L2 can evict dirty dst data before the deferred flush, causing stale
+ * DRAM reads. The single-cacheline limit is the only size that survives
+ * the L2 churn from concurrent weight reads. */
 #define PRIOR_DST_MAX_LEN               DSP_CACHE_LINE_SIZE
 
 #ifndef NDEBUG
@@ -192,6 +199,14 @@ static dsp_dst_range_t g_prior_dst_ranges[DSP_OPT_MAX_BATCH_DSTS];
 
 static int             g_bulk_flush_count;
 static dsp_dst_range_t g_bulk_flush_ranges[DSP_OPT_MAX_BATCH_DSTS];
+
+// Per-op dst staging buffers (moved out of the per-op stack frame).
+// Hexagon hardware stack is shallow; ~500 bytes of stack alloc per op across
+// 30+ ops/batch * 256 tokens adds up. Static storage removes the per-op
+// frame setup/teardown. The DSP batch path is single-threaded, so static
+// state is safe.
+static dsptensor        g_dst_dt_buf [HTP_OP_MAX_OUTPUTS];
+static const dsptensor * g_dst_dt_ptrs[HTP_OP_MAX_OUTPUTS];
 
 static struct dsp_context * g_dsp_ctx = NULL;
 
@@ -367,6 +382,30 @@ static void ggml_dsp_cache_flush_range(void * addr, size_t size) {
         Q6_dccleaninva_A(p);
     }
     __asm__ __volatile__("syncht\n");
+}
+
+// Flush range WITHOUT the trailing syncht. Used by bulk_flush_all to issue a
+// single syncht after processing all merged regions, instead of one per
+// region. Caller must issue syncht before any read of the flushed data.
+static inline void ggml_dsp_cache_flush_range_nosync(void * addr, size_t size) {
+    if (!addr || size == 0) return;
+    char * p = (char *)addr;
+    char * end = p + size;
+    const size_t line_size = DSP_CACHE_LINE_SIZE;
+    p = (char *)((uintptr_t)p & ~(line_size - 1));
+    for (; p + line_size * 8 <= end; p += line_size * 8) {
+        Q6_dccleaninva_A(p + line_size * 0);
+        Q6_dccleaninva_A(p + line_size * 1);
+        Q6_dccleaninva_A(p + line_size * 2);
+        Q6_dccleaninva_A(p + line_size * 3);
+        Q6_dccleaninva_A(p + line_size * 4);
+        Q6_dccleaninva_A(p + line_size * 5);
+        Q6_dccleaninva_A(p + line_size * 6);
+        Q6_dccleaninva_A(p + line_size * 7);
+    }
+    for (; p < end; p += line_size) {
+        Q6_dccleaninva_A(p);
+    }
 }
 
 static void ggml_dsp_cache_inval_range(void * addr, size_t size) {
@@ -566,7 +605,13 @@ static inline void bulk_flush_sort(void) {
 
 /* Walk sorted list, merge adjacent/overlapping ranges, flush each merged
  * region once. Overlap defined as next_start <= cur_end (1B threshold:
- * touching ranges merge). Flushes in sorted order to preserve ION ordering. */
+ * touching ranges merge). Flushes in sorted order to preserve ION ordering.
+ *
+ * Uses ggml_dsp_cache_flush_range_nosync() to avoid one syncht per region;
+ * a single syncht is issued at the end so AP reads of the flushed tensors
+ * see fresh DRAM. This batch-end consolidation is the only safe place to
+ * merge syncht barriers; per-op synchts are still required for the
+ * bit-2-disabled fallback path (see ggml_dsp_execute_batch). */
 static inline void bulk_flush_all(void) {
     if (g_bulk_flush_count == 0) return;
     bulk_flush_sort();
@@ -581,13 +626,16 @@ static inline void bulk_flush_all(void) {
             if (next_end > cur_end) cur_end = next_end;
         } else {
             /* Gap: flush [cur_base, cur_end) and start new region */
-            ggml_dsp_cache_flush_range(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+            ggml_dsp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
             cur_base = next_base;
             cur_end  = next_end;
         }
         i++;
     }
-    ggml_dsp_cache_flush_range(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+    ggml_dsp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+    /* Single syncht covers all merged-region flushes above. AP reads
+     * following this point see consistent DRAM. */
+    __asm__ __volatile__("syncht\n");
 }
 
 
@@ -2053,14 +2101,15 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 
         /* dsts: copy from pre-converted, then override op_params with
          * per-op params (node->op_params is correct; dst tensor's op_params
-         * can be zero or stale for in-place reuse ops like SCALE). */
-        dsptensor dst_dt_buf[HTP_OP_MAX_OUTPUTS];
-        const dsptensor * dst_dt_ptrs[HTP_OP_MAX_OUTPUTS] = {NULL};
+         * can be zero or stale for in-place reuse ops like SCALE).
+         * Uses file-scope static buffers (see g_dst_dt_buf/g_dst_dt_ptrs)
+         * to avoid per-op stack frame pressure. */
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
+            g_dst_dt_ptrs[k] = NULL;
             if (op->dst_idx[k] < 0) continue;
-            dst_dt_buf[k] = g_pre_dt[op->dst_idx[k]];
-            memcpy(dst_dt_buf[k].op_params, op->params, sizeof(dst_dt_buf[k].op_params));
-            dst_dt_ptrs[k] = &dst_dt_buf[k];
+            g_dst_dt_buf[k] = g_pre_dt[op->dst_idx[k]];
+            memcpy(g_dst_dt_buf[k].op_params, op->params, sizeof(g_dst_dt_buf[k].op_params));
+            g_dst_dt_ptrs[k] = &g_dst_dt_buf[k];
         }
 
         /* Cache maintenance for non-coherent ION memory.
@@ -2087,7 +2136,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             if (src0_dt->data && src0_dt->data_len >= 16) {
                 const float * fv = (const float *)src0_dt->data;
                 float eps_f;
-                memcpy(&eps_f, dst_dt_buf[0].op_params, sizeof(float));
+                memcpy(&eps_f, g_dst_dt_buf[0].op_params, sizeof(float));
                 GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u src0 POST-INVAL off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f] eps=%f ne=[%d,%d,%d,%d]",
                                  i, tens[op->src_idx[0]].data_offset, src0_dt->data, fv[0], fv[1], fv[2], fv[3], eps_f,
                                  (int)src0_dt->ne[0], (int)src0_dt->ne[1], (int)src0_dt->ne[2], (int)src0_dt->ne[3]);
@@ -2137,10 +2186,10 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         if (htp_op == HTP_OP_MUL_MAT && src0_dt->type == 0 /*F32*/ &&
             src0_dt->data && src0_dt->data_len >= (size_t)(17 * 256) &&
             src1_dt && src1_dt->data && src1_dt->data_len >= 16 &&
-            dst_dt_ptrs[0] && dst_dt_buf[0].data && dst_dt_buf[0].data_len >= (size_t)(17 * 4)) {
+            g_dst_dt_ptrs[0] && g_dst_dt_buf[0].data && g_dst_dt_buf[0].data_len >= (size_t)(17 * 4)) {
             const float * s0  = (const float *) src0_dt->data;
             const float * s1  = (const float *) src1_dt->data;
-            const float * dp  = (const float *) dst_dt_buf[0].data;
+            const float * dp  = (const float *) g_dst_dt_buf[0].data;
             const uint32_t s0_row16_off = src0_dt->nb[1] * 16 / 4;
             GGMLHEXAGON_LOG_ERROR("[DSP-MM-PRE] op%u kp_type=%d s0r0=[%.4f,%.4f,%.4f,%.4f] s0r16=[%.4f,%.4f,%.4f,%.4f] s1r0=[%.4f,%.4f,%.4f,%.4f] dst16=[%.4f,%.4f,%.4f,%.4f] nb=[%u,%u,%u,%u] ne=[%u,%u,%u,%u]",
                 i, octx.kernel_params[0],
@@ -2173,8 +2222,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 #if GGMLHEXAGON_DEBUG
         /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op. */
         if (htp_op == HTP_OP_MUL_MAT && src0_dt->type == 0 /*F32*/ &&
-            dst_dt_ptrs[0] && dst_dt_buf[0].data && dst_dt_buf[0].data_len >= (size_t)(20 * 4)) {
-            const float * dp = (const float *) dst_dt_buf[0].data;
+            g_dst_dt_ptrs[0] && g_dst_dt_buf[0].data && g_dst_dt_buf[0].data_len >= (size_t)(20 * 4)) {
+            const float * dp = (const float *) g_dst_dt_buf[0].data;
             GGMLHEXAGON_LOG_ERROR("[DSP-MM-POST] op%u d[0..3]=[%.4f,%.4f,%.4f,%.4f] d[16..19]=[%.4f,%.4f,%.4f,%.4f]",
                 i, dp[0], dp[1], dp[2], dp[3], dp[16], dp[17], dp[18], dp[19]);
         }
@@ -2205,17 +2254,17 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
          * Also mark dst tensors as dirty so they get re-invalidated
          * when used as src later in the same batch. */
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
-            if (!dst_dt_ptrs[k]) continue;
+            if (!g_dst_dt_ptrs[k]) continue;
             if (g_dsp_ctx->dsp_cache_mode & 0x4) {
                 /* prior_dst ranges are only consumed by bit 1; avoid dead
                  * work when bit 2 is enabled without bit 1. */
                 if (g_dsp_ctx->dsp_cache_mode & 0x2) {
-                    prior_dst_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len,
+                    prior_dst_add(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len,
                                   op->dst_idx[k], htp_op);
                 }
-                bulk_flush_add(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                bulk_flush_add(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len);
             } else {
-                ggml_dsp_cache_flush_range(dst_dt_buf[k].data, dst_dt_buf[k].data_len);
+                ggml_dsp_cache_flush_range(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len);
             }
             /* Mark dst tensor as dirty: next time it's used as src,
              * it must be re-invalidated. */
@@ -2225,10 +2274,10 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from each dst output */
             for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
-                if (dst_dt_ptrs[k] && dst_dt_buf[k].data && dst_dt_buf[k].data_len >= 16) {
-                    const float * fv = (const float *)dst_dt_buf[k].data;
+                if (g_dst_dt_ptrs[k] && g_dst_dt_buf[k].data && g_dst_dt_buf[k].data_len >= 16) {
+                    const float * fv = (const float *)g_dst_dt_buf[k].data;
                     GGMLHEXAGON_LOG_INFO("[DSP-DIAG] op%u dst[%d] off=0x%x ptr=%p f32=[%.4f, %.4f, %.4f, %.4f]",
-                                     i, k, tens[op->dst_idx[k]].data_offset, dst_dt_buf[k].data, fv[0], fv[1], fv[2], fv[3]);
+                                     i, k, tens[op->dst_idx[k]].data_offset, g_dst_dt_buf[k].data, fv[0], fv[1], fv[2], fv[3]);
                 }
             }
         }
