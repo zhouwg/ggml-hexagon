@@ -2313,7 +2313,8 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
     const int ne00  = src0->ne[0];
     const int ne11  = src1->ne[1];
     const int ne12  = src1->ne[2];
-    const int wtype = src0->type;
+    // BF16 weights hold F16 bytes in the repack buffer (see set_tensor)
+    const int wtype = (src0->type == GGML_TYPE_BF16) ? GGML_TYPE_F16 : src0->type;
 
     if (ne01_padded % 32 != 0) {
         return false;
@@ -2963,7 +2964,9 @@ static void ggml_hexagon_precompute_mm_params(
     const int ne12 = src1->ne[2];
     const int ne13 = src1->ne[3];
 
-    const int wtype = src0->type;
+    // BF16 weights hold F16 bytes in the repack buffer (see set_tensor);
+    // select kernels and VTCM layout exactly as for F16
+    const int wtype = (src0->type == GGML_TYPE_BF16) ? GGML_TYPE_F16 : src0->type;
     const bool is_repack = ggml_hexagon_is_repack_type((ggml_type) wtype);
     const int ne00_padded = is_repack ? (int) hex_round_up((uint32_t) ne00, 32) : ne00;
     const int ne01_padded = is_repack ? (int) hex_round_up((uint32_t) ne01, 32) : ne01;
@@ -3221,6 +3224,13 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
             break;
         }
 
+        case GGML_TYPE_BF16:
+            // BF16 weights are converted to F16 bytes in the repack buffer at
+            // load time; only offload when the tensor lives there.
+            if (!src0->buffer || !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
+                return false;
+            }
+            // fall through
         case GGML_TYPE_F16:
             if (src0->nb[1] < src0->nb[0]) {
                 GGMLHEXAGON_LOG_WARN("permuted F16 src0 not supported\n");
@@ -4314,6 +4324,28 @@ static void repack_tiled_mxfp4_to_buf(void * dst_data, const ggml_tensor * t, si
     GGML_UNUSED(size);
 }
 
+// BF16 weights are stored as F16 bytes in the repack buffer so the DSP can
+// reuse the F16 matmul kernels. Conversion is exact for values inside the
+// F16 exponent range, which always holds for trained projection weights.
+static void repack_bf16_to_f16(const ggml_tensor * t, const void * data) {
+    const int64_t n = ggml_nelements(t);
+    const ggml_bf16_t * src = (const ggml_bf16_t *) data;
+    ggml_fp16_t *       dst = (ggml_fp16_t *) t->data;
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = ggml_fp32_to_fp16(ggml_bf16_to_fp32(src[i]));
+    }
+}
+
+// Inverse of repack_bf16_to_f16, used by get_tensor for host read-back.
+static void repack_f16_to_bf16(const ggml_tensor * t, void * data, size_t size) {
+    const int64_t n = (int64_t)(size / sizeof(ggml_bf16_t));
+    const ggml_fp16_t * src = (const ggml_fp16_t *) t->data;
+    ggml_bf16_t *       dst = (ggml_bf16_t *) data;
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = ggml_fp32_to_bf16(ggml_fp16_to_fp32(src[i]));
+    }
+}
+
 static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                ggml_tensor * tensor, const void * data,
                                                size_t offset, size_t size) {
@@ -4352,6 +4384,11 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                 GGML_ASSERT(offset == 0);
                 GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
                 repack_mxfp4_tiled_to_buf(tensor, data, tensor->data);
+                break;
+            case GGML_TYPE_BF16:
+                GGML_ASSERT(offset == 0);
+                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+                repack_bf16_to_f16(tensor, data);
                 break;
             default:
                 memcpy((char *)tensor->data + offset, data, size);
@@ -4420,6 +4457,9 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                     return;
                 case GGML_TYPE_MXFP4:
                     repack_tiled_mxfp4_to_buf(data, tensor, size);
+                    return;
+                case GGML_TYPE_BF16:
+                    repack_f16_to_bf16(tensor, data, size);
                     return;
                 default:
                     break;
@@ -5534,7 +5574,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ggml_tensor * t = tensor_src[i];
         hex_tensor_desc * td = &tens_out[i];
 
-        td->type = (int32_t)t->type;
+        // BF16 weights hold F16 bytes in the repack buffer (see set_tensor);
+        // the DSP only knows the F16 kernels
+        td->type = (t->type == GGML_TYPE_BF16) ? (int32_t)GGML_TYPE_F16 : (int32_t)t->type;
         td->ne[0] = (int32_t)t->ne[0]; td->ne[1] = (int32_t)t->ne[1];
         td->ne[2] = (int32_t)t->ne[2]; td->ne[3] = (int32_t)t->ne[3];
         td->nb[0] = (int32_t)t->nb[0]; td->nb[1] = (int32_t)t->nb[1];
