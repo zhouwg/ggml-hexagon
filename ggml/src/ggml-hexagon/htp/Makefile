@@ -2,7 +2,7 @@
 #
 #following vars already defined in CMakeLists.txt
 #HTP_ARCH_VERSION=v79
-#DEBUG_FLAG=-DNDEBUG -Wall
+DEBUG_FLAG=-DNDEBUG -Wall
 
 HEXAGON_COMPUTE=compute${HTP_ARCH_VERSION}
 HEXAGON_CC=${HEXAGON_TOOLS_PATH}/Tools/bin/hexagon-clang

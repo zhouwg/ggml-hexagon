@@ -79,13 +79,12 @@
 
 // Per-op timing profiler: cumulative us per HTP op kind, indexed by octx->op.
 // Bumped by execute_op() in entry.c, dumped via FARF every N batches inside
-// ggml_dsp_execute_batch(). Off by default; enable with -DHEX_OP_PROF=1
-// to avoid disturbing normal log levels.
-// TEMP: force-enable for TG breakdown analysis (normally tied to GGMLHEXAGON_DEBUG)
+// ggml_dsp_execute_batch(). Tied to GGMLHEXAGON_DEBUG: release builds (NDEBUG)
+// compile it out entirely.
 #if GGMLHEXAGON_DEBUG
 #define HEX_OP_PROF                     1
 #else
-#define HEX_OP_PROF                     1
+#define HEX_OP_PROF                     0
 #endif
 
 #if GGMLHEXAGON_DEBUG
@@ -155,6 +154,9 @@ typedef struct {
     uint32_t tensor_idx;  /* only used by prior_dst (bit 1) */
 } dsp_dst_range_t;
 
+int64_t ggml_time_us(void); /* defined below */
+static void ggml_dsp_cache_inval_range(void * addr, size_t size); /* defined below */
+
 #if HEX_OP_PROF
 static uint64_t g_op_prof_dur_us[HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_count  [HEX_OP_PROF_BUCKETS];
@@ -169,8 +171,6 @@ static uint32_t g_op_prof_batch_count;
 static uint64_t g_op_prof_batch_wall_us; /* cumulative whole-batch wall time, vs per-op sum */
 
 /* Non-op section timers: decompose batch-wall - op-sum. All cumulative. */
-int64_t ggml_time_us(void); /* defined below */
-static void ggml_dsp_cache_inval_range(void * addr, size_t size); /* defined below */
 static uint64_t g_nonop_hdr_inval_us;    /* batch descriptor dcinva */
 static uint64_t g_nonop_preconvert_us;   /* hex_tensor_to_dsptensor/htp_tensor loop */
 static uint64_t g_nonop_w_inval_us;      /* src dcinva, flags&0x2 (weight) path */
@@ -193,6 +193,8 @@ static inline void prof_cache_inval_range(void * p, size_t len, int is_weight) {
         g_nonop_a_inval_bytes += len;
     }
 }
+#else
+#define prof_cache_inval_range(p, len, is_weight) ggml_dsp_cache_inval_range((p), (len))
 #endif // HEX_OP_PROF
 
 // Per-weight-region first-touch invalidate tracking.
@@ -252,10 +254,8 @@ int64_t ggml_time_us(void) {
     return (uint64_t)(count) * 10ull / 192ull;
 }
 
+#if GGMLHEXAGON_DEBUG
 static void ggml_log_internal(int level, const char *file, const char *func, int line, const char *format, ...) {
-#if !GGMLHEXAGON_DEBUG
-    return;
-#endif
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
     va_list args;
     va_start(args, format);
@@ -268,6 +268,7 @@ static void ggml_log_internal(int level, const char *file, const char *func, int
     }
     va_end(args);
 }
+#endif // GGMLHEXAGON_DEBUG
 
 static void ggml_log_always(int level, const char *file, const char *func, int line, const char *format, ...) {
     if (!g_dsp_ctx->dump_diag_info) {
@@ -2291,25 +2292,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
 #endif
 
-        // TEMP DIAG: one-shot per-op matmul timing for a single decode batch
-        const int diag_mm = (g_op_prof_batch_count == 10) &&
-                            (htp_op == HTP_OP_MUL_MAT || htp_op == HTP_OP_MUL_MAT_QKV ||
-                             htp_op == HTP_OP_MUL_MAT_FFN);
-        const int64_t diag_t0 = diag_mm ? ggml_time_us() : 0;
-
         int op_ret = execute_op(&octx);
-
-        if (diag_mm) {
-            const int64_t diag_dt = ggml_time_us() - diag_t0;
-            const int diag_wlen = (int) src0_dt->data_len
-                                + (src2_dt ? (int) src2_dt->data_len : 0)
-                                + (src3_dt ? (int) src3_dt->data_len : 0);
-            FARF(ERROR, "[DIAG-MM] op%u htp=%d kt=%d src0=[%d,%d] type=%d wlen=%d n1=%d dt=%lld us",
-                                  i, htp_op, octx.kernel_params[0],
-                                  src0_dt->ne[0], src0_dt->ne[1],
-                                  src0_dt->type, diag_wlen,
-                                  src1_dt ? src1_dt->ne[1] : -1, (long long) diag_dt);
-        }
 
 #if GGMLHEXAGON_DEBUG
         /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op. */
