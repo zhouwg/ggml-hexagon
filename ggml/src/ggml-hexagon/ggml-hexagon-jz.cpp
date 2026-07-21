@@ -393,12 +393,16 @@ struct hexagon_appcfg_t {
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int dsp_cache_mode;         // DSP-side entry.c cache optimization bitmask, pushed to DSP at init via
-                                //   execute_batch(0xFFFC) special mode (no IDL change). All three bits
+                                //   execute_batch(0xFFFC) special mode (no IDL change). All four bits
                                 //   are wired into ggml_dsp_execute_batch(); dsp_cache_mode=0 is
                                 //   behaviorally identical to baseline 29c1cf196.
                                 //   bit 0 (0x1): first-touch weight bitmap
                                 //   bit 1 (0x2): skip dcinva for prior dst
                                 //   bit 2 (0x4): bulk dst flush at batch end
+                                //   bit 3 (0x8): selective bulk flush - skip batch-end flush for
+                                //     dsts still consumed by a later op in the same batch (pure
+                                //     intermediates). Requires bit 2. Mirrored dsts (flags&0x1)
+                                //     and final outputs always flush.
     int dsp_cache_trace_bit0;   // DSP-side bit 0 (first-touch weight) trace enable. 0=off (production),
                                 //   1=emit one [DSP-CACHE-TRACE-BIT0] log line per bit 0 decision
                                 //   (SKIP or INVAL) with op/src/ptr/len. Pushed to DSP at init via
@@ -1993,7 +1997,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // Push DSP-side cache optimization bitmask via execute_batch(0xFFFC)
         // special mode (no IDL change). batch_offset = packed payload, batch_size = mode tag.
         // Payload bit layout (low bits are dsp_cache_mode):
-        //   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
+        //   bits  0..3 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush / selective bulk flush)
         //   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
         //   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
         // See the dsp_cache_mode and dsp_cache_trace_bit{0,1} comments in hexagon_appcfg_t.
@@ -2003,7 +2007,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // mempool registered first it returns AEE_EBADPARM (0x8000040e) and
         // the bitmask is silently dropped.
         {
-            const uint32_t mode_bits    = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0x7u;
+            const uint32_t mode_bits    = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0xFu;
             const uint32_t trace_bit0   = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
             const uint32_t trace_bit1   = (g_hexagon_appcfg.dsp_cache_trace_bit1 ? 0x20000u : 0u);
             const uint32_t payload      = trace_bit1 | trace_bit0 | mode_bits;

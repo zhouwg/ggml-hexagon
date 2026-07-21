@@ -214,6 +214,11 @@ static uint32_t g_weight_inval_count = 0;
 // set when a tensor is written as dst (dirtied).
 static uint8_t g_batch_tensor_needs_inval[DSP_OPT_MAX_TENSORS];
 
+/* bit 3 (0x8): last consumer op index per tensor (0 = never used as src).
+ * Built once at batch start; consulted by the dst tracker to skip the
+ * batch-end flush for intermediates that a later op still consumes. */
+static uint32_t g_tensor_last_use_op[DSP_OPT_MAX_TENSORS];
+
 // Pre-converted tensor descriptors: converted once at batch start instead
 // of per-op in the loop. Saves hex_tensor_to_dsptensor() calls for srcs.
 static dsptensor g_pre_dt[DSP_OPT_MAX_TENSORS];
@@ -2035,7 +2040,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const char * base = (const char *)g_dsp_ctx->ion_dsp_base;
 
     /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
-     *   bits  0..2 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush)
+     *   bits  0..3 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush / selective bulk flush)
      *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
      *   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
@@ -2048,16 +2053,22 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      *               per-op dst tracker populates the prior_dst list).
      *   bit 2 (0x4): bulk dst flush at batch end  - per-op flush is suppressed;
      *               dst ranges are collected/sort/merged/flushed once after
-     *               the per-op loop. */
+     *               the per-op loop.
+     *   bit 3 (0x8): selective bulk flush         - skip batch-end flush for
+     *               dsts that a later op in this batch still consumes (pure
+     *               intermediates). Only effective when bit 2 is also on.
+     *               Mirrored dsts (flags&0x1) and dsts with no later consumer
+     *               (final outputs, KV write views) are always flushed. */
     if (batch_size == 0xFFFC) {
-        g_dsp_ctx->dsp_cache_mode = batch_offset & 0x7u;
+        g_dsp_ctx->dsp_cache_mode = batch_offset & 0xFu;
         g_dsp_ctx->dsp_cache_trace_bit0 = (batch_offset >> 16) & 0x1u;
         g_dsp_ctx->dsp_cache_trace_bit1 = (batch_offset >> 17) & 0x1u;
-        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d) dsp_cache_trace_bit0=%d dsp_cache_trace_bit1=%d",
+        GGMLHEXAGON_LOG_INFO("[DSP-CACHE-MODE] dsp_cache_mode=0x%x (bit0=first-touch-weight=%d bit1=skip-prior-dst=%d bit2=bulk-dst-flush=%d bit3=selective-bulk-flush=%d) dsp_cache_trace_bit0=%d dsp_cache_trace_bit1=%d",
                              g_dsp_ctx->dsp_cache_mode,
                              (g_dsp_ctx->dsp_cache_mode & 0x1) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x2) ? 1 : 0,
                              (g_dsp_ctx->dsp_cache_mode & 0x4) ? 1 : 0,
+                             (g_dsp_ctx->dsp_cache_mode & 0x8) ? 1 : 0,
                              g_dsp_ctx->dsp_cache_trace_bit0,
                              g_dsp_ctx->dsp_cache_trace_bit1);
         return AEE_SUCCESS;
@@ -2142,6 +2153,21 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * "needs invalidation" (1). Set to 0 when invalidated; set back
      * to 1 when written as dst (dirtied). */
     memset(g_batch_tensor_needs_inval, 1, hdr->n_tensors);
+
+    /* bit 3: record each tensor's last consumer op index so the dst
+     * tracker can tell pure intermediates (last_use > producer op)
+     * from final outputs (never consumed later). */
+    if (g_dsp_ctx->dsp_cache_mode & 0x8) {
+        memset(g_tensor_last_use_op, 0, hdr->n_tensors * sizeof(g_tensor_last_use_op[0]));
+        for (uint32_t oi = 0; oi < hdr->n_ops; oi++) {
+            for (int s = 0; s < HTP_OP_MAX_INPUTS; s++) {
+                const int32_t si = ops[oi].src_idx[s];
+                if (si >= 0 && si < (int32_t)hdr->n_tensors) {
+                    g_tensor_last_use_op[si] = oi;
+                }
+            }
+        }
+    }
 
 #if HEX_OP_PROF
     const int64_t prof_q_t0 = ggml_time_us();
@@ -2340,7 +2366,19 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                     prior_dst_add(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len,
                                   op->dst_idx[k], htp_op);
                 }
-                bulk_flush_add(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len);
+                /* bit 3: pure intermediates are read back from DSP L2 by
+                 * their in-batch consumers, so their batch-end flush is
+                 * dead traffic. Mirrored dsts (flags&0x1) are read by AP
+                 * after the batch and must always be flushed. */
+                const int32_t di = op->dst_idx[k];
+                const bool skip_flush =
+                    (g_dsp_ctx->dsp_cache_mode & 0x8) &&
+                    di >= 0 && di < (int32_t)hdr->n_tensors &&
+                    g_tensor_last_use_op[di] > i &&
+                    !(g_dst_dt_buf[k].flags & 0x1);
+                if (!skip_flush) {
+                    bulk_flush_add(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len);
+                }
             } else {
                 ggml_dsp_cache_flush_range(g_dst_dt_buf[k].data, g_dst_dt_buf[k].data_len);
             }
