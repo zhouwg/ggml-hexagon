@@ -115,7 +115,7 @@
                                          (op_i), (int)(src_idx), (dt_ptr)->data, (dt_ptr)->data_len, g_dsp_ctx->dsp_cache_mode); \
                 }                                                                       \
             } else {                                                                   \
-                ggml_dsp_cache_inval_range((dt_ptr)->data, (dt_ptr)->data_len);        \
+                prof_cache_inval_range((dt_ptr)->data, (dt_ptr)->data_len, 1);         \
                 if (g_dsp_ctx->dsp_cache_trace_bit0) {                                \
                     GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT0] op=%u src=%d INVAL ptr=%p len=0x%x (cache_mode=0x%x)", \
                                          (op_i), (int)(src_idx), (dt_ptr)->data, (dt_ptr)->data_len, g_dsp_ctx->dsp_cache_mode); \
@@ -130,7 +130,7 @@
                                          (op_i), (int)(src_idx), (dt_ptr)->data, (dt_ptr)->data_len, g_dsp_ctx->dsp_cache_mode); \
                 }                                                                       \
             } else {                                                                   \
-                ggml_dsp_cache_inval_range((dt_ptr)->data, (dt_ptr)->data_len);        \
+                prof_cache_inval_range((dt_ptr)->data, (dt_ptr)->data_len, 0);         \
                 if (g_dsp_ctx->dsp_cache_trace_bit1) {                                \
                     GGMLHEXAGON_LOG_INFO("[DSP-CACHE-TRACE-BIT1] op=%u src=%d INVAL ptr=%p len=0x%x (cache_mode=0x%x)", \
                                          (op_i), (int)(src_idx), (dt_ptr)->data, (dt_ptr)->data_len, g_dsp_ctx->dsp_cache_mode); \
@@ -167,6 +167,32 @@ static uint64_t g_op_prof_min_us[HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_max_us[HEX_OP_PROF_BUCKETS];
 static uint32_t g_op_prof_batch_count;
 static uint64_t g_op_prof_batch_wall_us; /* cumulative whole-batch wall time, vs per-op sum */
+
+/* Non-op section timers: decompose batch-wall - op-sum. All cumulative. */
+int64_t ggml_time_us(void); /* defined below */
+static void ggml_dsp_cache_inval_range(void * addr, size_t size); /* defined below */
+static uint64_t g_nonop_hdr_inval_us;    /* batch descriptor dcinva */
+static uint64_t g_nonop_preconvert_us;   /* hex_tensor_to_dsptensor/htp_tensor loop */
+static uint64_t g_nonop_w_inval_us;      /* src dcinva, flags&0x2 (weight) path */
+static uint64_t g_nonop_w_inval_bytes;
+static uint64_t g_nonop_a_inval_us;      /* src dcinva, activation path */
+static uint64_t g_nonop_a_inval_bytes;
+static uint64_t g_nonop_dst_track_us;    /* per-op dst tracker (bulk add / direct flush) */
+static uint64_t g_nonop_bulk_flush_us;   /* bulk_flush_all at batch end */
+static uint64_t g_nonop_queue_us;        /* dsp_queues_wakeup + suspend */
+
+static inline void prof_cache_inval_range(void * p, size_t len, int is_weight) {
+    const int64_t t0 = ggml_time_us();
+    ggml_dsp_cache_inval_range(p, len);
+    const uint64_t dt = (uint64_t)(ggml_time_us() - t0);
+    if (is_weight) {
+        g_nonop_w_inval_us += dt;
+        g_nonop_w_inval_bytes += len;
+    } else {
+        g_nonop_a_inval_us += dt;
+        g_nonop_a_inval_bytes += len;
+    }
+}
 #endif // HEX_OP_PROF
 
 // Per-weight-region first-touch invalidate tracking.
@@ -464,6 +490,31 @@ static inline bool weight_inval_check_and_mark(const void * ptr) {
 
 static inline void weight_inval_reset_all(void) {
     g_weight_inval_count = 0;
+}
+
+/* A tensor written as dst is no longer read-only: drop it from the
+ * first-touch weight list so its next src use re-invalidates. Fixes
+ * cross-graph staleness where a tensor is dst in one (sub)graph and
+ * misclassified as weight (flags=2) in another, e.g. qwen3-mtp. */
+static inline void weight_inval_unmark(const void * ptr) {
+    int lo = 0;
+    int hi = (int)g_weight_inval_count - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        const void * mid_ptr = g_weight_inval_ptrs[mid];
+        if (mid_ptr == ptr) {
+            for (int i = mid; i < (int)g_weight_inval_count - 1; i++) {
+                g_weight_inval_ptrs[i] = g_weight_inval_ptrs[i + 1];
+            }
+            g_weight_inval_count--;
+            return;
+        }
+        if (mid_ptr < ptr) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
 }
 
 /* DSP-side cache optimization: prior_dst tracking (bit 1) + bulk flush (bit 2).
@@ -2029,7 +2080,13 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * Use dcinva (invalidate only) instead of dccleaninva (clean+invalidate):
      * dccleaninva would write back stale DSP cache lines to DRAM, overwriting
      * the fresh data AP just flushed via DC CVAC. */
+#if HEX_OP_PROF
+    const int64_t prof_hdr_t0 = ggml_time_us();
+#endif
     ggml_dsp_cache_inval_range((void *)(base + batch_offset), batch_size);
+#if HEX_OP_PROF
+    g_nonop_hdr_inval_us += (uint64_t)(ggml_time_us() - prof_hdr_t0);
+#endif
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
     if (hdr->n_ops == 0 || hdr->n_tensors == 0) {
@@ -2069,17 +2126,29 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         return AEE_EFAILED;
     }
 
+#if HEX_OP_PROF
+    const int64_t prof_pre_t0 = ggml_time_us();
+#endif
     for (uint32_t ti = 0; ti < hdr->n_tensors; ti++) {
         hex_tensor_to_dsptensor(&tens[ti], base, &g_pre_dt[ti]);
         hex_tensor_to_htp_tensor(&tens[ti], base, &g_pre_ht[ti]);
     }
+#if HEX_OP_PROF
+    g_nonop_preconvert_us += (uint64_t)(ggml_time_us() - prof_pre_t0);
+#endif
 
     /* Reset per-batch invalidation tracking: all tensors start as
      * "needs invalidation" (1). Set to 0 when invalidated; set back
      * to 1 when written as dst (dirtied). */
     memset(g_batch_tensor_needs_inval, 1, hdr->n_tensors);
 
+#if HEX_OP_PROF
+    const int64_t prof_q_t0 = ggml_time_us();
+#endif
     dsp_queues_wakeup();
+#if HEX_OP_PROF
+    g_nonop_queue_us += (uint64_t)(ggml_time_us() - prof_q_t0);
+#endif
 
     for (uint32_t i = 0; i < hdr->n_ops; i++) {
         const hex_op_desc * op = &ops[i];
@@ -2276,6 +2345,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         /* bit 2: bulk dst flush at batch end.
          * Also mark dst tensors as dirty so they get re-invalidated
          * when used as src later in the same batch. */
+#if HEX_OP_PROF
+        const int64_t prof_dst_t0 = ggml_time_us();
+#endif
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
             if (!g_dst_dt_ptrs[k]) continue;
             if (g_dsp_ctx->dsp_cache_mode & 0x4) {
@@ -2292,7 +2364,13 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             /* Mark dst tensor as dirty: next time it's used as src,
              * it must be re-invalidated. */
             g_batch_tensor_needs_inval[op->dst_idx[k]] = 1;
+            if (g_dsp_ctx->dsp_cache_mode & 0x1) {
+                weight_inval_unmark(g_dst_dt_buf[k].data);
+            }
         }
+#if HEX_OP_PROF
+        g_nonop_dst_track_us += (uint64_t)(ggml_time_us() - prof_dst_t0);
+#endif
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             /* DSP-side DIAG: dump first 4 f32 values from each dst output */
@@ -2308,14 +2386,26 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 
     GGMLHEXAGON_LOG_DEBUG("ion-batch: all %u ops done", hdr->n_ops);
 
+#if HEX_OP_PROF
+    const int64_t prof_qs_t0 = ggml_time_us();
+#endif
     dsp_queues_suspend();
+#if HEX_OP_PROF
+    g_nonop_queue_us += (uint64_t)(ggml_time_us() - prof_qs_t0);
+#endif
 
     /* bit 2: bulk dst flush. Sort + merge collected ranges, then flush once
      * per merged region. Flushes happen here (after all ops in the batch
      * finished) so AP reads see fresh DRAM. */
+#if HEX_OP_PROF
+    const int64_t prof_bf_t0 = ggml_time_us();
+#endif
     if (g_dsp_ctx->dsp_cache_mode & 0x4) {
         bulk_flush_all();
     }
+#if HEX_OP_PROF
+    g_nonop_bulk_flush_us += (uint64_t)(ggml_time_us() - prof_bf_t0);
+#endif
 
     __asm__ __volatile__("" ::: "memory");
     if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
@@ -2349,6 +2439,18 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
              (unsigned long long) op_sum,
              (unsigned long long) (op_sum / g_op_prof_batch_count),
              (long long) ((int64_t) (g_op_prof_batch_wall_us - op_sum) / (int64_t) g_op_prof_batch_count));
+        const uint64_t nbc = g_op_prof_batch_count;
+        FARF(ERROR, "[OP-PROF-NONOP] %s hdr=%llu pre=%llu w-inv=%llu(%lluMB) a-inv=%llu(%lluMB) dst=%llu bulk=%llu queue=%llu us/batch",
+             tag,
+             (unsigned long long) (g_nonop_hdr_inval_us / nbc),
+             (unsigned long long) (g_nonop_preconvert_us / nbc),
+             (unsigned long long) (g_nonop_w_inval_us / nbc),
+             (unsigned long long) (g_nonop_w_inval_bytes / nbc / (1024 * 1024)),
+             (unsigned long long) (g_nonop_a_inval_us / nbc),
+             (unsigned long long) (g_nonop_a_inval_bytes / nbc / (1024 * 1024)),
+             (unsigned long long) (g_nonop_dst_track_us / nbc),
+             (unsigned long long) (g_nonop_bulk_flush_us / nbc),
+             (unsigned long long) (g_nonop_queue_us / nbc));
     }
 #endif
 

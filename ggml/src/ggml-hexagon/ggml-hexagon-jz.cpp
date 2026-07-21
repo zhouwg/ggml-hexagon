@@ -1418,11 +1418,12 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
 }
 
 // Some weight types are stored in the repack buffer in a different format
-// than their logical ggml type (BF16 as F16, Q4_K as Q8_0); the DSP kernels
-// only see the storage type.
+// than their logical ggml type (BF16 as F16, Q4_K as Q4_0); the DSP kernels
+// only see the storage type. Q4_K is stored as Q4_0 (not Q8_0) so the
+// bandwidth-bound lm-head matvec moves 214MB instead of 428MB per token.
 static inline enum ggml_type ggml_hexagon_weight_dsp_type(enum ggml_type type) {
     if (type == GGML_TYPE_BF16) return GGML_TYPE_F16;
-    if (type == GGML_TYPE_Q4_K) return GGML_TYPE_Q8_0;
+    if (type == GGML_TYPE_Q4_K) return GGML_TYPE_Q4_0;
     return type;
 }
 
@@ -3183,32 +3184,17 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
     const uint32_t src1_rank    = ggml_n_dims(src1);
     GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
 
-    // TEMP: lm-head rejection diagnostic (remove after P1 bring-up)
-    if (src0->ne[1] > 32768) {
-        GGMLHEXAGON_LOG_ERROR("LMHEAD-CHECK op=%d dst_type=%d src0_type=%d src1_type=%d "
-                             "src0_buf=%p is_repack=%d ne00_mod32=%lld src1_ne23=[%lld,%lld] contig=%d",
-                             (int) dst->op, (int) dst->type, (int) src0->type, (int) src1->type,
-                             (void *) src0->buffer,
-                             src0->buffer ? (int) ggml_backend_buffer_is_hexagon_repack(src0->buffer) : -1,
-                             (long long) (src0->ne[0] % 32),
-                             (long long) src1->ne[2], (long long) src1->ne[3],
-                             (int) ggml_is_contiguous(src0));
-    }
-
     if (dst->type != GGML_TYPE_F32) {
-        if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT dst_type");
         return false;
     }
 
     if (src1->type != GGML_TYPE_F32 && src1->type != GGML_TYPE_F16) {
-        if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT src1_type");
         return false;
     }
 
     if (!ggmlhexagon_type_is_enabled(src0->type)) {
-        // Q4_K is stored as Q8_0 (see set_tensor); inherit Q8_0's enablement
-        if (!(src0->type == GGML_TYPE_Q4_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q8_0))) {
-            if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT type_disabled");
+        // Q4_K is stored as Q4_0 (see set_tensor); inherit Q4_0's enablement
+        if (!(src0->type == GGML_TYPE_Q4_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0))) {
             return false;
         }
     }
@@ -3224,17 +3210,14 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
             // src0 (weights) must be repacked. In test-backend-ops tensors
             // are allocated in the main buffer, so this filters quantized MUL_MAT test cases
             if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
-                if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT not_repack_buf");
                 return false;
             }
 
             if (src0->ne[0] % 32) {
-                if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT ne00_mod32");
                 return false;
             }
 
             if (src1->ne[2] != 1 || src1->ne[3] != 1) {
-                if (src0->ne[1] > 32768) GGMLHEXAGON_LOG_ERROR("LMHEAD-REJECT bcast");
                 return false;  // no broadcasting (for now)
             }
 
@@ -4161,6 +4144,62 @@ static void repack_q4k_as_q8_0_tiled_to_buf(const ggml_tensor * t, const void * 
     }
 }
 
+static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
+    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+    const int64_t nb_q4   = ne0 / QK4_0;   // q4_0 blocks per row
+    const int64_t nb_q4k  = ne0 / QK_K;    // q4_K blocks per row
+
+    std::vector<float>      row_f32(ne0);
+    std::vector<block_q4_0> strip_q4(32 * nb_q4);  // canonical q4_0 for one 32-row strip
+
+    for (int i3 = 0; i3 < ne3; i3++) {
+        for (int i2 = 0; i2 < ne2; i2++) {
+            const block_q4_K * src_expert = (const block_q4_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q4k);
+            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+
+            for (int ct = 0; ct < n_col_tiles; ct++) {
+                for (int row = 0; row < 32; row++) {
+                    const int64_t r = ct * 32 + row;
+                    if (r < ne1) {
+                        dequantize_row_q4_K(src_expert + r * nb_q4k, row_f32.data(), ne0);
+                        quantize_row_q4_0_ref(row_f32.data(), strip_q4.data() + row * nb_q4, ne0);
+                    } else {
+                        memset(strip_q4.data() + row * nb_q4, 0, nb_q4 * sizeof(block_q4_0));
+                    }
+                }
+
+                for (int kt = 0; kt < n_k_tiles; kt++) {
+                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+
+                    uint8_t tile_quants[32][32];
+                    for (int row = 0; row < 32; row++) {
+                        if (kt < nb_q4) {
+                            unpack_q4_0_quants(tile_quants[row], &strip_q4[row * nb_q4 + kt]);
+                        } else {
+                            memset(tile_quants[row], 8, 32);
+                        }
+                    }
+
+                    for (int cp = 0; cp < 16; cp++) {
+                        for (int row = 0; row < 32; row++) {
+                            tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
+                        }
+                    }
+
+                    ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+                    for (int row = 0; row < 32; row++) {
+                        scale_dst[row] = (kt < nb_q4) ? strip_q4[row * nb_q4 + kt].d : 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void repack_mxfp4_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
     const block_mxfp4 * src_matrix = (const block_mxfp4 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
@@ -4428,20 +4467,20 @@ static void repack_f16_to_bf16(const ggml_tensor * t, void * data, size_t size) 
     }
 }
 
-// Inverse of repack_q4k_as_q8_0_tiled_to_buf, used by get_tensor for host
-// read-back: gather each canonical Q8_0 row from the tiled layout, dequant
+// Inverse of repack_q4k_as_q4_0_tiled_to_buf, used by get_tensor for host
+// read-back: gather each canonical Q4_0 row from the tiled layout, dequant
 // to f32 and requant to Q4_K. Row-at-a-time to keep scratch small.
-static void repack_tiled_q8_0_to_q4k_buf(void * dst_data, const ggml_tensor * t, size_t size) {
+static void repack_tiled_q4_0_to_q4k_buf(void * dst_data, const ggml_tensor * t, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
+    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
-    const int64_t nb_q8  = ne0 / QK8_0;
+    const int64_t nb_q4  = ne0 / QK4_0;
     const int64_t nb_q4k = ne0 / QK_K;
 
-    std::vector<float>      row_f32(ne0);
-    std::vector<block_q8_0> row_q8(nb_q8);
+    std::vector<float>       row_f32(ne0);
+    std::vector<block_q4_0>  row_q4(nb_q4);
 
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
@@ -4451,15 +4490,20 @@ static void repack_tiled_q8_0_to_q4k_buf(void * dst_data, const ggml_tensor * t,
             for (int64_t r = 0; r < ne1; r++) {
                 const int ct  = (int)(r / 32);
                 const int row = (int)(r % 32);
-                for (int64_t kt = 0; kt < nb_q8; kt++) {
+                for (int64_t kt = 0; kt < nb_q4; kt++) {
                     const uint8_t * tile_src = matrix_src + (ct * n_k_tiles + kt) * tile_size;
+                    uint8_t q[32];
                     for (int cp = 0; cp < 16; cp++) {
-                        row_q8[kt].qs[cp * 2 + 0] = (int8_t) tile_src[cp * 64 + 2 * row + 0];
-                        row_q8[kt].qs[cp * 2 + 1] = (int8_t) tile_src[cp * 64 + 2 * row + 1];
+                        const uint8_t packed = tile_src[cp * 32 + row];
+                        q[2 * cp + 0] = packed & 0x0F;
+                        q[2 * cp + 1] = packed >> 4;
                     }
-                    row_q8[kt].d = ((const ggml_half *)(tile_src + 1024))[row];
+                    for (int i = 0; i < 16; i++) {
+                        row_q4[kt].qs[i] = (uint8_t)(q[i + 16] << 4) | q[i];
+                    }
+                    row_q4[kt].d = ((const ggml_half *)(tile_src + 512))[row];
                 }
-                dequantize_row_q8_0(row_q8.data(), row_f32.data(), ne0);
+                dequantize_row_q4_0(row_q4.data(), row_f32.data(), ne0);
                 quantize_row_q4_K_ref(row_f32.data(), dst_expert + r * nb_q4k, ne0);
             }
         }
@@ -4514,7 +4558,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q4_K:
                 GGML_ASSERT(offset == 0);
                 GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q4k_as_q8_0_tiled_to_buf(tensor, data, tensor->data);
+                repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 break;
             default:
                 memcpy((char *)tensor->data + offset, data, size);
@@ -4593,7 +4637,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                     repack_f16_to_bf16(tensor, data, size);
                     return;
                 case GGML_TYPE_Q4_K:
-                    repack_tiled_q8_0_to_q4k_buf(data, tensor, size);
+                    repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
                     return;
                 default:
                     break;
@@ -5187,19 +5231,30 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
     // Weights are read-only across batches; AP never modifies them per batch,
     // so cache flush/invalidate can be skipped for them.
-    is_weight.assign(n_tensors, 0);
-    std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
-    for (const auto & op : hex_ops) {
-        uint32_t didx = op.dst_idx[0];
-        if (didx < n_tensors) dst_indices[didx] = 1;
-    }
-    for (const auto & op : hex_ops) {
-        if (op.opcode == GGML_OP_MUL_MAT) {
-            uint32_t sidx = op.src_idx[0];
-            if (sidx < n_tensors && !dst_indices[sidx]) {
-                is_weight[sidx] = 1;
-                GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
-                                     sidx, (int)tensor_src[sidx]->type);
+    // A tensor that was dst of any op in ANY cgraph (not just this one) is
+    // not a read-only weight: check the session-global ever-dst set, else
+    // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
+    {
+        static std::unordered_set<const void *> g_ever_dst_ptrs;
+        for (const auto & op : hex_ops) {
+            uint32_t didx = op.dst_idx[0];
+            if (didx < n_tensors) g_ever_dst_ptrs.insert(tensor_src[didx]->data);
+        }
+        is_weight.assign(n_tensors, 0);
+        std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
+        for (const auto & op : hex_ops) {
+            uint32_t didx = op.dst_idx[0];
+            if (didx < n_tensors) dst_indices[didx] = 1;
+        }
+        for (const auto & op : hex_ops) {
+            if (op.opcode == GGML_OP_MUL_MAT) {
+                uint32_t sidx = op.src_idx[0];
+                if (sidx < n_tensors && !dst_indices[sidx] &&
+                    !g_ever_dst_ptrs.count(tensor_src[sidx]->data)) {
+                    is_weight[sidx] = 1;
+                    GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
+                                         sidx, (int)tensor_src[sidx]->type);
+                }
             }
         }
     }
@@ -5757,7 +5812,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 td->nb[3] = td->nb[2] * (int32_t)t->ne[2];
                 td->data_len = (uint32_t)ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
                 td->data_offset = it->second;
-                td->flags = 1;  // mirrored (needs cache flush)
+                td->flags = 2;  // weight (skip cache flush after first-touch)
             }
         }
     }
