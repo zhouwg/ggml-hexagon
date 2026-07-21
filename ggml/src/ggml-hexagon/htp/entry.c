@@ -41,7 +41,7 @@
 
 #define HEX_OP_PROF_BUCKETS             64
 
-#define HEX_OP_PROF_DUMP_INTERVAL       100
+#define HEX_OP_PROF_DUMP_INTERVAL       25
 
 #define WEIGHT_INVAL_MAX_PTRS           4096
 
@@ -81,10 +81,11 @@
 // Bumped by execute_op() in entry.c, dumped via FARF every N batches inside
 // ggml_dsp_execute_batch(). Off by default; enable with -DHEX_OP_PROF=1
 // to avoid disturbing normal log levels.
+// TEMP: force-enable for TG breakdown analysis (normally tied to GGMLHEXAGON_DEBUG)
 #if GGMLHEXAGON_DEBUG
 #define HEX_OP_PROF                     1
 #else
-#define HEX_OP_PROF                     0
+#define HEX_OP_PROF                     1
 #endif
 
 #if GGMLHEXAGON_DEBUG
@@ -165,6 +166,7 @@ static uint64_t g_op_prof_count  [HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_min_us[HEX_OP_PROF_BUCKETS];
 static uint64_t g_op_prof_max_us[HEX_OP_PROF_BUCKETS];
 static uint32_t g_op_prof_batch_count;
+static uint64_t g_op_prof_batch_wall_us; /* cumulative whole-batch wall time, vs per-op sum */
 #endif // HEX_OP_PROF
 
 // Per-weight-region first-touch invalidate tracking.
@@ -349,10 +351,10 @@ static void dump_op_prof(const char * tag) {
         snprintf(min_s, sizeof(min_s), "%5llu",  (unsigned long long)g_op_prof_min_us[i]);
         snprintf(max_s, sizeof(max_s), "%6llu",  (unsigned long long)g_op_prof_max_us[i]);
         if (name) {
-            GGMLHEXAGON_LOG_INFO("[OP-PROF] %-11s op=%-16s cum=%s us count=%s avg=%s min=%s max=%s us",
+            FARF(ERROR, "[OP-PROF] %s op=%s cum=%s us count=%s avg=%s min=%s max=%s us",
                  tag, name, cum_s, cnt_s, avg_s, min_s, max_s);
         } else {
-            GGMLHEXAGON_LOG_INFO("[OP-PROF] %-11s op=%-3u cum=%s us count=%s avg=%s min=%s max=%s us",
+            FARF(ERROR, "[OP-PROF] %s op=%u cum=%s us count=%s avg=%s min=%s max=%s us",
                  tag, i, cum_s, cnt_s, avg_s, min_s, max_s);
         }
     }
@@ -2018,6 +2020,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     }
 
     /* Normal batch execution */
+#if HEX_OP_PROF
+    const int64_t prof_batch_t0 = ggml_time_us();
+#endif
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
      * at the same offset, so DSP must invalidate to fetch fresh data.
@@ -2217,7 +2222,25 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
 #endif
 
+        // TEMP DIAG: one-shot per-op matmul timing for a single decode batch
+        const int diag_mm = (g_op_prof_batch_count == 10) &&
+                            (htp_op == HTP_OP_MUL_MAT || htp_op == HTP_OP_MUL_MAT_QKV ||
+                             htp_op == HTP_OP_MUL_MAT_FFN);
+        const int64_t diag_t0 = diag_mm ? ggml_time_us() : 0;
+
         int op_ret = execute_op(&octx);
+
+        if (diag_mm) {
+            const int64_t diag_dt = ggml_time_us() - diag_t0;
+            const int diag_wlen = (int) src0_dt->data_len
+                                + (src2_dt ? (int) src2_dt->data_len : 0)
+                                + (src3_dt ? (int) src3_dt->data_len : 0);
+            FARF(ERROR, "[DIAG-MM] op%u htp=%d kt=%d src0=[%d,%d] type=%d wlen=%d n1=%d dt=%lld us",
+                                  i, htp_op, octx.kernel_params[0],
+                                  src0_dt->ne[0], src0_dt->ne[1],
+                                  src0_dt->type, diag_wlen,
+                                  src1_dt ? src1_dt->ne[1] : -1, (long long) diag_dt);
+        }
 
 #if GGMLHEXAGON_DEBUG
         /* F32 MUL_MAT diagnostic: dump dst[0..3] and dst[16..19] AFTER execute_op. */
@@ -2308,11 +2331,24 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 #if HEX_OP_PROF
     /* Per-op profiler: print accumulated cum/count/avg every N batches so
      * log volume stays bounded (one multi-line dump per interval, not per op). */
+    g_op_prof_batch_wall_us += (uint64_t)(ggml_time_us() - prof_batch_t0);
     g_op_prof_batch_count++;
     if ((g_op_prof_batch_count % HEX_OP_PROF_DUMP_INTERVAL) == 0) {
         char tag[32];
         snprintf(tag, sizeof(tag), "batch#%u", g_op_prof_batch_count);
         dump_op_prof(tag);
+        /* whole-batch wall vs sum of per-op buckets: the delta is the DSP-side
+         * non-op overhead (descriptor inval, tensor pre-convert, per-op src
+         * dcinva, bulk dst flush, queue wakeup/suspend). */
+        uint64_t op_sum = 0;
+        for (unsigned int b = 0; b < HEX_OP_PROF_BUCKETS; b++) op_sum += g_op_prof_dur_us[b];
+        FARF(ERROR, "[OP-PROF] %s batch-wall cum=%llu us (avg=%llu) op-sum cum=%llu us (avg=%llu) non-op avg=%lld us/batch",
+             tag,
+             (unsigned long long) g_op_prof_batch_wall_us,
+             (unsigned long long) (g_op_prof_batch_wall_us / g_op_prof_batch_count),
+             (unsigned long long) op_sum,
+             (unsigned long long) (op_sum / g_op_prof_batch_count),
+             (long long) ((int64_t) (g_op_prof_batch_wall_us - op_sum) / (int64_t) g_op_prof_batch_count));
     }
 #endif
 
