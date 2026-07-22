@@ -10,23 +10,17 @@ review of the JZ (`ggml-hexagon-jz.cpp`, `htp/entry.c`) and Qualcomm (`ggml-hexa
 - Revised by Qwen3.7-Plus (2026-07-16, fix incorrect description).
 - Revised by Kimi-K3 (2026-07-22, Status Update: TG gap closed and reversed; lm-head DSP offload; dsp_cache_mode=5; v75/8Gen3 bring-up thread clamp).
 - Project author: Jeff Zhou (zhouwg) (2024-03 to present, see timeline at https://github.com/zhouwg/ggml-hexagon/discussions/18).
-- Project co-authors: GLM-5.2 (2026-06 to present), MiniMax-M3 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to present, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), Kimi-K2.7-Code(2026-07-13 to 2026-07-17, fix issues in dsp_cache_mode=5/7, PP optimization, two important docs), Qwen3.7-Plus(2026-07-16 to present, review docs), Kimi-K3(2026-07-17 to present, TG optimization(bf16 support, lm-head DSP offload, dsp_cache_mode bit0 re-enable), DSP debug log removal, v75 thread clamp, doc updates).
+- Project co-authors: GLM-5.2 (2026-06 to present), MiniMax-M3 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to present, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), Kimi-K2.7-Code(2026-07-13 to 2026-07-17, fix issues in dsp_cache_mode=5/7, PP optimization, two important docs), Qwen3.7-Plus(2026-07-16 to 2026-07-16, review docs), Kimi-K3(2026-07-17 to present, TG optimization(bf16 support, lm-head DSP offload, dsp_cache_mode bit0 re-enable), DSP debug log removal, v75 thread clamp, doc updates).
 
-## Correction Note (2026-07-15)
+## Historical correction chain (both earlier TG-gap attributions superseded)
 
-The original 2026-07-11 analysis contained a **fundamental error in the TG gap root-cause attribution**. The document repeatedly labeled the TG gap as "attention-kernel-bound" while simultaneously acknowledging that the `flash-attn-ops.c` kernel is shared between both backends and therefore cannot be the source of the JZ-vs-QCOM difference. This internal contradiction has been resolved by Kimi-K2.7-Code's analysis in two companion documents:
+The TG-gap root-cause attribution was corrected twice before reaching the final answer:
 
-1. [warmup-ab-test-and-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/warmup-ab-test-and-analysis-20260713.md) - proves with code-level analysis that the TG gap is caused by JZ's lack of batch-level pipelining (synchronous FastRPC), not by the attention kernel. Qualcomm's dspqueue overlaps AP preparation with DSP execution (up to 16 batches in flight), hiding per-subgraph overhead that JZ pays synchronously.
-2. [ion-mempool-vs-perbuffer-analysis-20260713.md](https://github.com/zhouwg/ggml-hexagon/blob/self-build-jz/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md) - explains why Qualcomm's per-buffer ION approach is more stable in practice than JZ's single mempool, and identifies that JZ PP peaks already match Qualcomm but stable mean has not yet matched - closing this gap is difficult but not impossible (requires further work on user-space cache management).
+1. **2026-07-11 (wrong): "attention-kernel-bound"** - self-contradictory: `htp/flash-attn-ops.c` is shared verbatim by both backends, so it cannot be the source of a JZ-vs-QCOM difference.
+2. **2026-07-15 (partially wrong): "dispatch-pipeline-bound"** - [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) proved QCOM's dspqueue overlaps AP preparation with DSP execution (up to 16 batches in flight) while JZ pays per-subgraph sync overhead. Correct as a description of QCOM's structural advantage, but the 2026-07-19 per-phase measurement showed pure FastRPC transport is only ~137 us/call - not what capped JZ TG.
+3. **2026-07-21 (final): the dominant non-op cost was the CPU-resident lm-head matvec (~30 ms/token).** After lm-head DSP offload + dsp_cache_mode=5 + DSP log removal, JZ TG exceeds QCOM with zero pipelining. See Current Status below.
 
-**Key corrections applied to this document**:
-- Section 3 (FastRPC Call Pattern): dspqueue IS a major TG gap factor, not "NOT the decisive factor"
-- TG hot spot breakdown: `FLASH_ATTN_EXT` is the TG hot spot for both backends, but it is NOT the source of the JZ-vs-QCOM gap (shared kernel). The gap is from per-subgraph sync overhead that accumulates without batch-level overlap.
-- Summary Table 10: FastRPC call pattern (sync vs pipelined) is the #1 JZ-vs-QCOM TG gap source
-- Section 13: `flash-attn-ops.c` -O2 affects both backends equally; it caps absolute TG throughput but does not explain the JZ-vs-QCOM gap
-- Bottom line: TG gap is from synchronous architecture (no batch-level overlap), not "attention-kernel-bound"
-
-The latest PP data (2026-07-13): JZ PP peak hit 378.57 tok/s (post-warmup validation run), matching Qualcomm's peak of 380.78 tok/s.
+Historical PP note (2026-07-13): JZ PP peak hit 378.57 tok/s, matching QCOM's 380.78 peak - the first time JZ PP reached QCOM level.
 
 ### 2026-07-15 consecutive 7-run benchmark (JZ only, cold-start)
 
@@ -47,7 +41,7 @@ The latest PP data (2026-07-13): JZ PP peak hit 378.57 tok/s (post-warmup valida
 
 PP shows the classic cold-start decline: runs 1-2 (365-368) benefit from cold ION mapping; after warmup the stable mean (runs 3-7) settles at ~342. TG is remarkably stable across all runs (19.28-19.84, range <3%), confirming that TG is compute-bound (not affected by ION cache state). The cgraph cache hit rate is 99.2% across all runs.
 
-## Status Update (2026-07-22, by Kimi-K3)
+## Current Status (2026-07-22, by Kimi-K3)
 
 **Both the PP and TG gaps are closed and reversed.** Measured 2026-07-21 on the same Snapdragon 8 Elite (v79, OnePlus 13), same model (gemma-4-E2B-it-Q4_0), same CLI as section 3.1:
 
@@ -55,8 +49,10 @@ PP shows the classic cold-start decline: runs 1-2 (365-368) benefit from cold IO
 
 | Backend | PP (tok/s) | TG (tok/s) |
 | ------- | ---------- | ---------- |
-| JZ      | 640-690    | 26.8-28    |
-| QCOM    | ~369 mean / 395 peak | ~26 |
+| JZ      | 567-571    | 26.8-28    |
+| QCOM    | ~369 mean / 381 peak | ~26 |
+
+2026-07-22 re-measurement (build v0.99.3.9-dev, dsp_cache_mode=5): **JZ on v79 reached PP 689.72 / TG 27.72** (thread_counts=6; DSP exec share of TG token 98.1%, avg_p7=35399 us). First v75/8Gen3 result with the thread clamp: **PP 215.38 / TG 20.60** (thread_counts clamped to 4, DSP exec share 97.4%, avg_p7=47316 us), output coherent - on v75 JZ lands close to QCOM, which is expected: both backends run the identical `htp/` kernels and JZ's non-DSP overhead is down to ~1 ms/token, so on the slower v75 (4 HVX units vs 6, 6 hw threads vs 8) both converge to the same hardware ceiling.
 
 Three changes between 2026-07-16 and 2026-07-21 produced this result:
 
@@ -68,7 +64,14 @@ Also in this window: BF16 was added to the offloaded MUL_MAT types (stored as F1
 
 **Correction to the 2026-07-15 root-cause attribution.** The "15 ms/token accumulated FastRPC sync overhead" explanation overstated the dispatch component. The 2026-07-19 per-phase measurement showed wall clock 56.8 ms/token vs DSP op execution 26.2 ms/token, and the dominant non-op item was the CPU lm-head matvec (~30 ms), not FastRPC round trips (pure FastRPC/ION transport overhead measured at ~137 us/call upper bound, warmup probe). With lm-head on DSP and mode=5, JZ TG exceeds QCOM TG without any batch-level pipelining - the synchronous FastRPC architecture is no longer the TG bottleneck on this workload. The batch-level-pipelining analysis in [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) remains valid as a description of QCOM's structural advantage, but it is not what capped JZ TG.
 
-**8 Gen 3 (v75) bring-up note (2026-07-22).** The same code deadlocked on Snapdragon 8 Gen 3 at the default `thread_counts=6`. Root cause: cDSP hardware-thread oversubscription. An op needs `thread_counts+1` co-resident QuRT threads (FastRPC main + N-1 work-queue workers + 1 hmx_queue thread); v75 has 6 hardware threads (v79 has 8), so N=6 requires 7 > 6 and the unscheduled worker never decrements the task barrier (QuRT does not preempt equal-priority workers spinning in `hex_pause`). `ggml_dsp_setclocks` now clamps to `max_hw_threads - 2` and reports the effective value through a new `rout int32 real_thread_counts` IDL out-param; AP mirrors it into `ctx->n_threads` so the precomputed `kparams->n_threads` matches the DSP work-queue (a mismatch here made `work_queue_run` reject jobs and silently skip ops, producing garbled output). Residual v75 issue under investigation: garbled output / occasional early exit with dsp_cache_mode=5, which has only been validated on v79 so far.
+**8 Gen 3 (v75) bring-up note (2026-07-22).** The same code deadlocked on Snapdragon 8 Gen 3 at the default `thread_counts=6`. Root cause: cDSP hardware-thread oversubscription. An op needs `thread_counts+1` co-resident QuRT threads (FastRPC main + N-1 work-queue workers + 1 hmx_queue thread); v75 has 6 hardware threads (v79 has 8), so N=6 requires 7 > 6 and the unscheduled worker never decrements the task barrier (QuRT does not preempt equal-priority workers spinning in `hex_pause`). `ggml_dsp_setclocks` now clamps to `max_hw_threads - 2` and reports the effective value through a new `rout int32 real_thread_counts` IDL out-param; AP mirrors it into `ctx->n_threads` so the precomputed `kparams->n_threads` matches the DSP work-queue (a mismatch here made `work_queue_run` reject jobs and silently skip ops, producing garbled output). The garbled-output/early-exit symptom observed during bring-up was traced to a stale AP-side binary on the device (old binary computed `kparams->n_threads=6` against the clamped 4-thread queue); a full rebuild and redeploy of both AP and skel resolved it. Verified 2026-07-22: v75 inference is correct with dsp_cache_mode=5 and thread_counts=4 (PP 215.38 / TG 20.60).
+
+## Reading guide
+
+- **Current Status (above)** is the final state as of 2026-07-22: v79 PP 689.72 / TG 27.72, v75 PP 215.38 / TG 20.60; both the PP and TG gaps vs QCOM are closed and reversed.
+- **Sections 1-2 and 4-16** describe the architecture and mechanisms; they are mostly still accurate as of 2026-07-22. Specific superseded claims (TG-gap cause, dsp_cache_mode default, mm_params_cache state, HEX_OP_PROF gating) are marked inline with their correction dates.
+- **Sections 3 and 17** are explicitly historical snapshots (2026-07-11 state), kept for the record; section 18's Priority-1 recommendation is likewise superseded (marked inline).
+- Where any historical statement conflicts with Current Status, Current Status wins.
 
 ## Updates
 
@@ -93,13 +96,13 @@ These are deliberate design choices, not limitations. The theoretical basis is t
 
 The codebase evolved significantly between 2026-07-05 and 2026-07-11. The major changes, in chronological order:
 
-1. **Weight repack moved to set_tensor** - JZ implemented a repack buffer type with `is_host=false`, forcing GGML core to route quantized weights through `set_tensor` during model load. This moved the expensive tiled repack from per-inference (Phase 4.5) to one-time at model load. PP jumped from 105.6 to ~321 tok/s (3x; weight repack + `dsp_cache_mode` & `ion_sync_mode` cache coherency + other optimizations; largest in this window; reproducible mean). 8-10 transient measurements of 350-370 tok/s between 04:00-07:00 on 2026-07-10 could not be reproduced when retested on 2026-07-11. Root cause unknown; statistical significance is high (8-10 consecutive outliers are inconsistent with random noise). It is possible (but unconfirmed) that the code state between the measurement window and the retest was not identical - no commit was made in that interval, but uncommitted local changes, build flag differences, or session/cache state cannot be ruled out. Hypothesized mechanisms include build-system-induced code density / memory layout changes on DSP I-cache, transient session/cache state, or uncommitted local changes. See [pp-regression-misdiagnosis-20260711.md](pp-regression-misdiagnosis-20260711.md). (Detailed in section 2.)
-2. **Graph cache content hash** - Replaced the dead `cgraph->uid` key with FNV-1a content hash over each node's `{op, ne, nb, src, data}`. Cache hit rate went from 0% to 99.2%. (Detailed in section 5.)
-3. **AP&DSP cache optimization** - Added the `dsp_cache_mode` 3-bit bitmap (first-touch weight bitmap, skip dcinva for prior dst, bulk dst flush) and the `ion_sync_mode` knob family for fine-grained AP/DSP cache coherency control, pushed via `execute_batch(0xFFFC)` special mode (no IDL change required). Solved the llama3 33% prompt-repeat rate from stale L2 reads. (Detailed in section 8.)
-4. **Upstream master merge (2026-07-09)** - commit `15053402b`. Brought in Qualcomm's new VTCM layout API (`81ff7abe5`). JZ adapted via adapter functions in `ggml-hexagon-jz.cpp` and `entry.c` (keeping `htp/matmul-ops.h` unchanged for upstream parity). (Detailed in section 11.2.)
-5. **Dual path removal (2026-07-10)** - commits `6c11b225d` (step1) and `ba4fd0104` (step2). JZ deleted its entire independent DSP kernel layer (`kernels/ggml-dsp.c`, `mulmat.c`, `flash_attn.c`, `add.c`, `sub.c`, `mul.c`, `div.c`, `rmsnorm.c`, `rope.c`, `softmax.c`, `silu.c`, `scale.c`, `concat.c`, `cpy.c`, `getrows.c`, `diagmask.c`, `repeat.c`, `skel.c`, `stub.c`, `test-hmx.c`, `worker_pool.cpp`, `dot.S`, plus the `ggml-dsp.h` port header) - 24298 lines removed. The `mulmat_algotype=32` self-built dispatch path was removed at the same time. JZ now routes **all** ops through the shared `htp/` execute_op path, exactly like Qualcomm does. (Detailed in section 1.)
+1. **Weight repack moved to set_tensor** - JZ implemented a repack buffer type with `is_host=false`, forcing GGML core to route quantized weights through `set_tensor` during model load. This moved the expensive tiled repack from per-inference (Phase 4.5) to one-time at model load. PP jumped from 105.6 to ~321 tok/s (3x; weight repack + `dsp_cache_mode` & `ion_sync_mode` cache coherency + other optimizations; largest in this window; reproducible mean). 8-10 transient measurements of 350-370 tok/s between 04:00-07:00 on 2026-07-10 could not be reproduced when retested on 2026-07-11. Root cause unknown; statistical significance is high (8-10 consecutive outliers are inconsistent with random noise). It is possible (but unconfirmed) that the code state between the measurement window and the retest was not identical - no commit was made in that interval, but uncommitted local changes, build flag differences, or session/cache state cannot be ruled out. Hypothesized mechanisms include build-system-induced code density / memory layout changes on DSP I-cache, transient session/cache state, or uncommitted local changes. See [pp-regression-misdiagnosis-20260711.md](pp-regression-misdiagnosis-20260711.md). (Detailed in section 5.)
+2. **Graph cache content hash** - Replaced the dead `cgraph->uid` key with FNV-1a content hash over each node's `{op, ne, nb, src, data}`. Cache hit rate went from 0% to 99.2%. (Detailed in section 8.)
+3. **AP&DSP cache optimization** - Added the `dsp_cache_mode` 3-bit bitmap (first-touch weight bitmap, skip dcinva for prior dst, bulk dst flush) and the `ion_sync_mode` knob family for fine-grained AP/DSP cache coherency control, pushed via `execute_batch(0xFFFC)` special mode (no IDL change required). Solved the llama3 33% prompt-repeat rate from stale L2 reads. (Detailed in section 11.)
+4. **Upstream master merge (2026-07-09)** - commit `15053402b`. Brought in Qualcomm's new VTCM layout API (`81ff7abe5`). JZ adapted via adapter functions in `ggml-hexagon-jz.cpp` and `entry.c` (keeping `htp/matmul-ops.h` unchanged for upstream parity). (Detailed in section 14.3.)
+5. **Dual path removal (2026-07-10)** - commits `6c11b225d` (step1) and `ba4fd0104` (step2). JZ deleted its entire independent DSP kernel layer (`kernels/ggml-dsp.c`, `mulmat.c`, `flash_attn.c`, `add.c`, `sub.c`, `mul.c`, `div.c`, `rmsnorm.c`, `rope.c`, `softmax.c`, `silu.c`, `scale.c`, `concat.c`, `cpy.c`, `getrows.c`, `diagmask.c`, `repeat.c`, `skel.c`, `stub.c`, `test-hmx.c`, `worker_pool.cpp`, `dot.S`, plus the `ggml-dsp.h` port header) - 24298 lines removed. The `mulmat_algotype=32` self-built dispatch path was removed at the same time. JZ now routes **all** ops through the shared `htp/` execute_op path, exactly like Qualcomm does. (Detailed in section 4.)
 6. **Upstream master merge (2026-07-11 morning)** - commit `d8d0a707e`. Brought in Qualcomm's latest `htp/` kernels including a new `op_unary` pipeline (commit `fb30ba9a6`) that requires host-precomputed `htp_unary_kernel_params`, an ARGSORT performance improvement (`67776eaee`), the new ET backend, and the usual stream of upstream ggml/llama core changes.
-7. **VTCM session-lifetime refactor (2026-07-11, commit `7261e75bb`)** - VTCM acquire/release moved from per-batch (~4352 calls/inference) to per-session. (Detailed in section 10.)
+7. **VTCM session-lifetime refactor (2026-07-11, commit `7261e75bb`)** - VTCM acquire/release moved from per-batch (~4352 calls/inference) to per-session. (Detailed in section 13.)
 8. **TG/PP optimization investigation (2026-07-11)** - documented in [tg-pp-optimization-attempts-20260711.md](tg-pp-optimization-attempts-20260711.md). Six experiments chased the 1.40x TG gap; the real TG hot spot turned out to be `FLASH_ATTN_EXT` (not MUL_MAT), and an ARM CPU ceiling measurement showed TG is DDR-bandwidth-bounded at 32.4 tok/s.
 
 The net effect on file sizes:
@@ -134,35 +137,36 @@ The net effect on file sizes:
 >   spot (see section "TG hot spot breakdown")
 
 > - `htp/entry.c:180` - the `HEX_OP_PROF` per-op timing profiler
->   (126 lines, default off; enable with `make CFLAGS=-DHEX_OP_PROF=1`).
+>   (126 lines; now derived from NDEBUG - the release skel build uses
+>   -DNDEBUG and compiles it out).
 >   Skel size drops by 6880 bytes (706984 -> 700104) when off (see
->   section 9)
+>   section 12.4)
 
 > The remaining LoC delta is real feature code, dominated by a single JZ function: `ggmlhexagon_backend_graph_compute_batch` ([`ggml-hexagon-jz.cpp:4759-6146`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L4759-L6146), 1388 lines) vs the Qualcomm equivalent `ggml_backend_hexagon_graph_compute` ([`ggml-hexagon.cpp:3613-3683`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L3613-L3683), 71 lines) - a **19.5x ratio** (1317 lines of difference). This one function is the heart of JZ's ION-based op-batch design: it owns the full Phase 1-8 pipeline (tensor dedup, op descriptor build, op fusion, descriptor marshalling, ION offset setup, batch header, FastRPC dispatch, cache flush, DSP exec, cache invalidate) inline. The Qualcomm equivalent delegates to the dspqueue framework, so the function body stays minimal.
 
 > The rest of the feature code delta is split into two groups:
 
 > - **JZ-original AP optimizations** (JZ has, QCOM doesn't):
->   `mm_params_cache` (section 6 - QCOM's
+>   `mm_params_cache` (section 9 - QCOM's
 >   `ggml_hexagon_precompute_matmul_params` recomputes every call,
 >   JZ wraps it in a cache; the cache write path is enabled,
->   see section 6), the full **AP-side profiler infrastructure**
->   (section 9 - longtail profiler, mul_mat coverage tracer,
+>   see section 9), the full **AP-side profiler infrastructure**
+>   (section 12 - longtail profiler, mul_mat coverage tracer,
 >   dsp_cache_trace_bit0/bit1 diagnostic switch), and **AP-side cache
->   coherency maintenance** (section 8 - `ion_sync_mode` /
+>   coherency maintenance** (section 11 - `ion_sync_mode` /
 >   `dsp_cache_mode` knobs, DC CVAC flush, CIVAC invalidate). QCOM
 >   delegates this entirely to dspqueue's driver-level
 >   `DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER |
 >   DSPQUEUE_BUFFER_FLAG_INVALIDATE_RECIPIENT` flags set at submit
 >   time, so QCOM's AP has zero cache-coherency code; JZ's AP owns
 >   the full DC CVAC / ion_sync / `dsp_cache_mode` machinery
->   (~350 lines, sections 6 / 8 / 9)
+>   (~350 lines, sections 9 / 11 / 12)
 
-> *Note: not in this category* - the repack buffer type (section 2) and the graph cache (section 5) exist on **both** backends. JZ's repack buffer type was authored by referencing Qualcomm's (`ggml-hexagon.cpp:1015, 1054`) but uses a **simpler layout that avoids Qualcomm's verbose indirection**: QCOM defines a separate `ggml_backend_buffer_type_i ggml_backend_hexagon_repack_buffer_type_interface` struct plus a dedicated `ggml_backend_hexagon_repack_buffer_type_alloc_buffer` function and a per-buft [`ggml_backend_hexagon_buffer_type_context`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L262) struct (the `is_host` is the only field that actually differs, returning `false`). The `ggml_backend_hexagon_buffer_type_context` struct in particular has proven difficult to read on first encounter: in the author's review experience (MiniMax-M3) and in two prior independent reviews (GLM-5.2 and DeepSeek-V4-Pro), the per-buft context + dual-instance + `static_cast` access pattern repeatedly led to the conclusion that the two buffer types implemented substantially different allocation logic, when in fact they share `alloc_buffer` and differ only in `is_host`. The QCOM context struct itself is roundabout in practice: it wraps nothing more than a `ggml_hexagon_session *` and a `std::string name`, and the repack variant is just a second instance with `name + "-REPACK"` ([`ggml-hexagon.cpp:1883`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1883)); every interface function that needs the session then re-casts via `static_cast<ggml_backend_hexagon_buffer_type_context *>` ([lines 363, 999, 1004, 1017, 1045](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L363)). JZ instead keeps a single `struct ggml_backend_buffer_type repack_buffer_type` field in the session context and **directly reuses the regular `ggml_backend_hexagon_buffer_type_alloc_buffer` function**, overriding only the `is_host` method ([`ggml-hexagon-jz.cpp:3249-3257`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3249-L3257)). Result: JZ's repack buft registration is ~6 lines of struct field assignments vs QCOM's separate interface struct + dedicated alloc function + dedicated context type + `new`/`delete` plumbing in constructor/destructor; the doc sections 2 and 5 each explicitly note "Both backends now ... functionally equivalent" / "Both backends now cache by graph identity". These are not JZ-original.
+> *Note: not in this category* - the repack buffer type (section 5) and the graph cache (section 8) exist on **both** backends. JZ's repack buffer type was authored by referencing Qualcomm's (`ggml-hexagon.cpp:1015, 1054`) but uses a **simpler layout that avoids Qualcomm's verbose indirection**: QCOM defines a separate `ggml_backend_buffer_type_i ggml_backend_hexagon_repack_buffer_type_interface` struct plus a dedicated `ggml_backend_hexagon_repack_buffer_type_alloc_buffer` function and a per-buft [`ggml_backend_hexagon_buffer_type_context`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L262) struct (the `is_host` is the only field that actually differs, returning `false`). The `ggml_backend_hexagon_buffer_type_context` struct in particular has proven difficult to read on first encounter: in the author's review experience (MiniMax-M3) and in two prior independent reviews (GLM-5.2 and DeepSeek-V4-Pro), the per-buft context + dual-instance + `static_cast` access pattern repeatedly led to the conclusion that the two buffer types implemented substantially different allocation logic, when in fact they share `alloc_buffer` and differ only in `is_host`. The QCOM context struct itself is roundabout in practice: it wraps nothing more than a `ggml_hexagon_session *` and a `std::string name`, and the repack variant is just a second instance with `name + "-REPACK"` ([`ggml-hexagon.cpp:1883`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1883)); every interface function that needs the session then re-casts via `static_cast<ggml_backend_hexagon_buffer_type_context *>` ([lines 363, 999, 1004, 1017, 1045](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L363)). JZ instead keeps a single `struct ggml_backend_buffer_type repack_buffer_type` field in the session context and **directly reuses the regular `ggml_backend_hexagon_buffer_type_alloc_buffer` function**, overriding only the `is_host` method ([`ggml-hexagon-jz.cpp:3249-3257`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3249-L3257)). Result: JZ's repack buft registration is ~6 lines of struct field assignments vs QCOM's separate interface struct + dedicated alloc function + dedicated context type + `new`/`delete` plumbing in constructor/destructor; the doc sections 5 and 8 each explicitly note "Both backends now ... functionally equivalent" / "Both backends now cache by graph identity". These are not JZ-original.
 
 > - **QCOM-mirror / parity glue** (JZ mirrors QCOM patterns):
 >   session consistency gate, VTCM session-lifetime, upstream merge
->   adapters (~150 lines, sections 7 / 10 / 11)
+>   adapters (~150 lines, sections 10 / 13 / 14)
 
 > In total, ~1815 lines of the 3449-line LoC delta are real feature code (53%), with the single `graph_compute_batch` function accounting for ~73% of that. This is the cost of building an independent AP/DSP integration layer with its own dispatch, cache management, and diagnostic surface - everything else is reasonable.
 
@@ -186,7 +190,7 @@ JZ's four files (`Makefile`, `dsp-ctx.h`, `entry.c`, `ggml_dsp.idl`) are now mer
 
 ***
 
-## 3. Latest Benchmark (2026-07-11)
+## 3. Latest Benchmark (2026-07-11, historical snapshot - see Current Status)
 
 ### 3.1 Test Conditions
 
@@ -402,7 +406,7 @@ The per-subgraph gap is small (~0.7 ms/layer), but it accumulates across 21 laye
 
 The path forward for TG is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path. The synchronous architecture is the point of the project; the TG gap is an accepted trade-off that is now understood to be **dispatch-pipeline-bound**, not attention-kernel-bound. See [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) section 3 for the full code-level proof.
 
-> **Update (2026-07-22)**: This attribution was itself superseded. The dominant non-op cost was the CPU lm-head matvec (~30 ms/token), not FastRPC sync overhead; after lm-head offload + dsp_cache_mode=5 + DSP log removal, JZ TG (26.8-28) exceeds QCOM TG (~26) with no pipelining. See the Status Update at the top of this document.
+> **Update (2026-07-22)**: This attribution was itself superseded. The dominant non-op cost was the CPU lm-head matvec (~30 ms/token), not FastRPC sync overhead; after lm-head offload + dsp_cache_mode=5 + DSP log removal, JZ TG (26.8-28) exceeds QCOM TG (~26) with no pipelining. See Current Status at the top of this document.
 
 ***
 
@@ -525,7 +529,7 @@ Both backends now cache by graph identity. Qualcomm also caches the graph reorde
 JZ caches precomputed `htp_mm_kernel_params` by a composite key (src0 tensor pointer XOR weight data pointer XOR ne11):
 
 ```cpp
-const uintptr_t cache_key = (uintptr_t) src0->data ^ ((uintptr_t) ne11 << 32);
+const uintptr_t cache_key = (uintptr_t) src0 ^ (uintptr_t) src0->data ^ ((uintptr_t) ne11 << 32);
 auto it = ctx->mm_params_cache.find(cache_key);
 if (it != ctx->mm_params_cache.end()) {
     *kparams = it->second;
@@ -535,7 +539,7 @@ if (it != ctx->mm_params_cache.end()) {
 
 This skips the multi-hundred-microsecond thread/chunk search in `htp_mm_hvx_vtcm_layout_build` / `htp_mm_hmx_vtcm_layout_build` for repeated MUL_MAT calls with the same weight tensor. For TG (where ne11=1 for every token), the cache hits after the first token.
 
-Qualcomm's `ggml_hexagon_precompute_matmul_params` performs the same VTCM layout computation but does not cache the result across calls. JZ's `mm_params_cache` write path is currently **disabled** in code (ION key collision; see `ggml-hexagon-jz.cpp:3176-3181`), so in practice both backends recompute precompute params on every call.
+Qualcomm's `ggml_hexagon_precompute_matmul_params` performs the same VTCM layout computation but does not cache the result across calls. JZ's write path is enabled: the key includes the src0 tensor pointer to avoid the earlier ION-reuse collision (see `ggml-hexagon-jz.cpp:3010` lookup, `:3074` store), so repeated MUL_MAT calls skip the layout recomputation that QCOM still performs on every call. (Corrected 2026-07-22.)
 
 ***
 
@@ -575,7 +579,7 @@ Previously `dsp_cache_mode=7` (all bits on) was the default. The 2026-07-11 inve
 
 The safe baseline at that time was `dsp_cache_mode=4` (bulk dst flush only). Bit 1 cannot be re-enabled without QCOM matmul kernel changes (out of scope for an integration-layer PR).
 
-**Update (2026-07-21): the default is now dsp_cache_mode=5 (bit0 + bit2).** The bit0 garble turned out to be an implementation bug, not the partial-HVX-write hardware issue: the original first-touch tracker used a hash bitmap whose address collisions caused stale weight reads. It was replaced with an exact sorted pointer array (`g_weight_inval_ptrs`, `WEIGHT_INVAL_MAX_PTRS=4096`, entry.c), plus a two-pass defense (DSP-side unmark when a region is later written as dst + AP-side ever-dst tracking) to close the cross-graph stale-read window. Repack weights are written once at model load and never touched by AP again, so a single first-touch dcinva per weight region covers the whole session - this is what made the session-resident repacked lm-head practical. bit1 remains off: the deferred-flush pattern (bit2) is unsafe to combine with bit1 for anything above a single cacheline (L2 can evict dirty dst data before the deferred flush, causing stale DRAM reads). A bit3 (selective bulk flush) was also added: the batch-end flush skips intermediates still consumed by later ops in the same batch (`g_tensor_last_use_op` in entry.c), flushing only final outputs, mirrored tensors, and KV views. Mode=5 is validated on v79; v75 validation is pending (see Status Update).
+**Update (2026-07-21): the default is now dsp_cache_mode=5 (bit0 + bit2).** The bit0 garble turned out to be an implementation bug, not the partial-HVX-write hardware issue: the original first-touch tracker used a hash bitmap whose address collisions caused stale weight reads. It was replaced with an exact sorted pointer array (`g_weight_inval_ptrs`, `WEIGHT_INVAL_MAX_PTRS=4096`, entry.c), plus a two-pass defense (DSP-side unmark when a region is later written as dst + AP-side ever-dst tracking) to close the cross-graph stale-read window. Repack weights are written once at model load and never touched by AP again, so a single first-touch dcinva per weight region covers the whole session - this is what made the session-resident repacked lm-head practical. bit1 remains off: the deferred-flush pattern (bit2) is unsafe to combine with bit1 for anything above a single cacheline (L2 can evict dirty dst data before the deferred flush, causing stale DRAM reads). A bit3 (selective bulk flush) was also added: the batch-end flush skips intermediates still consumed by later ops in the same batch (`g_tensor_last_use_op` in entry.c), flushing only final outputs, mirrored tensors, and KV views. Mode=5 is validated on v79 and v75 (see Current Status).
 
 ### 11.3 ion_sync_mode=1 is optimal
 
@@ -605,11 +609,11 @@ A `LOG_ALWAYS` longtail probe was added inside the FastRPC dispatch path to log 
 
 ### 12.3 New: mul_mat coverage tracer (commit `0904efaa7`)
 
-Per-batch counters in `hexagon_op_exec_stats_t`: `n_mul_mat_total`, `n_hmx_used`, `n_fused_qkv`, `n_fused_ffn`, `n_fused_mul_mat_add`. See section 4.
+Per-batch counters in `hexagon_op_exec_stats_t`: `n_mul_mat_total`, `n_hmx_used`, `n_fused_qkv`, `n_fused_ffn`, `n_fused_mul_mat_add`. See section 7.
 
 ### 12.4 DSP-side profiler (gated off by default)
 
-`entry.c` includes a per-op timing profiler that records min/max/avg execution time per op type, dumped via `dump_op_prof`. As of commit `7261e75bb`, this is wrapped in `#if HEX_OP_PROF ... #endif` with `HEX_OP_PROF` defaulting to 0 (off). Skel size drops by 6880 bytes (706984 -> 700104). Restore by passing `-DHEX_OP_PROF=1` to `make`.
+`entry.c` includes a per-op timing profiler that records min/max/avg execution time per op type, dumped via `dump_op_prof`. As of commit `7261e75bb`, this is wrapped in `#if HEX_OP_PROF ... #endif`. HEX_OP_PROF is now derived from NDEBUG: the skel Makefile builds with `-DNDEBUG`, so release builds compile the profiler out (skel size drops by 6880 bytes, 706984 -> 700104); a debug skel build re-enables it. (Updated 2026-07-22.)
 
 ### 12.5 New: dsp_cache_trace_bit0/bit1 (commits `5b2aa6244`, `60354c52c`)
 
@@ -677,7 +681,7 @@ Qualcomm's upstream PR improved ARGSORT performance for small tensors. This is i
 
 ### 14.5 dsp_cache_mode=4 set as default (commit `f2f259214` side effect)
 
-The new matmul pipeline (`81ff7abe5`) is incompatible with `dsp_cache_mode` bits 0 and 1 (see section 8). The default was changed from 7 (all on) to 4 (bulk dst flush only) to avoid garbled output on the new pipeline.
+The new matmul pipeline (`81ff7abe5`) was believed incompatible with `dsp_cache_mode` bits 0 and 1 (see section 11.2). The default was changed from 7 (all on) to 4 (bulk dst flush only) to avoid garbled output on the new pipeline. (Superseded 2026-07-21 for bit0: the garble was a hash-collision bug in the first-touch tracker, fixed by the exact pointer array - the default is now mode=5; bit1 remains off.)
 
 ### 14.6 Build system unification for upstream submission
 
@@ -813,7 +817,7 @@ The two descriptors are functionally equivalent. The key structural differences:
 | Multi-buffer support | No (single ION pool)              | Yes (via `bi` indexing into `htp_buf_desc[]`) |
 | Type width           | `int32_t`                         | `uint16_t`/`uint32_t` (more compact)          |
 
-The `bi` field is the key differentiator for multi-buffer support. JZ always passes `bi=0` (single ION pool); Qualcomm uses it to index into `htp_buf_desc[]`. This is tied to the FastRPC call pattern difference (section 3) and would need to change together if JZ adopts dspqueue.
+The `bi` field is the key differentiator for multi-buffer support. JZ always passes `bi=0` (single ION pool); Qualcomm uses it to index into `htp_buf_desc[]`. This is tied to the FastRPC call pattern difference (section 6) and would need to change together if JZ adopts dspqueue.
 
 ***
 
@@ -862,7 +866,7 @@ This is directly relevant to the TG gap: `flash-attn-ops.c` is the TG hot spot (
 
 ## 17. Summary: Performance Difference Ranking (2026-07-11, superseded 2026-07-21)
 
-> **Note (2026-07-22)**: This ranking is kept as a historical record of the 2026-07-11 state. Both gaps were closed and reversed on 2026-07-21 (JZ PP 567-571 / TG 26.8-28 vs QCOM PP ~369 / TG ~26); see the Status Update at the top.
+> **Note (2026-07-22)**: This ranking is kept as a historical record of the 2026-07-11 state. Both gaps were closed and reversed on 2026-07-21 (JZ PP 567-571 / TG 26.8-28 vs QCOM PP ~369 / TG ~26); see Current Status at the top.
 
 **Table 10: Performance difference ranking (2026-07-11)**
 
@@ -875,7 +879,7 @@ This is directly relevant to the TG gap: `flash-attn-ops.c` is the TG hot spot (
 | 5    | Batch auto-splitting | Graph cache + ubatch fix         | Auto-split by vmem limits   | Small                        |
 | 6    | Tensor descriptor    | Single ION offset                | Two-level (bi + offset)     | (design choice)              |
 
-**Bottom line** (updated 2026-07-22): **Both gaps are closed and reversed.** As of 2026-07-21, JZ reaches PP ~567-571 / TG ~26.8-28 tok/s vs QCOM PP ~369 mean / TG ~26 on the same device, same model, same CLI. The three enabling changes: lm-head offloaded to DSP as Q4_0 tiled repack (session-resident in the single ION pool, eliminating the ~30 ms/token CPU matvec), dsp_cache_mode=5 (bit0 re-enabled with an exact sorted pointer array), and DSP-side debug logging removed (`-DNDEBUG` skel build). See the Status Update at the top for details.
+**Bottom line** (updated 2026-07-22): **Both gaps are closed and reversed.** As of 2026-07-21, JZ reaches PP ~567-571 / TG ~26.8-28 tok/s vs QCOM PP ~369 mean / TG ~26 on the same device, same model, same CLI. The three enabling changes: lm-head offloaded to DSP as Q4_0 tiled repack (session-resident in the single ION pool, eliminating the ~30 ms/token CPU matvec), dsp_cache_mode=5 (bit0 re-enabled with an exact sorted pointer array), and DSP-side debug logging removed (`-DNDEBUG` skel build). See Current Status at the top for details.
 
 **Bottom line** (historical, 2026-07-15): On the 2026-07-11 evening same-day comparison, JZ PP (339.12) is marginally ahead of QCOM PP (334.36) - PP gap closed and reversed. By 2026-07-13, JZ PP peak hit 378.57 tok/s, matching Qualcomm's peak of 380.78 tok/s.
 
@@ -917,7 +921,7 @@ The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput 
 - mul_mat coverage tracer (commit `0904efaa7`)
 - longtail profiler (commit `af2cb4418`, `#if 0` gated)
 - dsp_cache_trace_bit0/bit1 (commits `5b2aa6244`, `60354c52c`)
-- HEX_OP_PROF compile switch (commit `7261e75bb`, default off)
+- HEX_OP_PROF compile switch (commit `7261e75bb`; now derived from NDEBUG)
 
 ***
 
@@ -997,7 +1001,7 @@ DSP-side execution (`dsp_exec`) accounts for 76% of total TG time (10.26 s). The
     - mul_mat coverage tracer
     - dsp_cache_trace_bit0/bit1
 8. **ARMv8.7+i8mm compiler flags** (PARITY with Qualcomm)
-    - Both backends use the same flags (see Section 13)
+    - Both backends use the same flags (see Section 16)
 9. **batch\_calls reduced from 40000+ to 4352**
     - Graph cache + ubatch\_size regression fix
 10. **Upstream master merged + adapted** (2026-07-05 to 2026-07-11)

@@ -1,18 +1,13 @@
 > Author: Kimi-K2.7-Code
-> Date: 2026-07-13 (revised 2026-07-16, 2026-07-21)
+> Date: 2026-07-13 (revised 2026-07-16 by DeepSeek-V4-Pro, Kimi-K2.7-Code, MiniMax-M3, GLM-5.2; revised 2026-07-21 / 2026-07-22 by Kimi-K3)
 > Context: follow-up to `warmup-ab-test-and-analysis-20260713.md`
 >
-> Revised 2026-07-16 by DeepSeek-V4-Pro, Kimi-K2.7-Code, MiniMax-M3, GLM-5.2:
-> - Full code-level comparison cross-referenced against `ggml-hexagon.cpp`, `ggml-hexagon-jz.cpp`, `htp/htp-ops.h`, `htp/dsp-ctx.h`, `htp/entry.c`, `htp/main.c`; corrections backed by live JZ inference data (gemma-4-E2B-it-Q4_0).
-> - Experimentally ruled out rpc_mmap_mode, AP/DSP pre-touch as jitter fixes; code-verified that both JZ and Qualcomm backends explicitly disable DCVS and pin DSP to max corners. Identified L2 cache alias variance (consistent with physically-indexed cache, e.g., PIPT; exact microarchitecture not publicly documented) as the only tested factor with significant correlation. Remaining uninvestigated factors include thermal, link order, memory bus contention, and multi-process interference.
-> - Softened absolute claims to qualified inferences; added JZ 7-run mean (~349 tok/s, 2026-07-15); refined PP jitter range to ~320-390 tok/s for both implementations.
-> - Code-verified all technical claims against source; marked `pretouch_ion` as reverted experiment; corrected "one bad address affects all tensors" misconception (single ION allocation has contiguous CPU virtual + DSP IOVA but scattered physical pages); updated comparison table and conclusion; added table note on tested-no-effect dimensions; renamed section header to match content; fixed causal-chain diagram alignment; toned down advocacy language; added source-literature qualifier; compressed header; corrected "DSP L2 spatial locality" to "IOVA spatial locality (prefetch/TLB)" for consistency with PIPT hypothesis; corrected "per-tensor" to "per-buffer" (multiple tensors may share one buffer); clarified SYSTEM heap does not require physical contiguity; replaced unicode arrows with ASCII.
+> **Current conclusion (2026-07-22): the single ION shared mempool is the better architecture for this workload, proven in practice.** JZ exceeds Qualcomm on both PP and TG (v79: PP 689.72 / TG 27.72 vs QCOM PP ~369 / TG ~26), enabled by a session-resident ~214 MB repacked lm-head that the per-buffer ION design cannot express economically. Validated on v79 (8 Elite) and v75 (8 Gen3); v73/v81 not yet validated. The 2026-07-16 assessment "per-buffer is more practical under the current constraints" is superseded; the historical analysis is kept for context and is marked as such inline.
 >
-> Revised 2026-07-21 by Kimi-K3:
-> - Measured breakthrough: with lm-head offloaded into the single ION pool (Q4_K stored as Q4_0 tiled repack, 214MB streamed per token), first-touch weight invalidation (dsp_cache_mode=5), and DSP-side debug logging removed, JZ reaches PP ~567-571 tok/s and TG ~26.8-28 tok/s on gemma-4-E2B-it-Q4_0, exceeding Qualcomm's ggml-hexagon (PP ~369 mean / 381 peak, TG ~26) under identical test conditions on the same Snapdragon 8 Elite device.
-> - **Verification scope: all 2026-07-21 results were verified only on Snapdragon 8 Elite (aka 8 Gen4, DSP arch v79).** Other arch versions (v73 / 8 Gen2, v75 / 8 Gen3, v81 / 8 Elite Gen5) are built by the script but not yet validated with these optimizations; numbers may differ (DSP clock, LP-DDR5x bandwidth, pool capacity cap).
-> - The single ION mempool's decisive advantage is now demonstrated in practice: a ~214MB repacked lm-head stays resident for the whole session at zero recurring map/fd/lifecycle cost, which the per-buffer ION design cannot express economically. The earlier "per-buffer is more practical" assessment is superseded; historical analysis kept for context.
-> - Updated PP jitter analysis: three software jitter sources were identified and removed (periodic DSP-side profiler dumps, the CPU-resident lm-head segment, redundant per-token weight invalidation); the observed PP distribution tightened substantially. The L2 physical-alias hypothesis remains as the residual explanation.
+> Revision history:
+> - 2026-07-16: full code-level comparison against both AP codebases and `htp/`; experimentally ruled out rpc_mmap_mode and AP/DSP pre-touch as PP-jitter fixes; identified L2 physical-address alias variance as the only tested factor correlating with PP jitter; qualified absolute claims.
+> - 2026-07-21: measured breakthrough (lm-head DSP offload + dsp_cache_mode=5 + DSP log removal); superseded the "per-buffer is more practical" assessment; updated PP jitter analysis (three software jitter sources removed).
+> - 2026-07-22: updated numbers (v79 PP 689.72 / TG 27.72); v75 validated (PP 215.38 / TG 20.60, thread_counts clamped to `max_hw_threads - 2 = 4`).
 
 ---
 
@@ -22,10 +17,11 @@
 
 | Implementation | PP (tok/s) | TG (tok/s) |
 |---|---|---|
-| JZ ggml-hexagon (dsp_cache_mode=5) | 567-571 | 26.8-28 |
-| Qualcomm ggml-hexagon | ~369 (peak 381) | ~26 |
+| JZ ggml-hexagon (dsp_cache_mode=5), v79 | 567-571 (689.72 on 2026-07-22) | 26.8-28 |
+| JZ ggml-hexagon (dsp_cache_mode=5), v75 | 215.38 | 20.60 |
+| Qualcomm ggml-hexagon, v79 | ~369 (peak 381) | ~26 |
 
-*Verified only on Snapdragon 8 Elite (v79); v73/v75/v81 not yet validated with these optimizations.*
+*Verified on Snapdragon 8 Elite (v79) and 8 Gen3 (v75, thread_counts clamped to `max_hw_threads - 2` = 4); v73/v81 not yet validated.*
 
 The changes that produced this result are documented in section 2 ("The decisive single-pool advantage demonstrated during optimization"). The subsections below are kept as the historical record of the pre-optimization state (2026-07-13 to 2026-07-16).
 
@@ -223,7 +219,7 @@ Note: Qualcomm Adreno GPU (same SoC as Hexagon DSP) is expected to be less sensi
 
 This sensitivity to physical address non-determinism is a common characteristic of DSP architectures that evolved from MCU roots — DSPs historically ran without MMUs, and physically-indexed caches are often associated with low-latency DSP pipelines (based on general DSP architecture literature; modern Hexagon V79 has SMMU support, but the L2 cache indexing choice is independent of SMMU presence). This makes Hexagon DSP uniquely vulnerable to physical address non-determinism, which is unavoidable in Linux's ION/DMA-BUF ecosystem.
 
-**Qualification (2026-07-21):** after the optimization campaign, the observed PP jitter improved significantly. Three software jitter sources were removed: (a) periodic DSP-side FARF profiler dumps (every 25 batches) and per-op instrumentation, which ran synchronously with DSP execution; (b) the CPU-resident lm-head segment - the CPU is the least deterministic execution unit in the path (core scheduling, frequency governor, affinity), and offloading it removed its variance from the critical path; (c) redundant per-token weight invalidation, whose cost depended on L2 residency state. The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance, but it no longer dominates the observed PP. Current practical range: PP ~530-570 tok/s (gemma-4-E2B-it-Q4_0), versus the historical ~320-390.
+**Qualification (2026-07-21):** after the optimization campaign, the observed PP jitter improved significantly. Three software jitter sources were removed: (a) periodic DSP-side FARF profiler dumps (every 25 batches) and per-op instrumentation, which ran synchronously with DSP execution; (b) the CPU-resident lm-head segment - the CPU is the least deterministic execution unit in the path (core scheduling, frequency governor, affinity), and offloading it removed its variance from the critical path; (c) redundant per-token weight invalidation, whose cost depended on L2 residency state. The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance, but it no longer dominates the observed PP. Current practical range: PP ~530-690 tok/s (gemma-4-E2B-it-Q4_0), versus the historical ~320-390.
 
 **Historical recommendation (2026-07-16, superseded):**
 
@@ -310,8 +306,8 @@ The pool approach has lower fd and mapping overhead when batches are frequent an
 
 ## 4. Summary
 
-- **(2026-07-21) JZ exceeds Qualcomm on both PP and TG under identical test conditions**: PP ~567-571 / TG ~26.8-28 (JZ, dsp_cache_mode=5) vs PP ~369 (peak 381) / TG ~26 (Qualcomm), gemma-4-E2B-it-Q4_0, same Snapdragon 8 Elite device. Both run the same HMX kernels; the difference is architectural. Verified only on Snapdragon 8 Elite (v79); v73/v75/v81 not yet validated with these optimizations.
+- **(2026-07-21, updated 2026-07-22) JZ exceeds Qualcomm on both PP and TG under identical test conditions**: PP ~567-571 (689.72 on 2026-07-22) / TG ~26.8-28 (JZ, dsp_cache_mode=5) vs PP ~369 (peak 381) / TG ~26 (Qualcomm), gemma-4-E2B-it-Q4_0, same Snapdragon 8 Elite device. Both run the same HMX kernels; the difference is architectural. Verified on Snapdragon 8 Elite (v79) and 8 Gen3 (v75: PP 215.38 / TG 20.60, thread_counts clamped to `max_hw_threads - 2` = 4); v73/v81 not yet validated.
 - **The single ION mempool's unique advantage is now proven in practice**: a ~214 MB repacked lm-head stays resident for the whole session at zero recurring map/fd/lifecycle cost - something the per-buffer ION design cannot express economically. Combined with the Q4_K->Q4_0 repack (halves lm-head bandwidth to 214 MB/token) and first-touch weight invalidation (~9.2 ms/token saved), TG went from 14.19 to 26.8-28 tok/s.
 - **User-space cache management flipped from liability to asset**: role-aware invalidation (weight vs activation, bit 0 first-touch) is a policy the closed-source driver's uniform per-batch flush cannot express. The two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) resolved the historical bit-0 garble risk; mode=5 passes correctness on gemma4, qwen3, and qwen3-mtp.
-- **PP jitter analysis updated**: three software jitter sources were removed (DSP-side profiler dumps, the CPU-resident lm-head segment, redundant weight invalidation), and the observed PP distribution tightened substantially (current practical range ~530-570). The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance: it is consistent with a physically-indexed cache reacting to non-deterministic physical pages from `rpcmem_alloc2`, affects both implementations, and is not fixable in user space.
+- **PP jitter analysis updated**: three software jitter sources were removed (DSP-side profiler dumps, the CPU-resident lm-head segment, redundant weight invalidation), and the observed PP distribution tightened substantially (current practical range ~530-690). The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance: it is consistent with a physically-indexed cache reacting to non-deterministic physical pages from `rpcmem_alloc2`, affects both implementations, and is not fixable in user space.
 - **Control-plane primitives differ** (`dspqueue` vs. native FastRPC `invoke`), but the data plane and the descriptor-dispatch flow are fundamentally the same. The measured performance difference comes from data-plane policy (weight residency + role-aware cache management), not from the control plane.
