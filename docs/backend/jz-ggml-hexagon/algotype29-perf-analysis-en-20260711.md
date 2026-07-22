@@ -1,4 +1,4 @@
-# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12, corrected 2026-07-15, revised 2026-07-16)
+# algotype=29 Performance Analysis: JZ vs Qualcomm ggml-hexagon Backend (2026-07-11, reviewed 2026-07-12, corrected 2026-07-15, revised 2026-07-16, revised 2026-07-22)
 
 ## Author
 
@@ -8,8 +8,9 @@ review of the JZ (`ggml-hexagon-jz.cpp`, `htp/entry.c`) and Qualcomm (`ggml-hexa
 - TG gap root-cause correction by Kimi-K2.7-Code (2026-07-13, see Correction Note below).
 - Revised by GLM-5.2 (2026-07-15, root cause correction per Kimi-K2.7-Code 0713 analysis, added 2026-07-15 benchmark data).
 - Revised by Qwen3.7-Plus (2026-07-16, fix incorrect description).
+- Revised by Kimi-K3 (2026-07-22, Status Update: TG gap closed and reversed; lm-head DSP offload; dsp_cache_mode=5; v75/8Gen3 bring-up thread clamp).
 - Project author: Jeff Zhou (zhouwg) (2024-03 to present, see timeline at https://github.com/zhouwg/ggml-hexagon/discussions/18).
-- Project co-authors: GLM-5.2 (2026-06 to present), MiniMax-M3 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to present, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), Kimi-K2.7-Code(2026-07-13 to present, fix issues in dsp_cache_mode=5/7, PP optimization, two important docs), Qwen3.7-Plus(2026-07-16 to present, review docs).
+- Project co-authors: GLM-5.2 (2026-06 to present), MiniMax-M3 (2026-06-28 to present, AP&DSP optimization, build system unification, CI improvements, multi-document drafting, non-technical discussion), DeepSeek-V4-Pro (2026-07-05 to present, AP-side cache coherency optimization with `ion_sync_mode` knob family, CI improvements, code refine in removed algotype !=29 kernels), Kimi-K2.7-Code(2026-07-13 to 2026-07-17, fix issues in dsp_cache_mode=5/7, PP optimization, two important docs), Qwen3.7-Plus(2026-07-16 to present, review docs), Kimi-K3(2026-07-17 to present, TG optimization(bf16 support, lm-head DSP offload, dsp_cache_mode bit0 re-enable), DSP debug log removal, v75 thread clamp, doc updates).
 
 ## Correction Note (2026-07-15)
 
@@ -45,6 +46,29 @@ The latest PP data (2026-07-13): JZ PP peak hit 378.57 tok/s (post-warmup valida
 | **Stats** | | **mean 349.33, peak 368.17** | **mean 19.46** |
 
 PP shows the classic cold-start decline: runs 1-2 (365-368) benefit from cold ION mapping; after warmup the stable mean (runs 3-7) settles at ~342. TG is remarkably stable across all runs (19.28-19.84, range <3%), confirming that TG is compute-bound (not affected by ION cache state). The cgraph cache hit rate is 99.2% across all runs.
+
+## Status Update (2026-07-22, by Kimi-K3)
+
+**Both the PP and TG gaps are closed and reversed.** Measured 2026-07-21 on the same Snapdragon 8 Elite (v79, OnePlus 13), same model (gemma-4-E2B-it-Q4_0), same CLI as section 3.1:
+
+**Table-0b**: 2026-07-21 JZ vs QCOM (same device, same model)
+
+| Backend | PP (tok/s) | TG (tok/s) |
+| ------- | ---------- | ---------- |
+| JZ      | 640-690    | 26.8-28    |
+| QCOM    | ~369 mean / 395 peak | ~26 |
+
+Three changes between 2026-07-16 and 2026-07-21 produced this result:
+
+1. **lm-head offloaded to DSP (Q4_K stored as Q4_0 tiled repack).** The 262144x1536 lm-head is Q4_K, which the shared `htp/` kernels do not support; it previously ran as a CPU matvec every token (~30 ms of the 56.8 ms/token wall clock, the single largest TG cost). The hard `ne[1] > 32768` rejection for large quantized weights was removed, and a new `repack_q4k_as_q4_0_tiled_to_buf` converter ([ggml-hexagon-jz.cpp:4162](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L4162)) stores the lm-head as Q4_0 tiled layout in the single ION pool (~214 MB, session-resident, streamed from DDR once per token). Qualcomm's per-buffer ION design makes a 214 MB per-buffer map/unmap per session prohibitive, so their lm-head stays on CPU; the single ION pool turns this into a one-time repack. See [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md).
+2. **dsp_cache_mode=5 (bit0 re-enabled).** The first-touch weight-invalidation tracker was re-implemented as an exact sorted pointer array (`g_weight_inval_ptrs`, `WEIGHT_INVAL_MAX_PTRS=4096`, entry.c) instead of the hash bitmap whose address collisions caused the 0711-era garble. Repack weights are written once at model load and never touched by AP again, so a single first-touch dcinva per weight region covers the whole session. A two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) closes the cross-graph stale-read window. bit1 remains off. See section 11.2.
+3. **DSP-side debug logging removed.** The skel Makefile now builds with `-DNDEBUG`, compiling out the FARF debug/printf paths in entry.c and the shared kernels. Removing them measurably improved both PP and TG (final numbers above).
+
+Also in this window: BF16 was added to the offloaded MUL_MAT types (stored as F16 in the repack buffer, reusing the F16 DSP kernels) - the change that first pushed PP past 500; and `dsp_cache_mode` bit3 (selective bulk flush) was added, which skips the batch-end flush for intermediates still consumed by later ops in the same batch (`g_tensor_last_use_op` in entry.c).
+
+**Correction to the 2026-07-15 root-cause attribution.** The "15 ms/token accumulated FastRPC sync overhead" explanation overstated the dispatch component. The 2026-07-19 per-phase measurement showed wall clock 56.8 ms/token vs DSP op execution 26.2 ms/token, and the dominant non-op item was the CPU lm-head matvec (~30 ms), not FastRPC round trips (pure FastRPC/ION transport overhead measured at ~137 us/call upper bound, warmup probe). With lm-head on DSP and mode=5, JZ TG exceeds QCOM TG without any batch-level pipelining - the synchronous FastRPC architecture is no longer the TG bottleneck on this workload. The batch-level-pipelining analysis in [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) remains valid as a description of QCOM's structural advantage, but it is not what capped JZ TG.
+
+**8 Gen 3 (v75) bring-up note (2026-07-22).** The same code deadlocked on Snapdragon 8 Gen 3 at the default `thread_counts=6`. Root cause: cDSP hardware-thread oversubscription. An op needs `thread_counts+1` co-resident QuRT threads (FastRPC main + N-1 work-queue workers + 1 hmx_queue thread); v75 has 6 hardware threads (v79 has 8), so N=6 requires 7 > 6 and the unscheduled worker never decrements the task barrier (QuRT does not preempt equal-priority workers spinning in `hex_pause`). `ggml_dsp_setclocks` now clamps to `max_hw_threads - 2` and reports the effective value through a new `rout int32 real_thread_counts` IDL out-param; AP mirrors it into `ctx->n_threads` so the precomputed `kparams->n_threads` matches the DSP work-queue (a mismatch here made `work_queue_run` reject jobs and silently skip ops, producing garbled output). Residual v75 issue under investigation: garbled output / occasional early exit with dsp_cache_mode=5, which has only been validated on v79 so far.
 
 ## Updates
 
@@ -378,6 +402,8 @@ The per-subgraph gap is small (~0.7 ms/layer), but it accumulates across 21 laye
 
 The path forward for TG is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path. The synchronous architecture is the point of the project; the TG gap is an accepted trade-off that is now understood to be **dispatch-pipeline-bound**, not attention-kernel-bound. See [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) section 3 for the full code-level proof.
 
+> **Update (2026-07-22)**: This attribution was itself superseded. The dominant non-op cost was the CPU lm-head matvec (~30 ms/token), not FastRPC sync overhead; after lm-head offload + dsp_cache_mode=5 + DSP log removal, JZ TG (26.8-28) exceeds QCOM TG (~26) with no pipelining. See the Status Update at the top of this document.
+
 ***
 
 ## 7. Op Fusion Scope (PARITY + VTCM guard added)
@@ -538,15 +564,18 @@ This prevents subtle correctness bugs when multiple Hexagon devices are present 
  - `1` = ion\_sync only (DMA\_BUF\_IOCTL\_SYNC, driver-level)
  - `2` = DC CVAC only (manual cache line management)
 - **DSP side**: Configurable via `dsp_cache_mode` bitmask
- - bit 0: first-touch weight bitmap (skip dcinva for repack weights)
+ - bit 0: first-touch weight invalidation (exact sorted pointer array; skip dcinva for repack weights)
  - bit 1: skip dcinva for prior dst (DSP's own dst writes stay in L2)
  - bit 2: bulk dst flush at batch end (collect/sort/merge dst ranges)
+ - bit 3: selective bulk flush (skip batch-end flush for intermediates still consumed by later ops; added 2026-07-21)
 
-### 11.2 Current safe baseline: dsp_cache_mode=4
+### 11.2 Historical baseline: dsp_cache_mode=4 (superseded 2026-07-21 by mode=5)
 
 Previously `dsp_cache_mode=7` (all bits on) was the default. The 2026-07-11 investigation ([pp-cache-optimization-deadends-20260711.md](pp-cache-optimization-deadends-20260711.md)) found that bits 0 and 1 **garble output** on the new matmul pipeline (upstream `81ff7abe5`). The root cause is a hardware-level L2 cache contract mismatch: the QCOM matmul kernels use partial HVX writes (`hvx_vec_store_u`) for dst as a performance optimization, but the cache optimization in `entry.c` (bits 0, 1) assumes whole-line writes. Partial HVX writes do not set the L2 cache line to "Modified" state in a way that subsequent reads can rely on. These two are incompatible.
 
-The current safe baseline is `dsp_cache_mode=4` (bulk dst flush only). Bits 0 and 1 cannot be re-enabled without QCOM matmul kernel changes (out of scope for an integration-layer PR).
+The safe baseline at that time was `dsp_cache_mode=4` (bulk dst flush only). Bit 1 cannot be re-enabled without QCOM matmul kernel changes (out of scope for an integration-layer PR).
+
+**Update (2026-07-21): the default is now dsp_cache_mode=5 (bit0 + bit2).** The bit0 garble turned out to be an implementation bug, not the partial-HVX-write hardware issue: the original first-touch tracker used a hash bitmap whose address collisions caused stale weight reads. It was replaced with an exact sorted pointer array (`g_weight_inval_ptrs`, `WEIGHT_INVAL_MAX_PTRS=4096`, entry.c), plus a two-pass defense (DSP-side unmark when a region is later written as dst + AP-side ever-dst tracking) to close the cross-graph stale-read window. Repack weights are written once at model load and never touched by AP again, so a single first-touch dcinva per weight region covers the whole session - this is what made the session-resident repacked lm-head practical. bit1 remains off: the deferred-flush pattern (bit2) is unsafe to combine with bit1 for anything above a single cacheline (L2 can evict dirty dst data before the deferred flush, causing stale DRAM reads). A bit3 (selective bulk flush) was also added: the batch-end flush skips intermediates still consumed by later ops in the same batch (`g_tensor_last_use_op` in entry.c), flushing only final outputs, mirrored tensors, and KV views. Mode=5 is validated on v79; v75 validation is pending (see Status Update).
 
 ### 11.3 ion_sync_mode=1 is optimal
 
@@ -831,7 +860,9 @@ This is directly relevant to the TG gap: `flash-attn-ops.c` is the TG hot spot (
 
 ***
 
-## 17. Summary: Performance Difference Ranking (2026-07-11)
+## 17. Summary: Performance Difference Ranking (2026-07-11, superseded 2026-07-21)
+
+> **Note (2026-07-22)**: This ranking is kept as a historical record of the 2026-07-11 state. Both gaps were closed and reversed on 2026-07-21 (JZ PP 567-571 / TG 26.8-28 vs QCOM PP ~369 / TG ~26); see the Status Update at the top.
 
 **Table 10: Performance difference ranking (2026-07-11)**
 
@@ -844,11 +875,13 @@ This is directly relevant to the TG gap: `flash-attn-ops.c` is the TG hot spot (
 | 5    | Batch auto-splitting | Graph cache + ubatch fix         | Auto-split by vmem limits   | Small                        |
 | 6    | Tensor descriptor    | Single ION offset                | Two-level (bi + offset)     | (design choice)              |
 
-**Bottom line** (corrected 2026-07-15): On the 2026-07-11 evening same-day comparison, JZ PP (339.12) is marginally ahead of QCOM PP (334.36) - PP gap closed and reversed. By 2026-07-13, JZ PP peak hit 378.57 tok/s, matching Qualcomm's peak of 380.78 tok/s.
+**Bottom line** (updated 2026-07-22): **Both gaps are closed and reversed.** As of 2026-07-21, JZ reaches PP ~567-571 / TG ~26.8-28 tok/s vs QCOM PP ~369 mean / TG ~26 on the same device, same model, same CLI. The three enabling changes: lm-head offloaded to DSP as Q4_0 tiled repack (session-resident in the single ION pool, eliminating the ~30 ms/token CPU matvec), dsp_cache_mode=5 (bit0 re-enabled with an exact sorted pointer array), and DSP-side debug logging removed (`-DNDEBUG` skel build). See the Status Update at the top for details.
+
+**Bottom line** (historical, 2026-07-15): On the 2026-07-11 evening same-day comparison, JZ PP (339.12) is marginally ahead of QCOM PP (334.36) - PP gap closed and reversed. By 2026-07-13, JZ PP peak hit 378.57 tok/s, matching Qualcomm's peak of 380.78 tok/s.
 
 The TG gap (1.40x, 18.90 vs 26.40) is **dispatch-pipeline-bound**, not attention-kernel-bound. Both backends share the same `flash-attn-ops.c` kernel (the TG hot spot at 27 ms/token for both), so the kernel cannot be the source of the difference. The gap is from JZ's synchronous FastRPC architecture: each of the ~17 subgraphs per token pays a full round-trip + cache-sync cycle with no overlap, while Qualcomm's dspqueue pipelines AP preparation with DSP execution (up to 16 batches in flight). The 0.72 ms/layer x 21 layers = 15.1 ms accumulated sync overhead matches the measured 15.01 ms per-token TG gap.
 
-The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput for **both** backends equally; it is not a factor in the JZ-vs-QCOM gap. The decisive finding is that **ARM CPU TG (32.4 t/s) > Hexagon DSP TG (18.90 t/s) on gemma-4-E2B-it by 1.71x**, because the ARM CPU is at the DDR bandwidth ceiling (48.6 GB/s measured vs 51.2 GB/s physical peak) while the DSP is not. The path forward is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path.
+The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput for **both** backends equally; it is not a factor in the JZ-vs-QCOM gap. The decisive finding is that **ARM CPU TG (32.4 t/s) > Hexagon DSP TG (18.90 t/s) on gemma-4-E2B-it by 1.71x**, because the ARM CPU is at the DDR bandwidth ceiling (48.6 GB/s measured vs 51.2 GB/s physical peak) while the DSP is not. The path forward is **hybrid scheduling** (PP on DSP, TG on CPU) or adding batch-level pipelining to JZ's dispatch path. *(This paragraph is the 2026-07-15 view, superseded 2026-07-21: JZ DSP TG is now 26.8-28 t/s, and hybrid scheduling is an optional further upside rather than the required path - see section 18.1.)*
 
 ### 17.1 Changes from 2026-07-05
 
@@ -866,6 +899,11 @@ The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput 
 | TG bottleneck           | **IDENTIFIED** - FLASH_ATTN_EXT (1.29 ms x 21 = 27 ms/token, shared by both backends; not the JZ-vs-QCOM gap source) |
 | ARM CPU TG ceiling      | **MEASURED** - 32.4 t/s, DDR-bandwidth-bounded (1.71x DSP TG) |
 | dsp_cache_mode          | **SETTLED** - mode 4 (bulk dst flush only); bits 0/1 garble on new pipeline |
+| lm-head on DSP          | **RESOLVED (2026-07-21)** - Q4_K stored as Q4_0 tiled repack, ~214 MB session-resident in the single ION pool; removed the ~30 ms/token CPU matvec; the `ne[1] > 32768` limit is gone |
+| dsp_cache_mode default  | **MODE 5 (2026-07-21)** - bit0 re-enabled via exact sorted pointer array + two-pass defense; bit3 selective bulk flush added |
+| DSP debug logging       | **REMOVED (2026-07-21)** - skel built with `-DNDEBUG`; measurable PP/TG gain |
+| TG vs QCOM              | **EXCEEDED (2026-07-21)** - JZ TG 26.8-28 vs QCOM ~26 tok/s; PP 567-571 vs ~369 |
+| v75/8Gen3 thread clamp  | **ADDED (2026-07-22)** - setclocks clamps to `max_hw_threads - 2`; new `rout real_thread_counts` keeps AP kparams in sync |
 | LTO                     | **REJECTED** - net regression (-9% to -14% PP)             |
 | flash-attn-ops.c -O3    | **BLOCKED** - LLVM 19.0.07 PromoteFloatResult bug; needs backend patch |
 
@@ -885,9 +923,11 @@ The `flash-attn-ops.c` -O2 limit (LLVM 19.0.07 bug) caps absolute TG throughput 
 
 ## 18. Optimization Recommendations
 
-> **Design principle**: JZ backend uses an independent ION-based op-batch architecture with synchronous FastRPC. Adopting Qualcomm's dspqueue is explicitly out of scope - the independent architecture is the point of the project. The TG gap vs Qualcomm (~18.90 vs ~26.40 tok/s) is an accepted trade-off of this design. Recommendations below focus on improvements within the ION-based architecture, and on the new hybrid scheduling path identified on 2026-07-11.
+> **Design principle**: JZ backend uses an independent ION-based op-batch architecture with synchronous FastRPC. Adopting Qualcomm's dspqueue is explicitly out of scope - the independent architecture is the point of the project. ~~The TG gap vs Qualcomm (~18.90 vs ~26.40 tok/s) is an accepted trade-off of this design~~ *(closed and reversed 2026-07-21: JZ TG 26.8-28 vs QCOM ~26)*. Recommendations below focus on improvements within the ION-based architecture, and on the new hybrid scheduling path identified on 2026-07-11.
 
-### 18.1 Priority 1: Phase-aware hybrid scheduling (high ROI, high effort)
+### 18.1 Priority 1: Phase-aware hybrid scheduling (SUPERSEDED 2026-07-21 as the TG-gap remedy)
+
+**Status update**: The TG target (match or exceed QCOM's ~26 tok/s) was reached on-DSP on 2026-07-21 (26.8-28 tok/s) via lm-head offload + dsp_cache_mode=5 + DSP log removal, without hybrid scheduling. The ARM CPU TG ceiling measurement (32.4 tok/s, DDR-bounded) remains valid, so hybrid scheduling is still a possible further upside, but it is no longer the required path to match QCOM. The original 2026-07-11 text below is kept for the record.
 
 ARM CPU TG (32.4 t/s) is 1.71x the Hexagon DSP TG (18.90 t/s) on gemma-4-E2B-it, because the ARM CPU is at the DDR bandwidth ceiling while the DSP is not. The path forward is:
 
@@ -990,6 +1030,23 @@ DSP-side execution (`dsp_exec`) accounts for 76% of total TG time (10.26 s). The
     - JZ TG=18.90, QCOM TG=26.40 (QCOM 1.40x faster)
     - Per-token TG gap 15.01 ms matches accumulated per-subgraph sync overhead (corrected 2026-07-15)
     - First same-day comparison where JZ PP >= QCOM PP
+19. **lm-head offloaded to DSP** (2026-07-21)
+    - Removed the `ne[1] > 32768` rejection for large quantized weights
+    - New `repack_q4k_as_q4_0_tiled_to_buf` converter (ggml-hexagon-jz.cpp:4162): Q4_K lm-head stored as Q4_0 tiled layout, ~214 MB session-resident in the single ION pool, streamed per token
+    - Eliminated the ~30 ms/token CPU lm-head matvec (largest single TG cost)
+20. **dsp_cache_mode bit0 re-enabled, mode=5 default** (2026-07-21)
+    - Exact sorted pointer array replaces the collision-prone hash bitmap
+    - Two-pass defense (DSP-side unmark + AP-side ever-dst set) closes cross-graph stale reads
+    - bit3 selective bulk flush added (skip flush for batch-internal intermediates)
+21. **BF16 offload support** (2026-07-21 window)
+    - BF16 in offloaded MUL_MAT types, stored as F16 in the repack buffer, reusing F16 DSP kernels
+    - First change to push PP past 500 tok/s
+22. **DSP debug logging removed** (2026-07-21)
+    - Skel built with `-DNDEBUG`; FARF debug paths compiled out
+    - Final numbers: PP 567-571 / TG 26.8-28 tok/s (exceeding QCOM PP ~369 / TG ~26)
+23. **v75/8Gen3 thread clamp** (2026-07-22)
+    - setclocks clamps `thread_counts` to `max_hw_threads - 2` (an op needs N+1 co-resident QuRT threads: main + N-1 workers + hmx_queue)
+    - New `rout int32 real_thread_counts` IDL out-param; AP mirrors it into `ctx->n_threads` so kparams match the DSP queue
 
 ***
 
