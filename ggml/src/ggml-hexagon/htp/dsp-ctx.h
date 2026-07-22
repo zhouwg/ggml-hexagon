@@ -111,6 +111,7 @@ typedef struct hex_batch_hdr {
 struct dsp_context {
     // Configuration
     int thread_counts;
+    int max_hw_threads;     /* qurt_sysenv_get_max_hw_threads, set once at open */
     int dump_diag_info;
 
     // VTCM

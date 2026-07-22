@@ -1588,7 +1588,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
 
     ctx = (struct dsp_context *)calloc(1, sizeof(struct dsp_context));
     GGML_ASSERT(NULL != ctx);
-    ctx->thread_counts      = 1;
+    ctx->thread_counts      = 4;
     ctx->htp_ctx = (struct htp_context *)calloc(1, sizeof(struct htp_context));
     GGML_ASSERT(NULL != ctx->htp_ctx);
     g_dsp_ctx = ctx;
@@ -1623,6 +1623,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     qurt_sysenv_max_hthreads_t mhwt;
     qurt_sysenv_get_max_hw_threads(&mhwt);
     printf("qurt_hardware_thread_counts = %d\n", mhwt.max_hthreads);
+    g_dsp_ctx->max_hw_threads = mhwt.max_hthreads;
     g_dsp_ctx->thread_counts = mhwt.max_hthreads;
 
     /* Step 1: Power up HVX and HMX */
@@ -1847,15 +1848,33 @@ int ggml_dsp_close(remote_handle64 handle) {
     return 0;
 }
 
-AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 offload_cgraph_type, int32 mulmat_algo, int32 thread_counts) {
-    if (thread_counts <= g_dsp_ctx->thread_counts) {
-        g_dsp_ctx->thread_counts = thread_counts;
+AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requested_thread_counts, int32 * actual_thread_counts) {
+    /* Reserve 2 hw thread slots: one for the hmx_queue thread, one for
+     * FastRPC listener/system activity. An op needs requested_thread_counts+1
+     * co-resident threads; oversubscribing deadlocks because QuRT does
+     * not preempt equal-priority workers spinning in hex_pause, so the
+     * unscheduled worker never decrements the task barrier (observed on
+     * v75/8Gen3: max_hthreads=6, requested_thread_counts=6 hangs; 5 is flaky). */
+    int max_usable = g_dsp_ctx->max_hw_threads - 2;
+    if (requested_thread_counts > max_usable) {
+        printf("setclocks: requested_thread_counts %d exceeds safe limit %d (max_hthreads %d - 2), clamped\n",
+               requested_thread_counts, max_usable, g_dsp_ctx->max_hw_threads);
+        requested_thread_counts = max_usable;
+    }
+    if (requested_thread_counts <= g_dsp_ctx->thread_counts) {
+        g_dsp_ctx->thread_counts = requested_thread_counts;
     }
 
     g_dsp_ctx->dump_diag_info      = diag_info;
 
+    // Expose the actual thread count in effect on DSP side so AP can mirror it
+    // (avoids jobs > work-queue threads when n_act_threads is precomputed on AP).
+    if (actual_thread_counts) {
+        *actual_thread_counts = (int32_t)g_dsp_ctx->thread_counts;
+    }
+
     printf("\n");
-    printf("real thread_counts:             %d\n", g_dsp_ctx->thread_counts);
+    printf("actual thread_counts:           %d\n", g_dsp_ctx->thread_counts);
     printf("dump_diag_info:                 %d\n\n", g_dsp_ctx->dump_diag_info);
 
     // Initialize htp_context for calling Qualcomm's execute_op.

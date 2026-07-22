@@ -122,7 +122,7 @@ PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know ma
 
 #unified command-line parameters used during inference testing for fair performance comparison of PP and TG across Qualcomm's ggml-hexagon and JZ's ggml-hexagon
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --no-mmap --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on"
+running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st"
 
 ######## part-3: utilities and functions ########
 
@@ -397,6 +397,14 @@ function build_arm64
     build_extra_dsp_skels
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
+    #push AP-side libs too: libggml-hexagon.so embeds the regenerated FastRPC stub
+    #which MUST stay in sync with the DSP skel signature, otherwise FastRPC args
+    #get misaligned (root cause of the 8gen3 garbled-output regression).
+    update_ggml_libs
+    commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+        commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+    fi
     show_pwd
 
     cd -
@@ -421,6 +429,12 @@ function build_arm64_debug
     build_extra_dsp_skels debug
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
+    #push AP-side libs too (keep stub/skel in sync, see build_arm64 for rationale)
+    update_ggml_libs
+    commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+        commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+    fi
     show_pwd
 
     cd -
@@ -522,17 +536,18 @@ function build_ggml_hexagon_qcom()
 #for Qualcomm's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmlhtp()
 {
-    echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so"
-case "$HTP_ARCH_VERSION" in
-    v73 | v75 | v79 | v81)
-        adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${HTP_ARCH_VERSION}.so ${REMOTE_PATH}/libggml-htp-${HTP_ARCH_VERSION}.so
-    ;;
-
-    *)
-        show_usage
-        exit 1
-    ;;
-esac
+    for ver in ${HTP_ARCH_VERSIONS}; do
+        case "$ver" in
+            v73 | v75 | v79 | v81)
+                echo "adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ${REMOTE_PATH}/libggml-htp-${ver}.so"
+                adb push ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ${REMOTE_PATH}/libggml-htp-${ver}.so
+            ;;
+            *)
+                show_usage
+                exit 1
+            ;;
+        esac
+    done
 }
 
 
@@ -607,7 +622,7 @@ function is_so_file_changed() {
     local current_md5
     current_md5=$(md5sum "$so_file" | awk '{print $1}')
 
-    # FIRST RUN: no MD5 file → save it, return CHANGED
+    # FIRST RUN: no MD5 file -> save it, return CHANGED
     if [ ! -f "$md5_file" ]; then
         echo "$current_md5" > "$md5_file"
         echo "Initialized MD5 for $so_file"
@@ -623,9 +638,19 @@ function is_so_file_changed() {
         # NO CHANGE
         return 0
     else
-        # CHANGED → update MD5
+        # CHANGED -> update MD5
         echo "$current_md5" > "$md5_file"
         return 1
+    fi
+}
+
+# Persist the current MD5 of a .so to its .md5 cache file. Call this ONLY after
+# the file has been successfully pushed to the device.
+function commit_so_file_md5() {
+    local so_file="$1"
+    local md5_file="${so_file}.md5"
+    if [ -f "$so_file" ]; then
+        md5sum "$so_file" | awk '{print $1}' > "$md5_file"
     fi
 }
 
@@ -688,6 +713,10 @@ function prepare_run_on_phone()
     if [ "${current_build_type}" != "${last_build_type}" ]; then
         printf "build type changed: '%s' -> '%s', force update ggml libs\n\n" "${last_build_type}" "${current_build_type}"
         update_ggml_libs
+        commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+            commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+        fi
         echo "${current_build_type}" > "${last_build_type_file}"
     else
         local need_update=0
@@ -709,10 +738,22 @@ function prepare_run_on_phone()
             fi
         fi
         if [ ${need_update} -eq 0 ]; then
+            #host-side MD5 matches cache, but verify libs actually exist on device
+            #(user may have wiped /data/local/tmp manually, leaving host-side MD5 cache stale)
+            if ! adb shell ls ${REMOTE_PATH}/libggml-cpu.so >/dev/null 2>&1; then
+                printf "device-side libggml-cpu.so missing (maybe /data/local/tmp was wiped), force update ggml libs\n\n"
+                need_update=1
+            fi
+        fi
+        if [ ${need_update} -eq 0 ]; then
             printf "reuse cached/uploaded ggml runtime libs on device side\n\n"
         else
             #upload ggml runtime libs to Android phone
             update_ggml_libs
+            commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
+            if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+                commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+            fi
         fi
     fi
 
@@ -745,7 +786,7 @@ function prepare_run_on_phone()
     # 0x1c = HIGH+ERROR+FATAL (drop LOW+MEDIUM verbose spam; keep diag)
     # 0x18 = ERROR+FATAL  (only errors)
     # 0x00 = silent
-    adb shell "rm /data/local/tmp/${program}.farf"
+    adb shell "rm -f /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
     adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
     #observe cDSP's log with debug build:./scripts/build-run-android.sh build_debug
@@ -771,10 +812,10 @@ function run_llamacli()
 
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
+    echo "${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\""
+               && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
 
 }
 
@@ -881,7 +922,7 @@ function run_ubatchtest()
         running_params="${new_params}"
 
         # print the actual command for reproducibility (captured by tee)
-        echo "CMD: cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" | tee -a "${combined_log}"
+        echo "CMD: cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\"" | tee -a "${combined_log}"
 
         # stream adb output in real-time: terminal <- tmpf <- combined_log
         # First tee writes to tmpf (full capture for later parsing) and forwards to stdout.
@@ -891,7 +932,7 @@ function run_ubatchtest()
         # swallow the terminal stream (the bug we just fixed).
         adb shell "cd ${REMOTE_PATH} \
                   && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-                  && ${REMOTE_PATH}/llama-completion ${running_params} -st -no-cnv -m ${model_path} -p \"${PROMPT_STRING}\"" 2>&1 \
+                  && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\"" 2>&1 \
             | tee "${tmpf}" \
             | tee -a "${combined_log}"
 

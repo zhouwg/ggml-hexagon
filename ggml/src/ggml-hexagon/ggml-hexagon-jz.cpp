@@ -213,6 +213,7 @@ struct ggml_backend_hexagon_context {
     struct qcom_socinfo           socinfo;
 
     int n_threads;
+    int dsp_thread_counts = 0; // actual worker threads in effect on DSP (max_hw_threads - 2)
 
     //Hexagon resource management for the general approach through Hexagon CDSP
     size_t rpc_mempool_capacity;
@@ -1990,7 +1991,15 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     hexagon_error = ggml_dsp_open(final_uri, &ctx->ggmlop_handle);
     if (AEE_SUCCESS == hexagon_error) {
         GGMLHEXAGON_LOG_VERBOSE("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
-        ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, 2, 29, g_hexagon_appcfg.thread_counts);
+        ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.thread_counts, &ctx->dsp_thread_counts);
+        // Mirror DSP-side clamp into the global cfg so subsequent log sites
+        // (including the dtor, where ctx may be unavailable) reflect the
+        // real thread count in effect rather than the user's requested hint.
+        // Guard: on RPC failure dsp_thread_counts stays 0; keep cfg value.
+        if (ctx->dsp_thread_counts > 0) {
+            g_hexagon_appcfg.thread_counts = ctx->dsp_thread_counts;
+            ctx->n_threads = ctx->dsp_thread_counts;
+        }
         ggmlhexagon_set_rpc_latency(ctx->ggmlop_handle, RPC_PM_QOS, 100);
         if (0 != ggmlhexagon_init_rpcmempool(ctx)) {
             GGMLHEXAGON_LOG_ERROR("failed to init rpc mempool");
@@ -6590,10 +6599,11 @@ static void ggml_backend_hexagon_set_n_threads(ggml_backend_t backend, int n_thr
     GGML_ASSERT(ggml_backend_is_hexagon(backend));
 
     struct ggml_backend_hexagon_context * ctx = (struct ggml_backend_hexagon_context *)backend->context;
-    // Clamp to actual CDSP thread count: callers (e.g. test-backend-ops) pass
-    // host CPU count, but kernel_params precompute must match DSP-side reality.
-    ctx->n_threads = (n_threads < g_hexagon_appcfg.thread_counts)
-                   ? n_threads : g_hexagon_appcfg.thread_counts;
+    // Prefer DSP-reported cap (set in ggmlhexagon_init_dsp via setclocks
+    // out param, equals max_hw_threads - 2). Fall back to cfg value if
+    // set_n_threads is called before DSP init completes.
+    const int cap = (ctx->dsp_thread_counts > 0) ? ctx->dsp_thread_counts : g_hexagon_appcfg.thread_counts;
+    ctx->n_threads = (n_threads < cap) ? n_threads : cap;
 }
 
 static int ggml_backend_hexagon_get_device_count() {
