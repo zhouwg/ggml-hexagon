@@ -108,6 +108,8 @@
 #define GGML_HEXAGON_MAX_DEVICES                        16
 #define GGML_HEXAGON_BACKEND_NAME                       "hexagon"
 
+#define GGML_DSP_IDL_VERSION                            "0.0.2"
+
 #define GGMLHEXAGON_LOG_ALWAYS(...)                     ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_NONE , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define GGMLHEXAGON_LOG_ERROR(...)                      ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_ERROR, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 #define GGMLHEXAGON_LOG_WARN(...)                       ggmlhexagon_log_internal(GGML_LOG_LEVEL_WARN , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
@@ -1956,7 +1958,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     GGML_ASSERT(0 != htp_arch);
 
     snprintf(ggmldsp_uri, sizeof(ggmldsp_uri),
-             "file:///libggmldsp-skel-v%u.so?ggml_dsp_skel_handle_invoke&_modver=1.0&_idlver=0.0.1",
+             "file:///libggmldsp-skel-v%u.so?ggml_dsp_skel_handle_invoke&_modver=1.0&_idlver=" GGML_DSP_IDL_VERSION,
              htp_arch);
 
     // Build the final URI for ggml_dsp_open.

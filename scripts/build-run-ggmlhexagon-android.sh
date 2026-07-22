@@ -72,12 +72,13 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSI
 #2. DSP clock rate on 8Gen3 is slower than DSP clock rate on 8Elite.
 #3. 8Elite support for LP-DDR5x memory, up to 5300 MHz; 8Gen3 support for LP-DDR5x memory, up to 4800 MHz.
 
-#modify the following two lines to adapt to test phone
-HTP_ARCH_VERSION=v79
-HTP_ARCH_VERSION_a=V79
-#all DSP skel versions to build and deploy (AP-side lib built once with HTP_ARCH_VERSION, extra DSP skels built via make)
-HTP_ARCH_VERSIONS="v73 v75 v79 v81"
-#HTP_ARCH_VERSIONS="v79"
+#HTP_ARCH_VERSIONS="v79"                         # 8 Elite
+#HTP_ARCH_VERSIONS="v79 v75"                     # 8 Elite + 8Gen3
+#HTP_ARCH_VERSIONS="v73 v75 v79 v81"             # all
+HTP_ARCH_VERSIONS="v79 v75"
+
+# default HTP_ARCH
+HTP_ARCH_VERSION=${HTP_ARCH_VERSIONS%% *}
 
 ######## part-2: prompt and LLM models ########
 
@@ -356,7 +357,7 @@ function build_idl()
 }
 
 
-#build extra DSP skels for versions other than the default HTP_ARCH_VERSION
+#build extra DSP skels (all HTP_ARCH_VERSIONS except the first/default)
 #$1 = "debug" for debug build, anything else for release build
 function build_extra_dsp_skels()
 {
@@ -367,14 +368,13 @@ function build_extra_dsp_skels()
         dsp_debug_flag="-DNDEBUG -Wall"
     fi
 
-    for extra_ver in ${HTP_ARCH_VERSIONS}; do
-        if [ "${extra_ver}" != "${HTP_ARCH_VERSION}" ]; then
-            printf "\n========== build extra DSP skel: libggmldsp-skel-${extra_ver}.so ==========\n"
-            build_idl
-            make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ clean
-            make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
-            /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
-        fi
+    # extras = HTP_ARCH_VERSIONS minus the first element (default)
+    for extra_ver in ${HTP_ARCH_VERSIONS#* }; do
+        printf "\n========== build extra DSP skel: libggmldsp-skel-${extra_ver}.so ==========\n"
+        build_idl
+        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ clean
+        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
+        /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
     done
 }
 
@@ -388,7 +388,7 @@ function build_arm64
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
-    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
@@ -412,7 +412,7 @@ function build_arm64_debug
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
 
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
-    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
@@ -456,7 +456,7 @@ function build_armcpu()
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_cpu
 
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
-    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -mcpu=cortex-x1 -mtune=cortex-x1 -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
+    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=OFF -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cd ${LOCAL_BUILD_DIR}
