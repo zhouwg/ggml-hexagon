@@ -404,6 +404,22 @@ function build_arm64
     commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
         commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+        # backup for AB testing: JZ's AP-side libs + DSP skels
+        # libggml-hexagon.so leaks different libc++ symbols between JZ/QCOM, so all
+        # transitively-linked libs (libggml, libllama, libllama-common, *-impl) must
+        # be swapped together to avoid symbol lookup failures at runtime
+        mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-jz.so
+        for ver in ${HTP_ARCH_VERSIONS}; do
+            if [ -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ]; then
+                /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${PROJECT_ROOT_PATH}/out/ab-test/
+            fi
+        done
     fi
     show_pwd
 
@@ -446,12 +462,31 @@ function build_arm64_qcom
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom
 
+    rm -f ${LOCAL_BUILD_DIR}/.ab_test_runtime
+
     /bin/cp -fv ${PROJECT_ROOT_PATH}/docs/backend/snapdragon/CMakeUserPresets.json .
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cmake --build ${LOCAL_BUILD_DIR}
     #upload the new libggml-htps.so on device side
     prepare_ggmlhtp
+    #push AP-side libs too: QCOM build also needs to sync runtime libs
+    update_ggml_libs
+    # backup for AB testing: QCOM's AP-side libs + DSP skels
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
+        mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-qcom.so
+        for ver in ${HTP_ARCH_VERSIONS}; do
+            if [ -f ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ]; then
+                /bin/cp -fv ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ${PROJECT_ROOT_PATH}/out/ab-test/
+            fi
+        done
+    fi
     show_pwd
 
     /bin/rm -f CMakeUserPresets.json
@@ -505,6 +540,7 @@ function build_ggml_hexagon()
     check_and_download_hexagon_sdk
     dump_vars
     remove_temp_dir
+    rm -f ${LOCAL_BUILD_DIR}/.ab_test_runtime
     build_arm64
 }
 
@@ -672,6 +708,54 @@ function update_ggml_libs()
 }
 
 
+#push JZ runtime .so from out/ab-test/ to device, renaming *-jz.so to canonical names
+function update_jz_libs()
+{
+    local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
+    if [ ! -f ${ab_test_dir}/libggml-hexagon-jz.so ]; then
+        echo "ERROR: ${ab_test_dir}/libggml-hexagon-jz.so not found."
+        echo "Run '$0 build' first to populate AB test backups."
+        exit 1
+    fi
+    adb push ${ab_test_dir}/libggml-hexagon-jz.so          ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-jz.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-jz.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-jz.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-jz.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-bench-impl-jz.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    done
+    adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
+    echo "jz" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    echo "JZ runtime .so pushed to device."
+}
+
+
+#push QCOM runtime .so from out/ab-test/ to device, renaming *-qcom.so to canonical names
+function update_qcom_libs()
+{
+    local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
+    if [ ! -f ${ab_test_dir}/libggml-hexagon-qcom.so ]; then
+        echo "ERROR: ${ab_test_dir}/libggml-hexagon-qcom.so not found."
+        echo "Run '$0 build_qcom' first to populate AB test backups."
+        exit 1
+    fi
+    adb push ${ab_test_dir}/libggml-hexagon-qcom.so          ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-qcom.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    for skel in ${ab_test_dir}/libggml-htp-*.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    done
+    adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
+    echo "qcom" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    echo "QCOM runtime .so pushed to device."
+}
+
+
 #detect build type from build output: hexagon-jz, hexagon-qcom, or cpu-only
 function detect_build_type()
 {
@@ -700,6 +784,21 @@ function prepare_run_on_phone()
     update_cfg
 
     check_prebuilt_models
+
+    # AB test mode: if update_jz_libs/update_qcom_libs set the marker,
+    # skip lib/skel push - user has manually set up the runtime.
+    local ab_test_marker="${LOCAL_BUILD_DIR}/.ab_test_runtime"
+    if [ -f "${ab_test_marker}" ]; then
+        local ab_runtime=$(cat "${ab_test_marker}")
+        printf "AB test mode active: runtime='%s' (skipping lib/skel push)\n\n" "${ab_runtime}"
+        adb push ${LOCAL_BUILD_DIR}/bin/${program} ${REMOTE_PATH}/
+        adb shell ls -l ${REMOTE_PATH}/libggml-*.so
+        adb shell chmod +x ${REMOTE_PATH}/${program}
+        adb shell "rm -f /data/local/tmp/${program}.farf"
+        adb shell "touch /data/local/tmp/${program}.farf"
+        adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
+        return
+    fi
 
     local current_build_type
     current_build_type=$(detect_build_type)
@@ -856,6 +955,131 @@ function run_llamacli_all()
     echo ""
     echo "=============================================="
     echo "  Batch inference test complete: ${total} tests done"
+    echo "=============================================="
+}
+
+
+function run_abtest()
+{
+    # JZ vs QCOM performance comparison test.
+    # Requires out/ab-test/ populated (run 'build' then 'build_qcom' first).
+    # Usage: run_abtest [rounds] [model_alias]
+    #   rounds:      default 3
+    #   model_alias: default gemma4
+    #
+    # Example:
+    #   $0 run_abtest
+    #   $0 run_abtest 5
+    #   $0 run_abtest 3 qwen3
+    #   $0 run_abtest 2>&1 | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt
+
+    local rounds=3
+    local model_path="${GGUF_MODEL_NAME}"
+    local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
+
+    if [ $# -ge 1 ]; then
+        rounds=$1
+    fi
+    if [ $# -ge 2 ]; then
+        local model_alias="$2"
+        model_path=$(resolve_model_name "$model_alias")
+        if [ -z "$model_path" ]; then
+            echo "ERROR: unknown model alias '$model_alias'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            exit 1
+        fi
+    fi
+
+    # sanity check: verify out/ab-test/ has all required .so from both builds
+    local missing=""
+    local jz_libs="libggml-hexagon-jz.so libggml-jz.so libllama-jz.so libllama-common-jz.so libllama-completion-impl-jz.so libllama-bench-impl-jz.so"
+    local qcom_libs="libggml-hexagon-qcom.so libggml-qcom.so libllama-qcom.so libllama-common-qcom.so libllama-completion-impl-qcom.so libllama-bench-impl-qcom.so"
+    for f in ${jz_libs}; do
+        [ ! -f ${ab_test_dir}/${f} ] && missing="${missing} ${f}"
+    done
+    for f in ${qcom_libs}; do
+        [ ! -f ${ab_test_dir}/${f} ] && missing="${missing} ${f}"
+    done
+    if [ -n "${missing}" ]; then
+        echo "ERROR: AB test backups incomplete, missing:${missing}"
+        echo ""
+        echo "Run these two commands first to populate ${ab_test_dir}:"
+        echo "  $0 build        # builds JZ ggml-hexagon, backs up *-jz.so"
+        echo "  $0 build_qcom   # builds QCOM ggml-hexagon, backs up *-qcom.so"
+        exit 1
+    fi
+    # check DSP skels exist for at least one HTP arch version
+    local jz_skels=$(ls ${ab_test_dir}/libggmldsp-skel-*.so 2>/dev/null | wc -l)
+    local qcom_skels=$(ls ${ab_test_dir}/libggml-htp-*.so 2>/dev/null | wc -l)
+    if [ ${jz_skels} -eq 0 ] || [ ${qcom_skels} -eq 0 ]; then
+        echo "ERROR: DSP skels missing in ${ab_test_dir}"
+        echo "  JZ skels (libggmldsp-skel-*.so): ${jz_skels} found"
+        echo "  QCOM skels (libggml-htp-*.so): ${qcom_skels} found"
+        echo ""
+        echo "Run these two commands first:"
+        echo "  $0 build        # builds JZ DSP skels"
+        echo "  $0 build_qcom   # builds QCOM DSP skels"
+        exit 1
+    fi
+
+    echo "=============================================="
+    echo "  AB test: JZ vs QCOM, ${rounds} rounds each"
+    echo "  model: ${model_path}"
+    echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "=============================================="
+
+    # --- JZ phase ---
+    echo ""
+    echo "=== [$(date '+%H:%M:%S')] Switching to JZ ==="
+    adb push ${ab_test_dir}/libggml-hexagon-jz.so           ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-jz.so                   ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-jz.so                  ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-jz.so           ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-jz.so  ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-bench-impl-jz.so       ${REMOTE_PATH}/libllama-bench-impl.so
+    for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    done
+    adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
+
+    echo ""
+    echo "========================================"
+    echo "  JZ test (${rounds} runs)"
+    echo "========================================"
+    for i in $(seq 1 ${rounds}); do
+        echo ""
+        echo "-------- JZ run ${i}/${rounds} $(date '+%H:%M:%S') --------"
+        adb shell "cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
+        echo "-------- JZ run ${i} END --------"
+    done
+
+    # --- QCOM phase ---
+    echo ""
+    echo "=== [$(date '+%H:%M:%S')] Switching to QCOM ==="
+    adb push ${ab_test_dir}/libggml-hexagon-qcom.so          ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-qcom.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    for skel in ${ab_test_dir}/libggml-htp-*.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    done
+    adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
+
+    echo ""
+    echo "========================================"
+    echo "  QCOM test (${rounds} runs)"
+    echo "========================================"
+    for i in $(seq 1 ${rounds}); do
+        echo ""
+        echo "-------- QCOM run ${i}/${rounds} $(date '+%H:%M:%S') --------"
+        adb shell "cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
+        echo "-------- QCOM run ${i} END --------"
+    done
+
+    echo ""
+    echo "=============================================="
+    echo "  AB test complete $(date '+%Y-%m-%d %H:%M:%S')"
     echo "=============================================="
 }
 
@@ -1168,6 +1392,8 @@ function show_usage()
     echo "  $0 help"
     echo "  $0 print_oplist"
     echo "  $0 update_ggml_libs"
+    echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device)"
+    echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device)"
 
     echo "  $0 build        (build JZ's ggml-hexagon backend)"
     echo "  $0 build_debug  (build JZ's ggml-hexagon backend in debug mode)"
@@ -1183,6 +1409,18 @@ function show_usage()
     echo "  $0 run_llamacli_all     (batch test 5 models = 5 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
+    echo "  $0 run_abtest  [rounds] [model_alias]"
+    echo "    JZ vs QCOM performance comparison (requires 'build' then 'build_qcom' first)."
+    echo "    rounds:       default 3"
+    echo "    model_alias:  default gemma4"
+    echo "    Examples:"
+    echo "      $0 run_abtest                      # 3 rounds, gemma4"
+    echo "      $0 run_abtest 5                    # 5 rounds, gemma4"
+    echo "      $0 run_abtest 3 qwen3              # 3 rounds, qwen3"
+    echo "    Log capture example:"
+    echo "      $0 run_abtest 2>&1 | tee log_abtest_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
     echo "  $0 run_llamacli   [model_alias]"
@@ -1245,6 +1483,12 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "update_ggml_libs" ]; then
         update_ggml_libs
         exit 1
+    elif [ "$1" == "update_jz_libs" ]; then
+        update_jz_libs
+        exit 0
+    elif [ "$1" == "update_qcom_libs" ]; then
+        update_qcom_libs
+        exit 0
     elif [ "$1" == "build" ]; then
         build_ggml_hexagon
         exit 0
@@ -1271,6 +1515,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_llamacli_all" ]; then
         run_llamacli_all
+        exit 0
+    elif [ "$1" == "run_abtest" ]; then
+        run_abtest
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest
@@ -1308,6 +1555,9 @@ elif [ $# == 2 ]; then
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest "$2"
         exit 0
+    elif [ "$1" == "run_abtest" ]; then
+        run_abtest "$2"
+        exit 0
     else
         show_usage
         exit 1
@@ -1331,6 +1581,9 @@ elif [ $# == 3 ]; then
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest "$2" "$3"
+        exit 0
+    elif [ "$1" == "run_abtest" ]; then
+        run_abtest "$2" "$3"
         exit 0
     else
         show_usage

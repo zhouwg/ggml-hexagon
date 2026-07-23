@@ -1719,7 +1719,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if (htp_arch > 75) {
         probe_slots.push_back(4032);
     } else {
-        probe_slots.push_back(3272);
+        probe_slots.push_back(3830);
     }
 
     size_t probe_counts     = probe_slots.size();
