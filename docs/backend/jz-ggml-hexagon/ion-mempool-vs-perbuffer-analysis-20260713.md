@@ -1,6 +1,6 @@
-# JZ ggml-hexagon vs Qualcomm ggml-hexagon: Architecture Analysis (2026-07-23)
+# JZ ggml-hexagon vs Qualcomm ggml-hexagon: Architecture Analysis (2026-07-24)
 
-> Author: Kimi-K2.7-Code (original), revised by Kimi-K3, GLM-5.2
+> Author: Kimi-K2.7-Code (original), revised by Kimi-K3, GLM-5.2, Kimi-K3
 
 ## 1. Architecture Overview
 
@@ -122,7 +122,7 @@ TG (token generation) is bandwidth-bound on both backends: every token re-reads 
 
 ### Why per-buffer ION cannot fix this economically
 
-Offloading lm-head to the DSP requires a repacked (tiled) copy of the weight to live in DSP-addressable memory for the entire session. Under Qualcomm's per-buffer design, every `ggml_hexagon_shared_buffer` carries its own ION fd, its own `fastrpc_mmap`, per-batch driver-side cache maintenance, and a lifecycle that must be coordinated with DSP-side unmapping. A ~214 MB single-purpose resident buffer pays all of these recurring per-buffer costs, which is consistent with Qualcomm keeping the 32768-row guard in place and lm-head on the CPU.
+Offloading lm-head to the DSP requires a repacked (tiled) copy of the weight to live in DSP-addressable memory for the entire session. Under Qualcomm's per-buffer design, every `ggml_hexagon_shared_buffer` carries its own ION fd, its own `fastrpc_mmap`, per-batch descriptor re-registration (`add_buffer()`), a DSP-side mmap slot out of a limited vmem budget (`prep_op_bufs` in `htp/main.c` evicts and re-mmaps under pressure), and a lifecycle that must be coordinated with DSP-side unmapping. A ~214 MB single-purpose resident buffer pays all of these recurring per-buffer costs, which is consistent with Qualcomm keeping the 32768-row guard in place and lm-head on the CPU.
 
 ### Why the single pool makes it natural
 
@@ -138,7 +138,7 @@ Removing DSP-side debug/profiler logging afterwards (`-DNDEBUG` skel build) brou
 
 ### Side effect: cache-coherency advantage flipped
 
-Kernel-space flush is efficient per operation, but the driver applies uniform per-batch flush/invalidate flags to every buffer and cannot express role-aware policies. JZ's user-space management distinguishes weight tensors (flags=2, written once at load) from activations, so bit 0 can eliminate their per-token re-invalidation. The supposed disadvantage of user-space cache management became a policy-flexibility advantage that the closed driver cannot replicate without per-role buffer semantics.
+Qualcomm's per-batch cache maintenance is uniform and role-blind: the driver's flush/invalidate flags cover only the small dspqueue descriptor packet, while tensor data is handled by a full D-cache flush+invalidate on the DSP at batch start and end ([`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c), lines 999 and 1078) - neither can distinguish weight from activation. JZ's user-space management distinguishes weight tensors (flags=2, written once at load) from activations, so bit 0 can eliminate their per-token re-invalidation. The supposed disadvantage of user-space cache management became a policy-flexibility advantage that Qualcomm's uniform batch-boundary design cannot express without per-role semantics.
 
 ## 4. Single ION Shared Mempool vs. Per-Buffer ION: Code-Level Comparison
 
@@ -168,7 +168,7 @@ Kernel-space flush is efficient per operation, but the driver applies uniform pe
 | Batch transport | single `invoke` | `dspqueue_write` (may split) | JZ |
 | Memory lifecycle | one alloc/free | N alloc/free + coordination | JZ |
 | IOVA spatial locality (prefetch/TLB) | contiguous, predictable | fragmented across buffers | JZ |
-| Cache coherency | user-space: role-aware (weight vs activation); `ion_sync` + `dsp_cache_mode` | kernel-space driver flags (uniform per-batch) | JZ (role-aware policy flexibility) |
+| Cache coherency | user-space: role-aware (weight vs activation); `ion_sync` + `dsp_cache_mode` | driver-flushed descriptor packet + DSP-side full D-cache flush+invalidate per batch (uniform, role-blind) | JZ (role-aware policy flexibility) |
 | Physical address stability | same per-page variance (pool is physically fragmented) | same per-page variance (each buffer independently allocated) | Tie |
 | Session-resident large repack (lm-head) | natural (offset range in pool) | prohibitive (per-buffer fd/mmap/lifecycle cost) | JZ |
 
@@ -178,7 +178,7 @@ Qualcomm's disadvantages - per-buffer fd count, per-buffer mmap calls, DSP-side 
 
 The entire cache coherency pipeline is visible and modifiable on both AP and DSP sides. From `DC CVAC` in Phase 6.5 to `CIVAC` in Phase 7.5 (both inside `graph_compute_batch()` in [`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)), to DSP-side `dcinva`/`dccleaninva` in [`htp/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/entry.c), every cache maintenance operation is explicit, auditable, and optimizable.
 
-In contrast, Qualcomm's `DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER | INVALIDATE_RECIPIENT` hides the cache maintenance logic inside the closed-source Hexagon DSP driver. The flags are set at the API level, but the actual flush/invalidate implementation is not visible to user-space developers. JZ's transparency means:
+In contrast, Qualcomm's cache maintenance is split between an opaque layer and a blunt one: the `DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER | INVALIDATE_RECIPIENT` flags on the small descriptor packet are handled inside the closed-source Hexagon DSP driver, while the tensor-data maintenance is a full D-cache flush+invalidate at batch boundaries in [`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) - uniform, role-blind, and not selectable per tensor. JZ's transparency means:
 
 - Cache flush strategies can be made selective (e.g., flush weights once at load time, not every batch).
 - `ion_sync` can be tuned per region (dirty vs. clean ranges).
@@ -230,6 +230,6 @@ After the optimization campaign (lm-head offload + dsp_cache_mode=5 + DSP log re
 
 - **JZ exceeds Qualcomm on both PP and TG** (5-run mean, 2026-07-22): PP 686.46 / TG 26.91 (JZ) vs PP 435.14 / TG 24.91 (QCOM), gemma-4-E2B-it-Q4_0.gguf, same Snapdragon 8 Elite device. Both run the same HMX kernels; the difference is architectural.
 - **The single ION mempool's unique advantage is proven in practice**: a ~214 MB repacked lm-head stays resident for the whole session at zero recurring map/fd/lifecycle cost - something the per-buffer ION design cannot express economically. Combined with the Q4_K -> Q4_0 repack (halves lm-head bandwidth to 214 MB/token) and first-touch weight invalidation (~9.2 ms/token saved), TG is 26.91 tok/s.
-- **User-space cache management is an asset, not a liability**: role-aware invalidation (weight vs activation, bit 0 first-touch) is a policy the closed-source driver's uniform per-batch flush cannot express. The two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) resolved the historical bit-0 garble risk; mode=5 passes correctness on gemma4, qwen3, and qwen3-mtp.
+- **User-space cache management is an asset, not a liability**: role-aware invalidation (weight vs activation, bit 0 first-touch) is a policy Qualcomm's uniform per-batch cache maintenance (driver-handled descriptor packet + DSP-side full D-cache flush+invalidate) cannot express. The two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) resolved the historical bit-0 garble risk; mode=5 passes correctness on gemma4, qwen3, and qwen3-mtp.
 - **PP jitter is a hardware-level L2 cache aliasing effect** that affects both implementations comparably and is not fixable in user space. Three software jitter sources were removed during the optimization campaign, tightening the PP distribution substantially.
 - **Control-plane primitives differ** (`dspqueue` vs. native FastRPC `invoke`), but the data plane and the descriptor-dispatch flow are fundamentally the same. The measured performance difference comes from data-plane policy (weight residency + role-aware cache management), not from the control plane.
