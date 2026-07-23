@@ -2226,9 +2226,7 @@ static bool ggml_hexagon_compute_fa_params(
 
 // Map GGML opcode to HTP opcode for unary-family ops. Mirrors the DSP-side
 // ggml_op_to_htp_op() in htp/entry.c, restricted to the subset that
-// htp_op_is_unary() in unary-ops.h accepts. GGML_UNARY_OP_GELU/SILU are
-// intentionally NOT mapped here because the DSP dispatches them to
-// op_activations, not op_unary, and have a different kparams contract.
+// htp_op_is_unary() in unary-ops.h accepts.
 // Returns false if the op is not a precompute-required unary.
 static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, uint32_t * htp_op) {
     switch (ggml_op) {
@@ -2242,12 +2240,14 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
         case GGML_OP_UNARY:
             if (!op_params) return false;
             switch (op_params[0]) {
-                case GGML_UNARY_OP_NEG:      *htp_op = HTP_OP_UNARY_NEG;      return true;
-                case GGML_UNARY_OP_TANH:     *htp_op = HTP_OP_UNARY_TANH;     return true;
-                case GGML_UNARY_OP_SIGMOID:  *htp_op = HTP_OP_UNARY_SIGMOID;  return true;
-                case GGML_UNARY_OP_EXP:      *htp_op = HTP_OP_UNARY_EXP;      return true;
-                case GGML_UNARY_OP_SOFTPLUS: *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
-                // GELU/SILU are op_activations on DSP; not handled here.
+                case GGML_UNARY_OP_NEG:        *htp_op = HTP_OP_UNARY_NEG;      return true;
+                case GGML_UNARY_OP_TANH:       *htp_op = HTP_OP_UNARY_TANH;     return true;
+                case GGML_UNARY_OP_SIGMOID:    *htp_op = HTP_OP_UNARY_SIGMOID;  return true;
+                case GGML_UNARY_OP_EXP:        *htp_op = HTP_OP_UNARY_EXP;      return true;
+                case GGML_UNARY_OP_SOFTPLUS:   *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
+                case GGML_UNARY_OP_SILU:       *htp_op = HTP_OP_UNARY_SILU;     return true;
+                case GGML_UNARY_OP_GELU:
+                case GGML_UNARY_OP_GELU_QUICK: *htp_op = HTP_OP_UNARY_GELU;     return true;
                 default: return false;
             }
         default:
@@ -3440,17 +3440,14 @@ static bool hexagon_validate_unary(ggml_backend_hexagon_context *ctx, const ggml
         case GGML_UNARY_OP_SILU:
         case GGML_UNARY_OP_GELU:
         case GGML_UNARY_OP_GELU_QUICK:
-            if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
-                return false;
-            if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(op))
-                return false;
-            return true;
         case GGML_UNARY_OP_NEG:
         case GGML_UNARY_OP_EXP:
         case GGML_UNARY_OP_SIGMOID:
         case GGML_UNARY_OP_SOFTPLUS:
         case GGML_UNARY_OP_TANH:
             if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+                return false;
+            if (ggml_is_permuted(src0))
                 return false;
             if (!ggml_are_same_shape(src0, op))
                 return false;
@@ -3467,7 +3464,7 @@ static bool hexagon_validate_glu(ggml_backend_hexagon_context *ctx, const ggml_t
     const ggml_tensor *src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
-    if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(op))
+    if (!ggml_is_contiguous_1(src0) || !ggml_is_contiguous(op))
         return false;
     const int glu_op = (int)op->op_params[0];
     switch (glu_op) {
