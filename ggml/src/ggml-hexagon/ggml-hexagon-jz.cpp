@@ -391,7 +391,7 @@ struct hexagon_appcfg_t {
     int thread_counts;          // thread_counts on CDSP side
     int dump_diag_info;         // enable/disable dump diag info for troubleshooting issues on CDSP side
     int ndev;                   // number of Hexagon devices (PDs), from GGML_HEXAGON_NDEV env
-    int ion_sync_mode;          // 0=both(DC CVAC+ion_sync, default), 1=ion_sync only, 2=DC CVAC only
+    int ion_sync_mode;          // 0=both(DC CVAC+ion_sync), 1=ion_sync only(default), 2=DC CVAC only
     int rpc_mmap_mode;          // 0=FASTRPC_MAP_FD_DELAYED (default), 1=FASTRPC_MAP_FD (eager pinning)
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
@@ -438,7 +438,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .rpc_mmap_mode          = 0,
         .enable_opfusion        = 1,
         .fa_select              = 2,
-        .dsp_cache_mode         = 4,
+        .dsp_cache_mode         = 5,
         .dsp_cache_trace_bit0   = 0,
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
@@ -1011,7 +1011,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "rpc_mmap_mode", g_hexagon_appcfg.rpc_mmap_mode, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_opfusion", g_hexagon_appcfg.enable_opfusion, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "fa_select", g_hexagon_appcfg.fa_select, 2);
-    hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 4);
+    hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 5);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit0", g_hexagon_appcfg.dsp_cache_trace_bit0, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit1", g_hexagon_appcfg.dsp_cache_trace_bit1, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_optimize", g_hexagon_appcfg.enable_graph_optimize, 1);
