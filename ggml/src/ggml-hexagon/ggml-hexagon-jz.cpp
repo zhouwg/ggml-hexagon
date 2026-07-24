@@ -141,26 +141,28 @@
 
 // Forward declarations
 struct ggml_backend_hexagon_context;
+struct ggml_backend_hexagon_reg_context;
 
 static bool                  ggmlhexagon_is_metadata_op(enum ggml_op op);
 static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 static const char *          ggmlhexagon_get_htparch_desc(size_t htp_arch);
 static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
+static bool                  ggml_backend_buffer_is_hexagon_repack(const ggml_backend_buffer * b);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
 static void                  ggmlhexagon_set_runtime_path(size_t device, const std::string & path);
 static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
+static ggml_backend_t        ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
 static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
 static size_t                ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
 static bool                  ggml_backend_hexagon_repack_buffer_is_host(ggml_backend_buffer_type_t buft);
-static bool                  ggml_backend_buffer_is_hexagon_repack(const struct ggml_backend_buffer * b);
-static bool                  ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const struct ggml_tensor * t);
-static bool                  ggmlhexagon_op_buffers_belong_to_dev(ggml_backend_dev_t dev, const struct ggml_tensor * op);
-static size_t                ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const struct ggml_tensor * tensor);
+static bool                  ggmlhexagon_op_buffers_belong_to_dev(ggml_backend_dev_t dev, const ggml_tensor * op);
+static bool                  ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const ggml_tensor * t);
+static ggml_backend_t        ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params);
+static size_t                ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor);
 
+static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_backend_dev_t dev);
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size);
-static bool                  ggml_hexagon_compute_fa_params(const ggml_backend_hexagon_context * ctx,
-                                                            const ggml_tensor * node,
-                                                            struct htp_fa_kernel_params * kparams);
+static bool                  ggml_hexagon_compute_fa_params(const ggml_backend_hexagon_context * ctx, const ggml_tensor * node, htp_fa_kernel_params * kparams);
 
 // =================================================================================================
 //  section-2: data structures
@@ -494,13 +496,12 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
                 .soc_desc          = "Qualcomm SnapDragon 8 Elite Gen5"},
 };
 
-// Contexts are dynamically allocated in ggml_backend_hexagon_reg() so that
-// the constructor can perform DSP initialization (ala qcom's ggml_hexagon_session).
-// g_hexagon_mgr holds owning pointers for legacy by-index lookups (e.g. devname).
-static struct ggml_backend_hexagon_context * g_hexagon_mgr[GGML_HEXAGON_MAX_DEVICES] = { nullptr };
-
-// Track tensors repacked in set_tensor to skip Phase 4.5
-static std::unordered_set<const void *> g_set_tensor_repacked;
+// Owning pointer to the reg context. The framework's ~ggml_backend_registry()
+// does not delete reg->context (see FIXME in ggml-backend-reg.cpp), so we rely
+// on an atexit handler to release DSP sessions. atexit runs before static
+// dtors, so function-local std::mutex objects (e.g. the log mutex) are still
+// alive when ~ggml_backend_hexagon_context calls ggmlhexagon_deinit_cdsp.
+static ggml_backend_hexagon_reg_context * g_reg_ctx = nullptr;
 
 // =================================================================================================
 //  section-3: troubleshooting and profiler
@@ -1863,21 +1864,24 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 }
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
+    GGMLHEXAGON_LOG_ALWAYS("enter %s", __FUNCTION__);
     int hexagon_error  = AEE_SUCCESS;
     GGML_ASSERT(0 != ctx->ggmlop_handle);
     hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
     if (AEE_SUCCESS != hexagon_error) {
         GGMLHEXAGON_LOG_ERROR("error 0x%x: failed to close ggmlop dsp handle", hexagon_error);
-        ctx->ggmlop_handle = 0;
     }
+    ctx->ggmlop_handle = 0;
     ggmlhexagon_deinit_rpcmempool(ctx);
     //probe before domain_id is invalidated so AP-side domain queries still work
     ggmlhexagon_probe_dspinfo(ctx);
     ggmlhexagon_dump_perf_stats(ctx);
     ctx->domain_id             = -1;
+    GGMLHEXAGON_LOG_ALWAYS("leave %s", __FUNCTION__);
 }
 
 static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
+    GGMLHEXAGON_LOG_ALWAYS("enter %s", __FUNCTION__);
     int htp_arch                = 0;
     int hexagon_error           = AEE_SUCCESS;
     int domain_id               = CDSP_DOMAIN_ID;
@@ -2053,10 +2057,12 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     }
 
     snprintf(ctx->name, sizeof(ctx->name), "Hexagon-cDSP%d", ctx->device);
+    GGMLHEXAGON_LOG_ALWAYS("leave %s", __FUNCTION__);
     return 0;
 
 bail:
     ggmlhexagon_deinit_cdsp(ctx);
+    GGMLHEXAGON_LOG_ALWAYS("leave %s", __FUNCTION__);
     return -1;
 }
 
@@ -4765,6 +4771,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         }
         GGMLHEXAGON_LOG_ALWAYS("[ALLOC] device=%d reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
                              ctx->device, r.offset, r.size, size_aligned, r.size - size_aligned);
+        memset(buffer_ctx->buffer, 0, buffer_ctx->buffer_size);
     } else {
         // Allocate new region from bump allocator tail
         size_t aligned_offset = ((ctx->rpc_mempool_usage + 127) / 128) * 128;
@@ -4932,15 +4939,15 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)backend->context;
 
-    // Only free the backend handle. The DSP session is owned by the context
-    // (created in ggml_backend_hexagon_reg via the constructor, deinitialized
-    // in the destructor). This matches qcom's pattern where freeing a backend
-    // does NOT destroy the session, allowing common_fit_params to create/free
-    // backends without deinitializing the DSP.
-    if (nullptr != ctx->backend) {
-        delete backend;
-        ctx->backend = nullptr;
+    GGMLHEXAGON_LOG_ALWAYS("freeing backend %d (%s), destroying context", ctx->device, ctx->name);
+
+    if (backend->device) {
+        backend->device->context = nullptr;
     }
+
+    delete backend;
+    delete ctx;
+
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
 
@@ -6404,11 +6411,7 @@ static void ggml_backend_hexagon_graph_optimize(ggml_backend_t backend, struct g
 }
 
 static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev) {
-    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-    if (nullptr == ctx) {
-        GGMLHEXAGON_LOG_ERROR("pls check why ctx is null");
-        return "unknown";
-    }
+    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
     return ctx->name;
 }
 
@@ -6418,14 +6421,7 @@ static const char * ggml_backend_hexagon_device_get_description(ggml_backend_dev
 }
 
 static void ggml_backend_hexagon_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
-    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-    if ((nullptr == ctx) || (ctx->device >= GGML_HEXAGON_MAX_DEVICES)) {
-        GGMLHEXAGON_LOG_ERROR("pls check params");
-        *free = 0;
-        *total = 0;
-        return;
-    }
-
+    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
     GGMLHEXAGON_LOG_WARN("get_memory: enter device=%d domain_id=%d", ctx->device, ctx->domain_id);
 
     // ggml backend has domain_id == -1 (not a real CDSP PD)
@@ -6465,101 +6461,6 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
     };
 }
 
-static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
-
-static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
-    int dev_index = 0;
-
-    ggmlhexagon_load_cfg();
-    if (!ggmlhexagon_check_valid_appcfg()) {
-        return nullptr;
-    }
-
-    if (nullptr == params) {
-        // Derive dev_index from the device's context (g_hexagon_mgr[i]) so each
-        // registered Hexagon device initializes its own PD in multi-device mode.
-        if (nullptr != dev && nullptr != dev->context) {
-            struct ggml_backend_hexagon_context * ctx =
-                static_cast<ggml_backend_hexagon_context *>(dev->context);
-            dev_index = ctx->device;
-        } else {
-            dev_index = 0;
-        }
-    } else {
-        GGMLHEXAGON_LOG_VERBOSE("program specified param is not nullptr");
-        //user's program calling ggml_backend_hexagon_device_init_backend directly
-        dev_index = (int)(intptr_t)params;
-        if (dev_index < 0) {
-            GGMLHEXAGON_LOG_VERBOSE("it shouldn't happend\n");
-            dev_index = 0;
-        }
-        GGMLHEXAGON_LOG_VERBOSE("program specified dev_index %d\n", dev_index);
-    }
-    if (dev_index >= GGML_HEXAGON_MAX_DEVICES) {
-        GGMLHEXAGON_LOG_ERROR("invalid dev_index %d", dev_index);
-        return nullptr;
-    }
-    GGMLHEXAGON_LOG_ALWAYS("dev_index=%d", dev_index);
-    ggml_backend_t hexagon_backend = ggml_backend_hexagon_init_ext(dev_index, g_hexagon_appcfg.runtime_libpath);
-
-    return hexagon_backend;
-}
-
-static ggml_backend_buffer_type_t ggml_backend_hexagon_buffer_type(size_t device_index) {
-    GGMLHEXAGON_LOG_DEBUG("enter %s, device_index %zu", __func__, device_index);
-    if (device_index >= GGML_HEXAGON_MAX_DEVICES || g_hexagon_mgr[device_index] == nullptr) {
-        GGMLHEXAGON_LOG_ERROR("ggml_backend_hexagon_buffer_type: device_index %zu out of range or not initialized",
-                              device_index);
-        return nullptr;
-    }
-    return &g_hexagon_mgr[device_index]->buffer_type;
-}
-
-static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(ggml_backend_dev_t dev) {
-    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
-    GGMLHEXAGON_LOG_WARN("get_buffer_type: device=%d domain_id=%d buft=%p", ctx->device, ctx->domain_id, (void*)&ctx->buffer_type);
-    return &ctx->buffer_type;
-}
-
-static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_repack_buffer_type(ggml_backend_dev_t dev) {
-    ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)dev->context;
-    return &ctx->repack_buffer_type;
-}
-
-static ggml_backend_buffer_type_t * ggml_backend_hexagon_device_get_extra_buffers_type(ggml_backend_dev_t dev) {
-    static ggml_backend_buffer_type_t bufts[2];
-    bufts[0] = ggml_backend_hexagon_device_get_repack_buffer_type(dev);
-    bufts[1] = NULL;
-    return bufts;
-}
-
-static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
-    if (ggml_backend_buft_is_hexagon(buft) || ggml_backend_buft_is_hexagon_repack(buft)) {
-        ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
-        ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
-        return buft_ctx->device == dev_ctx->device;
-    }
-    return false;
-}
-
-static struct ggml_backend_device_i ggml_backend_hexagon_device_interface = {
-        /* .get_name             = */ ggml_backend_hexagon_device_get_name,
-        /* .get_description      = */ ggml_backend_hexagon_device_get_description,
-        /* .get_memory           = */ ggml_backend_hexagon_device_get_memory,
-        /* .get_type             = */ ggml_backend_hexagon_device_get_type,
-        /* .get_props            = */ ggml_backend_hexagon_device_get_props,
-        /* .init_backend         = */ ggml_backend_hexagon_device_init_backend,
-        /* .get_buffer_type      = */ ggml_backend_hexagon_device_get_buffer_type,
-        /* .get_host_buffer_type = */ nullptr,
-        /* .buffer_from_host_ptr = */ nullptr,
-        /* .supports_op          = */ ggmlhexagon_can_handle_op_through_cdsp,
-        /* .supports_buft        = */ ggml_backend_hexagon_device_supports_buft,
-        /* .offload_op           = */ nullptr,
-        /* .event_new            = */ nullptr,
-        /* .event_free           = */ nullptr,
-        /* .event_synchronize    = */ nullptr,
-};
-
 static ggml_backend_i ggml_backend_hexagon_interface = {
         /* .get_name                = */ ggml_backend_hexagon_name,
         /* .free                    = */ ggml_backend_hexagon_free,
@@ -6588,6 +6489,156 @@ static ggml_guid_t ggml_backend_hexagon_guid() {
     return &guid;
 }
 
+struct ggml_backend_hexagon_reg_context {
+    std::vector<ggml_backend_dev_t> devices;
+    ~ggml_backend_hexagon_reg_context() {
+        for (auto * dev : devices) {
+            // dev->context may be nullptr if the backend was already freed
+            // via ggml_backend_hexagon_free (which clears dev->context).
+            if (dev->context) {
+                auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
+                delete hctx;
+            }
+            delete dev;
+        }
+    }
+};
+
+// Lazily create the context (DSP session + ION pool) if it doesn't exist yet.
+// The ggml framework calls get_buffer_type / supports_buft BEFORE init_backend
+// during model loading, so the context must exist by then.
+// Called from get_buffer_type, get_repack_buffer_type, supports_buft, and
+// device_init_backend. Context is deleted by ggml_backend_hexagon_free
+// (which clears dev->context = nullptr), so the next inference recreates it.
+static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_backend_dev_t dev) {
+    if (nullptr != dev && nullptr != dev->context) {
+        return (ggml_backend_hexagon_context *)dev->context;
+    }
+
+    ggmlhexagon_load_cfg();
+    if (!ggmlhexagon_check_valid_appcfg()) {
+        return nullptr;
+    }
+
+    // Find dev_index by matching dev in the registry
+    int dev_index = 0;
+    if (nullptr != dev) {
+        auto * reg_ctx = (ggml_backend_hexagon_reg_context *)g_reg_ctx;
+        if (reg_ctx) {
+            for (size_t i = 0; i < reg_ctx->devices.size(); i++) {
+                if (reg_ctx->devices[i] == dev) {
+                    dev_index = (int)i;
+                    break;
+                }
+            }
+        }
+    }
+    if (dev_index >= GGML_HEXAGON_MAX_DEVICES) {
+        GGMLHEXAGON_LOG_ERROR("invalid dev_index %d", dev_index);
+        return nullptr;
+    }
+
+    GGMLHEXAGON_LOG_ALWAYS("creating context for dev_index=%d", dev_index);
+    auto * ctx = new ggml_backend_hexagon_context(dev_index, dev);
+    GGML_ASSERT(0 != ctx->ggmlop_handle);
+    if (nullptr != dev) {
+        dev->context = ctx;
+    }
+    return ctx;
+}
+
+static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
+    ggmlhexagon_load_cfg();
+    if (!ggmlhexagon_check_valid_appcfg()) {
+        return nullptr;
+    }
+
+    // Get the device from registry if not provided
+    if (nullptr == dev) {
+        int dev_index = 0;
+        if (nullptr != params) {
+            dev_index = (int)(intptr_t)params;
+            if (dev_index < 0) dev_index = 0;
+        }
+        auto * reg_ctx = (ggml_backend_hexagon_reg_context *)g_reg_ctx;
+        if (reg_ctx && dev_index < (int)reg_ctx->devices.size()) {
+            dev = reg_ctx->devices[dev_index];
+        }
+    }
+
+    // Ensure context exists (may have been created by get_buffer_type)
+    auto * ctx = ggml_backend_hexagon_ensure_context(dev);
+    if (nullptr == ctx) {
+        GGMLHEXAGON_LOG_ERROR("failed to create context");
+        return nullptr;
+    }
+
+    // If backend already exists for this context, return it
+    if (nullptr != ctx->backend) {
+        GGMLHEXAGON_LOG_ALWAYS("backend already exists for device %d, reusing", ctx->device);
+        return ctx->backend;
+    }
+
+    ggml_backend_hexagon_interface.graph_optimize =
+        g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
+    GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s", g_hexagon_appcfg.enable_graph_optimize ? "enabled" : "disabled");
+
+    ggml_backend_t hexagon_backend = new ggml_backend{
+            /* .guid      = */ ggml_backend_hexagon_guid(),
+            /* .iface     = */ ggml_backend_hexagon_interface,
+            /* .device    = */ dev,
+            /* .context   = */ ctx
+    };
+
+    ctx->backend = hexagon_backend;
+    return hexagon_backend;
+}
+
+static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(ggml_backend_dev_t dev) {
+    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
+    GGMLHEXAGON_LOG_WARN("get_buffer_type: device=%d domain_id=%d buft=%p", ctx->device, ctx->domain_id, (void*)&ctx->buffer_type);
+    return &ctx->buffer_type;
+}
+
+static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_repack_buffer_type(ggml_backend_dev_t dev) {
+    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
+    return &ctx->repack_buffer_type;
+}
+
+static ggml_backend_buffer_type_t * ggml_backend_hexagon_device_get_extra_buffers_type(ggml_backend_dev_t dev) {
+    static ggml_backend_buffer_type_t bufts[2];
+    bufts[0] = ggml_backend_hexagon_device_get_repack_buffer_type(dev);
+    bufts[1] = NULL;
+    return bufts;
+}
+
+static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
+    if (ggml_backend_buft_is_hexagon(buft) || ggml_backend_buft_is_hexagon_repack(buft)) {
+        ggml_backend_hexagon_context * dev_ctx  = ggml_backend_hexagon_ensure_context(dev);
+        ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
+        return buft_ctx->device == dev_ctx->device;
+    }
+    return false;
+}
+
+static struct ggml_backend_device_i ggml_backend_hexagon_device_interface = {
+        /* .get_name             = */ ggml_backend_hexagon_device_get_name,
+        /* .get_description      = */ ggml_backend_hexagon_device_get_description,
+        /* .get_memory           = */ ggml_backend_hexagon_device_get_memory,
+        /* .get_type             = */ ggml_backend_hexagon_device_get_type,
+        /* .get_props            = */ ggml_backend_hexagon_device_get_props,
+        /* .init_backend         = */ ggml_backend_hexagon_device_init_backend,
+        /* .get_buffer_type      = */ ggml_backend_hexagon_device_get_buffer_type,
+        /* .get_host_buffer_type = */ nullptr,
+        /* .buffer_from_host_ptr = */ nullptr,
+        /* .supports_op          = */ ggmlhexagon_can_handle_op_through_cdsp,
+        /* .supports_buft        = */ ggml_backend_hexagon_device_supports_buft,
+        /* .offload_op           = */ nullptr,
+        /* .event_new            = */ nullptr,
+        /* .event_free           = */ nullptr,
+        /* .event_synchronize    = */ nullptr,
+};
+
 bool ggml_backend_is_hexagon(ggml_backend_t backend) {
     return backend != nullptr && ggml_guid_matches(backend->guid, ggml_backend_hexagon_guid());
 }
@@ -6606,24 +6657,6 @@ static void ggml_backend_hexagon_set_n_threads(ggml_backend_t backend, int n_thr
 static int ggml_backend_hexagon_get_device_count() {
     return g_hexagon_appcfg.ndev;
 }
-
-struct ggml_backend_hexagon_reg_context {
-    std::vector<ggml_backend_dev_t> devices;
-    ~ggml_backend_hexagon_reg_context() {
-        for (auto * dev : devices) {
-            auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-            delete hctx;
-            delete dev;
-        }
-    }
-};
-
-// Owning pointer to the reg context. The framework's ~ggml_backend_registry()
-// does not delete reg->context (see FIXME in ggml-backend-reg.cpp), so we rely
-// on an atexit handler to release DSP sessions. atexit runs before static
-// dtors, so function-local std::mutex objects (e.g. the log mutex) are still
-// alive when ~ggml_backend_hexagon_context calls ggmlhexagon_deinit_cdsp.
-static ggml_backend_hexagon_reg_context * g_reg_ctx = nullptr;
 
 static void ggml_backend_hexagon_atexit_cleanup() {
     if (g_reg_ctx) {
@@ -6705,22 +6738,16 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                     break;
                 }
 
-                GGMLHEXAGON_LOG_VERBOSE("create backend device for device %d", i);
-                // Create device struct first so we can pass it to the context constructor
-                // (matches qcom's ggml_hexagon_session pattern: session owns DSP handle,
-                //  buft is a member initialized with the owning device pointer).
+                GGMLHEXAGON_LOG_VERBOSE("register backend device %d (context created lazily)", i);
+                // Only register the device struct here. Context (DSP session,
+                // ION pool) is created lazily by ggml_backend_hexagon_ensure_context
+                // (called from get_buffer_type or init_backend) and destroyed in
+                // ggml_backend_hexagon_free, so each inference gets a fresh context.
                 ggml_backend_dev_t dev = new ggml_backend_device{
                         /* .iface       = */ ggml_backend_hexagon_device_interface,
                         /* .reg         = */ &reg,
-                        /* .context     = */ nullptr  // set below after context creation
+                        /* .context     = */ nullptr  // set in device_init_backend
                 };
-
-                // Constructor performs full DSP init (ggmlhexagon_init_dsp) and
-                // initializes buffer_type with context = this, device = dev.
-                auto * hctx = new ggml_backend_hexagon_context(i, dev);
-                GGML_ASSERT(0 != hctx->ggmlop_handle);
-                dev->context = hctx;
-                g_hexagon_mgr[i] = hctx;
                 ctx->devices.push_back(dev);
             }
 
@@ -6741,8 +6768,10 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
 static const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
     // CDSP devices: Hexagon-cDSP0, Hexagon-cDSP1, ...
-    if (dev_num < GGML_HEXAGON_MAX_DEVICES && g_hexagon_mgr[dev_num] != nullptr) {
-        return g_hexagon_mgr[dev_num]->name;
+    static char dev_names[GGML_HEXAGON_MAX_DEVICES][32];
+    if (dev_num < GGML_HEXAGON_MAX_DEVICES) {
+        snprintf(dev_names[dev_num], sizeof(dev_names[dev_num]), "Hexagon-cDSP%zu", dev_num);
+        return dev_names[dev_num];
     }
     return "unknown";
 }
@@ -6769,29 +6798,30 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
         ggmlhexagon_set_runtime_path(device, runtime_libpath);
     }
 
-    if (nullptr != g_hexagon_mgr[device] && nullptr != g_hexagon_mgr[device]->backend) {
-        GGMLHEXAGON_LOG_VERBOSE("backend %d(%s) already loaded", device,
-                         ggml_backend_hexagon_get_devname(device));
-        ggml_backend_hexagon_interface.graph_optimize =
-            g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
-        GGMLHEXAGON_LOG_DEBUG("leave %s", __func__);
-        return g_hexagon_mgr[device]->backend;
+    // Get the device from registry
+    ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_hexagon_reg(), device);
+
+    // Ensure context exists (lazy creation, same as device_init_backend)
+    auto * ctx = ggml_backend_hexagon_ensure_context(dev);
+    if (nullptr == ctx) {
+        GGMLHEXAGON_LOG_ERROR("failed to create context");
+        return nullptr;
+    }
+
+    // If backend already exists, return it
+    if (nullptr != ctx->backend) {
+        GGMLHEXAGON_LOG_ALWAYS("backend already exists for device %d, reusing", ctx->device);
+        return ctx->backend;
     }
 
     ggml_backend_hexagon_interface.graph_optimize =
         g_hexagon_appcfg.enable_graph_optimize ? ggml_backend_hexagon_graph_optimize : nullptr;
     GGMLHEXAGON_LOG_ALWAYS("graph_optimize: %s", g_hexagon_appcfg.enable_graph_optimize ? "enabled" : "disabled");
-    // Context (and DSP session) was already created by ggml_backend_hexagon_reg().
-    // Just attach the backend handle to the existing context.
-    ggml_backend_hexagon_context * ctx = g_hexagon_mgr[device];
-    if (ctx == nullptr) {
-        GGMLHEXAGON_LOG_ERROR("device %zu context not initialized", device);
-        return nullptr;
-    }
+
     ggml_backend_t hexagon_backend = new ggml_backend{
             /* .guid      = */ ggml_backend_hexagon_guid(),
             /* .iface     = */ ggml_backend_hexagon_interface,
-            /* .device    = */ ggml_backend_reg_dev_get(ggml_backend_hexagon_reg(), device),
+            /* .device    = */ dev,
             /* .context   = */ ctx
     };
 
