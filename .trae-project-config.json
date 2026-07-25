@@ -7,11 +7,23 @@
     "scope_of_approval": "Approval is per-change. A prior approved change does not grant blanket permission for subsequent unrelated edits.",
     "applies_to": "All source files, scripts, configs, and documentation in the workspace."
   },
+  "command_execution_rules": {
+    "description": "Rules for how the agent should run commands in Trae IDE terminal",
+    "output_redirection": {
+      "rule": "Do NOT use bare 2>&1 redirection. Instead use 'command | tee log_<purpose>.txt' so that: (1) the AI model can read the log file afterward to analyze results, (2) the user can view real-time output in the Trae IDE terminal.",
+      "format": "command | tee log_<purpose>.txt",
+      "examples": [
+        "./scripts/build-run-android.sh build | tee log_build.txt",
+        "./scripts/build-run-android.sh run_llamacli gemma4 | tee log_llamacli_gemma4.txt"
+      ],
+      "reason": "tee gives both real-time terminal visibility for the user and a persistent log file for the AI model to read. Bare 2>&1 only goes to one place, not both."
+    }
+  },
   "commit_rules": {
     "description": "Mandatory rules that MUST be followed before any git commit",
     "pre_commit_testing": {
       "description": "Before committing, MUST run CI batch inference test and analyze the log file to verify no regression.",
-      "ci_command": "./scripts/build-run-ggmlhexagon-android.sh run_llamacli_all 2>&1 | tee log_ci_$(date +%y%m%d-%H%M%S).txt",
+      "ci_command": "./scripts/build-run-ggmlhexagon-android.sh run_llamacli_all | tee log_ci_$(date +%y%m%d-%H%M%S).txt",
       "ci_log_analysis": {
         "description": "After running CI command, the agent MUST analyze the generated log file to verify all tests pass.",
         "steps": [
@@ -78,6 +90,111 @@
     "run_testop_mulmat": "./scripts/build-run-android.sh run_testop MUL_MAT",
     "run_llamacli": "./scripts/build-run-android.sh run_llamacli",
     "build_qcom": "./scripts/build-run-android.sh build_qcom"
+  },
+  "ab_test": {
+    "description": "Performance comparison between Qualcomm's official ggml-hexagon and JZ's ggml-hexagon. For fair comparison, use the same running_params, same prompt, same LLM model file, and same phone. Reference: docs/how-to-build-ggmlhexagon.md section 'How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon'.",
+    "fair_comparison_prerequisites": {
+      "running_params": "-ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on",
+      "same_prompt": "Use the same prompt for both QCOM and JZ runs",
+      "same_model": "Use the same LLM model file for both QCOM and JZ runs",
+      "same_phone": "Use the same phone (e.g. Snapdragon 8 Elite) for both QCOM and JZ runs",
+      "branch": "self-build-jz"
+    },
+    "automated": {
+      "description": "One-command automated AB test. Builds both implementations, runs both, and produces a comparison log. Best for quick regression checks.",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Checkout branch",
+          "note": "Already in project root directory, no need to clone. Just ensure on self-build-jz branch.",
+          "commands": [
+            "git checkout self-build-jz"
+          ]
+        },
+        {
+          "step": 2,
+          "action": "Build Qualcomm's ggml-hexagon",
+          "command": "./scripts/build-run-android.sh build_qcom | tee log_build_qcom.txt",
+          "note": "Builds with GGML_HEXAGON_JZ=OFF, using ggml-hexagon.cpp + htp/main.c"
+        },
+        {
+          "step": 3,
+          "action": "Build JZ's ggml-hexagon",
+          "command": "./scripts/build-run-android.sh build | tee log_build_jz.txt",
+          "note": "Builds with GGML_HEXAGON_JZ=ON, using ggml-hexagon-jz.cpp + htp/entry.c"
+        },
+        {
+          "step": 4,
+          "action": "Run automated AB test",
+          "command": "./scripts/build-run-android.sh run_abtest | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt",
+          "note": "Automatically runs both implementations and collects PP/TG metrics"
+        },
+        {
+          "step": 5,
+          "action": "Analyze results",
+          "command": "Analyze log_abtest_*.txt to extract PP/TG values and generate comparison table",
+          "output_table_format": "| Implementation | PP (tok/s) | TG (tok/s) | Notes |"
+        }
+      ]
+    },
+    "non_automated": {
+      "description": "Manual step-by-step AB test. Build both implementations, then manually run llama-cli/llama-bench with each implementation by swapping libraries. Best for detailed debugging and custom prompts.",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Checkout branch",
+          "note": "Already in project root directory, no need to clone. Just ensure on self-build-jz branch.",
+          "commands": [
+            "git checkout self-build-jz"
+          ]
+        },
+        {
+          "step": 2,
+          "action": "Build Qualcomm's ggml-hexagon",
+          "command": "./scripts/build-run-android.sh build_qcom | tee log_build_qcom.txt"
+        },
+        {
+          "step": 3,
+          "action": "Build JZ's ggml-hexagon",
+          "command": "./scripts/build-run-android.sh build | tee log_build_jz.txt"
+        },
+        {
+          "step": 4,
+          "action": "Test with Qualcomm's ggml-hexagon",
+          "commands": [
+            "./scripts/build-run-android.sh update_qcom_libs",
+            "./scripts/build-run-android.sh run_llamacli | tee log_llamacli_qcom.txt",
+            "./scripts/build-run-android.sh run_llamabench | tee log_llamabench_qcom.txt"
+          ],
+          "note": "Deploy QCOM libs to phone, then run llama-cli and llama-bench"
+        },
+        {
+          "step": 5,
+          "action": "Test with JZ's ggml-hexagon",
+          "commands": [
+            "./scripts/build-run-android.sh update_jz_libs",
+            "./scripts/build-run-android.sh run_llamacli | tee log_llamacli_jz.txt",
+            "./scripts/build-run-android.sh run_llamabench | tee log_llamabench_jz.txt"
+          ],
+          "note": "Deploy JZ libs to phone, then run llama-cli and llama-bench"
+        },
+        {
+          "step": 6,
+          "action": "Compare results",
+          "command": "Compare PP/TG values from log_llamacli_qcom.txt vs log_llamacli_jz.txt (and llama-bench logs)",
+          "output_table_format": "| Implementation | PP (tok/s) | TG (tok/s) | Notes |"
+        }
+      ]
+    },
+    "key_commands_reference": {
+      "build_qcom": "Build Qualcomm's official ggml-hexagon (GGML_HEXAGON_JZ=OFF)",
+      "build": "Build JZ's ggml-hexagon (GGML_HEXAGON_JZ=ON, default)",
+      "update_qcom_libs": "Deploy Qualcomm's .so files to phone via adb",
+      "update_jz_libs": "Deploy JZ's .so files to phone via adb",
+      "run_abtest": "Run automated AB test (builds + runs both, outputs comparison)",
+      "run_llamacli": "Run llama-cli with currently deployed libs",
+      "run_llamabench": "Run llama-bench with currently deployed libs"
+    }
   },
   "build_rules": {
     "documentation": "docs/how-to-build-ggmlhexagon.md",
