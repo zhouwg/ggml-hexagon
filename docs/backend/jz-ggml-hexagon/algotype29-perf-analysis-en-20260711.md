@@ -2,7 +2,7 @@
 
 ## Author
 
-- Primary author: GLM-5.2, authored based on a full review of the JZ (`ggml-hexagon-jz.cpp`, `htp/entry.c`) and Qualcomm (`ggml-hexagon.cpp`, `htp/main.c`) codebases after syncing with upstream master.
+- Primary author: GLM-5.2, authored based on a full review of the JZ (`ggml-hexagon-jz.cpp`, `kernels/entry.c`) and Qualcomm (`ggml-hexagon.cpp`, `htp/main.c`) codebases after syncing with upstream master.
 - Fact-check by MiniMax-M3 (image insertion, review, fact-check, GitHub doc-rendering fix).
 - TG gap root-cause correction by Kimi-K2.7-Code.
 - TG optimization and doc revision by Kimi-K3 (bf16 support, lm-head DSP offload, dsp_cache_mode bit0 re-enable, DSP debug log removal, v75 thread clamp, doc updates).
@@ -427,3 +427,17 @@ Also: BF16 added to offloaded MUL_MAT types (stored as F16 in repack buffer, reu
 
 1. [ion-mempool-vs-perbuffer-analysis-20260713.md](ion-mempool-vs-perbuffer-analysis-20260713.md) - JZ ggml-hexagon vs Qualcomm ggml-hexagon: Architecture Analysis; explains the decisive single-pool advantage (session-resident repacked weights)
 2. [warmup-ab-test-and-analysis-20260713.md](warmup-ab-test-and-analysis-20260713.md) - FastRPC/ION warmup A/B test; batch-level pipelining analysis of QCOM's dspqueue
+
+## Revision History
+
+### 2026-07-26: JZ forks independent kernels/ directory
+
+**Context**: Previously, JZ and Qualcomm shared a single DSP kernel directory (`htp/`) for all ops kernels, HVX/HMX headers, and common helpers. This ended with Qualcomm's PR [#26049](https://github.com/ggml-org/llama.cpp/pull/26049) (merge commit `0a50d9909a3478e82679f505bf8595d1eee4b0a8`): after merging upstream master with this PR, JZ's default inference test produced garbled output while Qualcomm's remained normal. The root cause is that this PR moved part of the cache maintenance logic into operator implementations, making JZ's cache subsystem incompatible and causing the garbled output.
+
+**Action**: JZ forked `htp/` into a new `kernels/` directory pinned at baseline commit `2be3826c9` (where PP/TG fully exceeded Qualcomm and inference output was correct). JZ now maintains `kernels/` independently; Qualcomm continues using `htp/` which tracks upstream master. Selected stable upstream `htp/` improvements are ported into `kernels/` manually.
+
+**Note on document content**: References to `htp/` in this document describe the historical shared-directory state. As of 2026-07-26, JZ uses `kernels/` and Qualcomm uses `htp/`. The DSP entry point for JZ is now `kernels/entry.c` (previously `htp/entry.c`).
+
+### 2026-07-26: Fix llama-bench segfault (context lifetime regression)
+
+Commit `998199e21` changed `ggml_backend_hexagon_free` to delete the context (including buffer types) on backend free, but model tensors still reference those buffer types, causing a use-after-free during context transitions (e.g., pp200 -> pp512) in llama-bench. Reverted to only delete the backend (matching Qualcomm's pattern), and restored `get_name`/`get_memory` to defensive direct access instead of `ensure_context`.

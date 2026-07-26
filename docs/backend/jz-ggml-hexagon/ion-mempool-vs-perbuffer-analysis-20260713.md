@@ -4,7 +4,7 @@
 
 ## 1. Architecture Overview
 
-Both JZ and Qualcomm ggml-hexagon backends route through Qualcomm's `execute_op` path. The `execute_op` implementation lives in `ggml/src/ggml-hexagon/htp/` and is shared by both ggml-hexagon implementations. The DSP entry points differ: JZ uses `htp/entry.c`, while Qualcomm uses `htp/main.c`. On the AP side, JZ uses `ggml-hexagon-jz.cpp` while Qualcomm uses `ggml-hexagon.cpp`. The AP-side implementations differ significantly, leading to performance differences.
+Both JZ and Qualcomm ggml-hexagon backends route through Qualcomm's `execute_op` path. As of 2026-07-26, JZ maintains its own DSP kernel directory `ggml/src/ggml-hexagon/kernels/` (forked from `htp/` at baseline `2be3826c9`), while Qualcomm continues using `ggml/src/ggml-hexagon/htp/` which tracks upstream master. The DSP entry points differ: JZ uses `kernels/entry.c`, while Qualcomm uses `htp/main.c`. On the AP side, JZ uses `ggml-hexagon-jz.cpp` while Qualcomm uses `ggml-hexagon.cpp`. The AP-side implementations differ significantly, leading to performance differences.
 
 The core architectural difference:
 
@@ -17,8 +17,8 @@ The core architectural difference:
 |--------|-----------------|----------------------|
 | Control plane | Native/pure FastRPC `invoke` (synchronous) | `dspqueue_write/read` (async, up to 16 batches in-flight) |
 | Data plane | Single ION mempool + offset addressing | Per-buffer ION + `bi` (buffer index) indirection |
-| DSP entry point | `htp/entry.c` | `htp/main.c` |
-| Shared DSP kernels | `htp/*.c` | `htp/*.c` |
+| DSP entry point | `kernels/entry.c` | `htp/main.c` |
+| DSP kernels | `kernels/*.c` | `htp/*.c` |
 | AP-side code | `ggml-hexagon-jz.cpp` | `ggml-hexagon.cpp` |
 | Build option | `GGML_HEXAGON_JZ=ON` | `GGML_HEXAGON_JZ=OFF` (default) |
 | Cache coherency | User-space: role-aware (`ion_sync` + `dsp_cache_mode`) | Kernel-space driver flags (uniform per-batch) |
@@ -30,12 +30,13 @@ The core architectural difference:
 | `ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp` | JZ version AP code |
 | `ggml/src/ggml-hexagon/ggml-hexagon.cpp` | Qualcomm version AP code (upstream) |
 | `ggml/src/ggml-hexagon/CMakeLists.txt` | Unified build (QCOM base + `GGML_HEXAGON_JZ` option) |
-| `ggml/src/ggml-hexagon/htp/Makefile` | JZ DSP skel build (entry.c + shared kernels) |
+| `ggml/src/ggml-hexagon/kernels/Makefile` | JZ DSP skel build (entry.c + kernels) |
 | `ggml/src/ggml-hexagon/htp/CMakeLists.txt` | QCOM DSP skel build (main.c + shared kernels) |
-| `ggml/src/ggml-hexagon/htp/entry.c` | JZ version DSP entry point |
-| `ggml/src/ggml-hexagon/htp/dsp-ctx.h` | JZ DSP session context + descriptors |
+| `ggml/src/ggml-hexagon/kernels/entry.c` | JZ version DSP entry point |
+| `ggml/src/ggml-hexagon/kernels/dsp-ctx.h` | JZ DSP session context + descriptors |
 | `ggml/src/ggml-hexagon/htp/main.c` | Qualcomm version DSP entry point |
-| `ggml/src/ggml-hexagon/htp/*.c` | Shared DSP kernels (both backends) |
+| `ggml/src/ggml-hexagon/kernels/*.c` | JZ DSP kernels (forked from htp/ at baseline 2be3826c9) |
+| `ggml/src/ggml-hexagon/htp/*.c`               | Qualcomm DSP kernels (tracks upstream master) |
 
 The unified `CMakeLists.txt` is based on QCOM's version with a single addition:
 
@@ -44,7 +45,7 @@ option(GGML_HEXAGON_JZ "Use JZ's AP implementation" OFF)
 ```
 
 - `GGML_HEXAGON_JZ=OFF` (default): QCOM upstream behavior, builds DSP skels via `ExternalProject_Add`.
-- `GGML_HEXAGON_JZ=ON`: uses `ggml-hexagon-jz.cpp`, builds a single DSP skel via `make -C htp/`.
+- `GGML_HEXAGON_JZ=ON`: uses `ggml-hexagon-jz.cpp`, builds DSP skels (all 4 versions: v73/v75/v79/v81) via `make -C kernels/`.
 
 ## 2. Performance Comparison
 
@@ -59,7 +60,7 @@ option(GGML_HEXAGON_JZ "Use JZ's AP implementation" OFF)
 | JZ ggml-hexagon (dsp_cache_mode=5) | 686.46 | 26.91 |
 | Qualcomm ggml-hexagon | 435.14 | 24.91 |
 
-Test conditions: gemma-4-E2B-it-Q4_0.gguf, Snapdragon 8 Elite (v79, OnePlus 13), `/data/local/tmp/llama-completion -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"`. Both backends run the same HMX kernels from `ggml/src/ggml-hexagon/htp`; the difference is architectural.
+Test conditions: gemma-4-E2B-it-Q4_0.gguf, Snapdragon 8 Elite (v79, OnePlus 13), `/data/local/tmp/llama-completion -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"`. Both backends run the same HMX kernels from `kernels/` (JZ) or `htp/` (QCOM); the difference is architectural.
 
 **Table 3A: Automated AB test on 8 Elite (2026-07-24 11:06, warm device)**
 
@@ -77,6 +78,23 @@ Generated by `./scripts/build-run-android.sh run_abtest 2>&1 | tee log_abtest_$(
 | **QCOM mean** | | **549.29** | **25.53** |
 
 JZ vs QCOM on warm 8 Elite: PP +28.3% (1.283x), TG +7.4% (1.074x). Compared with Table 3 (5-run mean on cool device: PP +57.7%, TG +8.0%), the PP gap narrows under sustained thermal load but the TG gap is essentially unchanged. PP stability: JZ spread 0.71% (702-707 tok/s) vs QCOM spread 8.78% (524-573 tok/s), continuing the single-pool cache-locality advantage seen in Table 6. TG stability: QCOM spread 1.33% vs JZ spread 8.85% on this run, which is an inversion from the typical pattern; JZ TG run 3 dropped to 25.87 while runs 1-2 were 28.06/28.29, suggesting transient thermal or scheduling noise rather than a structural regression (a follow-up re-run is recommended for confirmation).
+
+**Table 3B: Automated AB test on 8 Elite (2026-07-26, post-kernels-fork)**
+
+Generated by `./scripts/build-run-android.sh run_abtest 2>&1 | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt` (log: `log_abtest_20260726-094618.txt`). Same model, same prompt, same parameters as Table 3, on a warm device (3 JZ rounds + 3 QCOM rounds in ~2 minutes). This run verifies the kernels/ fork (baseline `2be3826c9`) and the llama-bench segfault fix (revert of commit `998199e21`) together: output is coherent with no garbled text, and PP/TG fully exceed QCOM.
+
+| Implementation | Run | PP (tok/s) | TG (tok/s) | Total (ms) |
+|---|---|---|---|---|
+| JZ | 1 | 651.91 | 27.21 | 9781.13 |
+| JZ | 2 | 674.91 | 26.15 | 10159.81 |
+| JZ | 3 | 657.00 | 26.63 | 9972.43 |
+| **JZ mean** | | **661.27** | **26.66** | **9971.12** |
+| QCOM | 1 | 431.22 | 23.20 | 11260.92 |
+| QCOM | 2 | 421.40 | 23.15 | 11275.93 |
+| QCOM | 3 | 438.86 | 23.10 | 11305.80 |
+| **QCOM mean** | | **430.49** | **23.15** | **11280.88** |
+
+JZ vs QCOM on warm 8 Elite: PP +53.6% (1.536x), TG +15.2% (1.152x). All 6 runs produced coherent output with no garbled text, confirming the kernels/ fork successfully resolved the garbled-output regression introduced by Qualcomm's PR #26049. JZ cgraph cache hit rate: 98.8% (253 hits / 3 misses), graph nodes: 1493 per call.
 
 **llama-bench comparison (2026-07-22):**
 
@@ -104,7 +122,7 @@ JZ vs QCOM on warm 8 Elite: PP +28.3% (1.283x), TG +7.4% (1.074x). Compared with
 | QCOM | 2 | 269.67 | 17.40 |
 | QCOM | 3 | 239.38 | 17.46 |
 
-Test conditions: gemma-4-E2B-it-Q4_0.gguf, Snapdragon 8 Gen3 (v75, Xiaomi 14), `/data/local/tmp/llama-completion -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"`. Both backends run the same HMX kernels from `ggml/src/ggml-hexagon/htp`; data collected on a freshly rebooted device to avoid thermal throttling bias.
+Test conditions: gemma-4-E2B-it-Q4_0.gguf, Snapdragon 8 Gen3 (v75, Xiaomi 14), `/data/local/tmp/llama-completion -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"`. Both backends run the same HMX kernels from `kernels/` (JZ) or `htp/` (QCOM); data collected on a freshly rebooted device to avoid thermal throttling bias.
 
 On both 8 Elite (v79) and 8 Gen3 (v75), JZ's single ION pool architecture consistently outperforms Qualcomm's per-buffer design: PP 1.58x / TG 1.08x on v79, PP 1.26x / TG 1.19x on v75. The architectural advantage - session-resident repacked lm-head, role-aware cache management, contiguous IOVA for prefetch/TLB efficiency - is not conditional on hardware generation. Earlier tests suggesting near-parity on v75 were an artifact of thermal throttling: under sustained load, JZ PP is stable across runs (314-324 tok/s) while QCOM PP varies more (239-270 tok/s), confirming that the single pool's contiguous layout degrades more gracefully under thermal pressure than Qualcomm's fragmented per-buffer IOVA.
 
@@ -193,7 +211,7 @@ Qualcomm's disadvantages - per-buffer fd count, per-buffer mmap calls, DSP-side 
 
 ### Transparency advantage
 
-The entire cache coherency pipeline is visible and modifiable on both AP and DSP sides. From `DC CVAC` in Phase 6.5 to `CIVAC` in Phase 7.5 (both inside `graph_compute_batch()` in [`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)), to DSP-side `dcinva`/`dccleaninva` in [`htp/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/entry.c), every cache maintenance operation is explicit, auditable, and optimizable.
+The entire cache coherency pipeline is visible and modifiable on both AP and DSP sides. From `DC CVAC` in Phase 6.5 to `CIVAC` in Phase 7.5 (both inside `graph_compute_batch()` in [`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)), to DSP-side `dcinva`/`dccleaninva` in [`kernels/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c), every cache maintenance operation is explicit, auditable, and optimizable.
 
 In contrast, Qualcomm's cache maintenance is split between an opaque layer and a blunt one: the `DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER | INVALIDATE_RECIPIENT` flags on the small descriptor packet are handled inside the closed-source Hexagon DSP driver, while the tensor-data maintenance is a full D-cache flush+invalidate at batch boundaries in [`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) - uniform, role-blind, and not selectable per tensor. JZ's transparency means:
 
@@ -224,7 +242,7 @@ The data plane is almost identical:
 - Both need explicit **cache flush / invalidate** synchronization.
 - Both ultimately run the same HVX/HMX kernels.
 
-In the Qualcomm path the DSP entry point is [`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) (`htp_packet_callback`), which parses `htp_buf_desc[]`, `htp_tensor[]`, and `htp_op_desc[]` before dispatching to the kernels. In the JZ path the same work happens inside [`htp/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/entry.c). The high-level flow is the same:
+In the Qualcomm path the DSP entry point is [`htp/main.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) (`htp_packet_callback`), which parses `htp_buf_desc[]`, `htp_tensor[]`, and `htp_op_desc[]` before dispatching to the kernels. In the JZ path the same work happens inside [`kernels/entry.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c). The high-level flow is the same:
 
 ```
 AP packs descriptors -> transport to DSP -> DSP entry parses descriptors -> dispatch op execution
@@ -250,3 +268,16 @@ After the optimization campaign (lm-head offload + dsp_cache_mode=5 + DSP log re
 - **User-space cache management is an asset, not a liability**: role-aware invalidation (weight vs activation, bit 0 first-touch) is a policy Qualcomm's uniform per-batch cache maintenance (driver-handled descriptor packet + DSP-side full D-cache flush+invalidate) cannot express. The two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) resolved the historical bit-0 garble risk; mode=5 passes correctness on gemma4, qwen3, and qwen3-mtp.
 - **PP jitter is a hardware-level L2 cache aliasing effect** that affects both implementations comparably and is not fixable in user space. Three software jitter sources were removed during the optimization campaign, tightening the PP distribution substantially.
 - **Control-plane primitives differ** (`dspqueue` vs. native FastRPC `invoke`), but the data plane and the descriptor-dispatch flow are fundamentally the same. The measured performance difference comes from data-plane policy (weight residency + role-aware cache management), not from the control plane.
+
+## Revision History
+
+### 2026-07-26: JZ forks independent kernels/ directory
+
+**Context**: Previously, JZ and Qualcomm shared a single DSP kernel directory (`htp/`) for all ops kernels, HVX/HMX headers, and common helpers. This ended with Qualcomm's PR [#26049](https://github.com/ggml-org/llama.cpp/pull/26049) (merge commit `0a50d9909a3478e82679f505bf8595d1eee4b0a8`): after merging upstream master with this PR, JZ's default inference test produced garbled output while Qualcomm's remained normal. The root cause is that this PR moved part of the cache maintenance logic into operator implementations, making JZ's cache subsystem incompatible and causing the garbled output.
+
+**Action**: JZ forked `htp/` into a new `kernels/` directory pinned at baseline commit `2be3826c9` (where PP/TG fully exceeded Qualcomm and inference output was correct). JZ now maintains `kernels/` independently; Qualcomm continues using `htp/` which tracks upstream master. Selected stable upstream `htp/` improvements are ported into `kernels/` manually.
+
+
+### 2026-07-26: Fix llama-bench segfault (context lifetime regression)
+
+Commit `998199e21` changed `ggml_backend_hexagon_free` to delete the context (including buffer types) on backend free, but model tensors still reference those buffer types, causing a use-after-free during context transitions (e.g., pp200 -> pp512) in llama-bench. Reverted to only delete the backend (matching Qualcomm's pattern), and restored `get_name`/`get_memory` to defensive direct access instead of `ensure_context`.

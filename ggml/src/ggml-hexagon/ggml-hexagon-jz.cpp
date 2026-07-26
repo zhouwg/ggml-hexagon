@@ -1,7 +1,9 @@
 /*
- * 2024-2026 The ggml authors
- *
- * this single-source-file is part of jz's ggml-hexagon
+ * This single-source file is part of JZ's ggml-hexagon.
+ * 2024--2026 The ggml authors
+ * GitHub:  https://github.com/zhouwg/ggml-hexagon
+ * Any copies or derivative works of this file shall preserve the above attribution information,
+ * including the copyright notice and the GitHub repository URL.
  *
  * this file has 8 sections:
  * section-1  forward declarations, global vars, macros
@@ -80,14 +82,14 @@
 #include "ggml-common.h"
 #include "ggml-quants.h"
 
-#include "htp/ggml_dsp.h"
-#include "htp/dsp-ctx.h"
-#include "htp/htp-ops.h"
-#include "htp/hex-common.h"
-#include "htp/hex-fastdiv.h"
-#include "htp/matmul-ops.h"
-#include "htp/flash-attn-ops.h"
-#include "htp/unary-ops.h"
+#include "kernels/ggml_dsp.h"
+#include "kernels/dsp-ctx.h"
+#include "kernels/htp-ops.h"
+#include "kernels/hex-common.h"
+#include "kernels/hex-fastdiv.h"
+#include "kernels/matmul-ops.h"
+#include "kernels/flash-attn-ops.h"
+#include "kernels/unary-ops.h"
 
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
@@ -448,7 +450,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
 #endif
-        .version                = {"0.99.3"},
+        .version                = {"0.99.4"},
 };
 
 //supported Snapdragon devices with Hexagon DSP
@@ -4937,16 +4939,13 @@ static const char * ggml_backend_hexagon_name(ggml_backend_t backend) {
 
 static void ggml_backend_hexagon_free(ggml_backend_t backend) {
     GGMLHEXAGON_LOG_DEBUG("enter %s", __func__ );
+    // only delete the backend here; the context (including buffer types)
+    // must persist across inferences so that model tensors which reference
+    // buffer types remain valid. The context is owned by the device and
+    // freed during registry shutdown.
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *)backend->context;
-
-    GGMLHEXAGON_LOG_ALWAYS("freeing backend %d (%s), destroying context", ctx->device, ctx->name);
-
-    if (backend->device) {
-        backend->device->context = nullptr;
-    }
-
+    ctx->backend = nullptr;
     delete backend;
-    delete ctx;
 
     GGMLHEXAGON_LOG_DEBUG("leave %s", __func__ );
 }
@@ -6410,18 +6409,29 @@ static void ggml_backend_hexagon_graph_optimize(ggml_backend_t backend, struct g
     }
 }
 
-static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev) {
-    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
-    return ctx->name;
-}
-
 static const char * ggml_backend_hexagon_device_get_description(ggml_backend_dev_t dev) {
     GGML_UNUSED(dev);
     return "Hexagon-cDSP";
 }
 
+static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev) {
+    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
+    if (nullptr == ctx) {
+        GGMLHEXAGON_LOG_ALWAYS("pls check why ctx is null");
+        return "unknown";
+    }
+    return ctx->name;
+}
+
 static void ggml_backend_hexagon_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
-    ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
+    struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
+    if ((nullptr == ctx) || (ctx->device >= GGML_HEXAGON_MAX_DEVICES)) {
+        GGMLHEXAGON_LOG_ALWAYS("pls check params");
+        *free = 0;
+        *total = 0;
+        return;
+    }
+
     GGMLHEXAGON_LOG_WARN("get_memory: enter device=%d domain_id=%d", ctx->device, ctx->domain_id);
 
     // ggml backend has domain_id == -1 (not a real CDSP PD)
@@ -6493,8 +6503,8 @@ struct ggml_backend_hexagon_reg_context {
     std::vector<ggml_backend_dev_t> devices;
     ~ggml_backend_hexagon_reg_context() {
         for (auto * dev : devices) {
-            // dev->context may be nullptr if the backend was already freed
-            // via ggml_backend_hexagon_free (which clears dev->context).
+            // context persists across inferences (not freed in ggml_backend_hexagon_free),
+            // so it is always present and must be cleaned up here.
             if (dev->context) {
                 auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
                 delete hctx;
@@ -6508,8 +6518,8 @@ struct ggml_backend_hexagon_reg_context {
 // The ggml framework calls get_buffer_type / supports_buft BEFORE init_backend
 // during model loading, so the context must exist by then.
 // Called from get_buffer_type, get_repack_buffer_type, supports_buft, and
-// device_init_backend. Context is deleted by ggml_backend_hexagon_free
-// (which clears dev->context = nullptr), so the next inference recreates it.
+// device_init_backend. Context persists across inferences (ggml_backend_hexagon_free
+// only deletes the backend, not the context) and is freed during registry shutdown.
 static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_backend_dev_t dev) {
     if (nullptr != dev && nullptr != dev->context) {
         return (ggml_backend_hexagon_context *)dev->context;
@@ -6741,8 +6751,8 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 GGMLHEXAGON_LOG_VERBOSE("register backend device %d (context created lazily)", i);
                 // Only register the device struct here. Context (DSP session,
                 // ION pool) is created lazily by ggml_backend_hexagon_ensure_context
-                // (called from get_buffer_type or init_backend) and destroyed in
-                // ggml_backend_hexagon_free, so each inference gets a fresh context.
+                // (called from get_buffer_type or init_backend) and persists across
+                // inferences. It is freed during registry shutdown.
                 ggml_backend_dev_t dev = new ggml_backend_device{
                         /* .iface       = */ ggml_backend_hexagon_device_interface,
                         /* .reg         = */ &reg,

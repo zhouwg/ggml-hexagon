@@ -160,6 +160,9 @@ CMakeUserPresets.json
 ggml/src/ggml-hexagon/htp/ggml_dsp.h
 ggml/src/ggml-hexagon/htp/ggml_dsp_skel.c
 ggml/src/ggml-hexagon/htp/ggml_dsp_stub.c
+ggml/src/ggml-hexagon/kernels/ggml_dsp.h
+ggml/src/ggml-hexagon/kernels/ggml_dsp_skel.c
+ggml/src/ggml-hexagon/kernels/ggml_dsp_stub.c
 libggmldsp-skel*.so
 x86-build/
 refs/

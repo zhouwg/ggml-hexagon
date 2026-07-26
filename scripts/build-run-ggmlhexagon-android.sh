@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #
-# this self-contained file is part of JZ's ggml-hexagon:
+# This single-source file is part of JZ's ggml-hexagon.
+# 2024--2026 The ggml authors
+# GitHub:  https://github.com/zhouwg/ggml-hexagon
+# Any copies or derivative works of this file shall preserve the above attribution information,
+# including the copyright notice and the GitHub repository URL.
 #
 # this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
 #
@@ -12,7 +16,6 @@
 #
 # 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
 #
-# GitHub:   - https://github.com/zhouwg/ggml-hexagon
 #
 set -e
 
@@ -74,8 +77,7 @@ HEXAGON_TOOLS_PATH=${HEXAGON_SDK_PATH}/tools/HEXAGON_Tools/${HEXAGON_TOOLS_VERSI
 
 #HTP_ARCH_VERSIONS="v79"                         # 8 Elite
 #HTP_ARCH_VERSIONS="v79 v75"                     # 8 Elite + 8Gen3
-#HTP_ARCH_VERSIONS="v73 v75 v79 v81"             # all
-HTP_ARCH_VERSIONS="v79 v75"
+HTP_ARCH_VERSIONS="v73 v75 v79 v81"              # all
 
 # default HTP_ARCH
 HTP_ARCH_VERSION=${HTP_ARCH_VERSIONS%% *}
@@ -352,7 +354,7 @@ function build_idl()
 {
     echo "build idl"
     if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
-        ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ggml_dsp.idl
+        ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggml_dsp.idl
     fi
 }
 
@@ -372,9 +374,9 @@ function build_extra_dsp_skels()
     for extra_ver in ${HTP_ARCH_VERSIONS#* }; do
         printf "\n========== build extra DSP skel: libggmldsp-skel-${extra_ver}.so ==========\n"
         build_idl
-        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ clean
-        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
-        /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/htp/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
+        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ clean
+        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
+        /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
     done
 }
 
@@ -393,8 +395,8 @@ function build_arm64
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
-    #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
-    build_extra_dsp_skels
+    #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
+    #build_extra_dsp_skels
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
     #push AP-side libs too: libggml-hexagon.so embeds the regenerated FastRPC stub
@@ -415,10 +417,9 @@ function build_arm64
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-jz.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-jz.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-jz.so
-        for ver in ${HTP_ARCH_VERSIONS}; do
-            if [ -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ]; then
-                /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${PROJECT_ROOT_PATH}/out/ab-test/
-            fi
+        for skel in ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-v*.so; do
+            [ -f "$skel" ] || continue
+            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
         done
     fi
     show_pwd
@@ -441,8 +442,8 @@ function build_arm64_debug
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
-    #cmake POST_BUILD already built libggmldsp-skel-${HTP_ARCH_VERSION}.so, build the rest
-    build_extra_dsp_skels debug
+    #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
+    #build_extra_dsp_skels debug
     #upload the new libggmldsp-skel.so on device side
     prepare_ggmldsp
     #push AP-side libs too (keep stub/skel in sync, see build_arm64 for rationale)
@@ -481,10 +482,9 @@ function build_arm64_qcom
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-qcom.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-qcom.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-qcom.so
-        for ver in ${HTP_ARCH_VERSIONS}; do
-            if [ -f ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ]; then
-                /bin/cp -fv ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-${ver}.so ${PROJECT_ROOT_PATH}/out/ab-test/
-            fi
+        for skel in ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-v*.so; do
+            [ -f "$skel" ] || continue
+            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
         done
     fi
     show_pwd
@@ -492,8 +492,6 @@ function build_arm64_qcom
     /bin/rm -f CMakeUserPresets.json
 
     echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
-    echo "./scripts/build-run-android.sh run_testop MUL_MAT"
-    echo "./scripts/build-run-android.sh run_testops"
     echo "./scripts/build-run-android.sh run_llamacli"
     echo "./scripts/build-run-android.sh run_llamabench"
 }
@@ -691,6 +689,12 @@ function commit_so_file_md5() {
 }
 
 
+# Push AP-side libs (libggml-*.so, libllama-*.so) from bin/ to device.
+# AP-only: does NOT push DSP skels (libggmldsp-skel-*.so / libggml-htp-*.so).
+# Does NOT switch backend - DSP skels already on device stay as-is.
+# Use update_jz_libs / update_qcom_libs for a full backend switch (AP + DSP).
+# Gotcha: bin/ reflects the last build (JZ or QCOM); pushing JZ AP libs while
+# QCOM DSP skels are still on device leaves an AP/DSP mismatch.
 function update_ggml_libs()
 {
     #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
@@ -1391,7 +1395,7 @@ function show_usage()
     echo "Usage:"
     echo "  $0 help"
     echo "  $0 print_oplist"
-    echo "  $0 update_ggml_libs"
+    echo "  $0 update_ggml_libs  (push AP-side libs only from bin/ to device; no DSP skels, no backend switch)"
     echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device)"
     echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device)"
 
@@ -1404,6 +1408,7 @@ function show_usage()
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
+    echo "  $0 run_llamacli"
     echo "  $0 run_llamabench"
 
     echo "  $0 run_llamacli_all     (batch test 5 models = 5 tests)"

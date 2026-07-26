@@ -121,7 +121,7 @@
           "step": 3,
           "action": "Build JZ's ggml-hexagon",
           "command": "./scripts/build-run-android.sh build | tee log_build_jz.txt",
-          "note": "Builds with GGML_HEXAGON_JZ=ON, using ggml-hexagon-jz.cpp + htp/entry.c"
+          "note": "Builds with GGML_HEXAGON_JZ=ON, using ggml-hexagon-jz.cpp + kernels/entry.c"
         },
         {
           "step": 4,
@@ -210,10 +210,10 @@
       "reason": "All functions are allowed for local execution."
     },
     "dsp_kernel_fast_build": {
-      "description": "If only DSP-side source files (under ggml/src/ggml-hexagon/htp/, e.g. entry.c, matmul-ops.c, HVX/HMX kernels) were modified, use the fast kernel-only build to skip the full AP rebuild.",
+      "description": "If only DSP-side source files (under ggml/src/ggml-hexagon/kernels/, e.g. entry.c, matmul-ops.c, HVX/HMX kernels) were modified, use the fast kernel-only build to skip the full AP rebuild.",
       "command": "./scripts/build-kernels.sh",
-      "when_to_use": "Only DSP-side files in ggml/src/ggml-hexagon/htp/ were modified; no changes to ARM-AP source (ggml-hexagon.cpp, ggml-hexagon-jz.cpp) or top-level build files.",
-      "fallback": "If any AP-side file (ggml-hexagon.cpp, ggml-hexagon-jz.cpp) or non-DSP file was also modified, fall back to the full build command above."
+      "when_to_use": "Only DSP-side files in ggml/src/ggml-hexagon/kernels/ were modified; no changes to ARM-AP source (ggml-hexagon-jz.cpp) or top-level build files.",
+      "fallback": "If any AP-side file (ggml-hexagon-jz.cpp) or non-DSP file was also modified, fall back to the full build command above."
     },
     "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-ggmlhexagon-android.sh accordingly",
     "if_unsure": "STOP. Do NOT use make/cmake. ONLY follow: docs/how-to-build-ggmlhexagon.md"
@@ -232,36 +232,36 @@
     "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom"
   },
   "hexagon_implementations": {
-    "description": "Two ggml-hexagon implementations share the same DSP kernel directory (htp/) but use different ARM-AP source files AND different DSP entry-point source files. The bulk of htp/ (ops kernels, HVX/HMX headers, common headers) is shared, but the DSP-side entry-point main function lives in different files.",
+    "description": "JZ and Qualcomm use SEPARATE DSP kernel directories. JZ uses kernels/ (independent fork, primary development target); Qualcomm uses htp/ (tracks upstream master). They differ in ARM-AP source file, DSP entry-point source file, and DSP kernel directory.",
     "qualcomm_official": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
       "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "description": "Qualcomm's official ggml-hexagon implementation. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: shared htp/ directory."
+      "description": "Qualcomm's official ggml-hexagon implementation. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory (tracks upstream)."
     },
     "jz_implementation": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
-      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory."
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/kernels/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/kernels/",
+      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: kernels/entry.c. DSP ops/HVX/HMX: kernels/ directory (independent fork, selectively ports stable upstream changes)."
     },
-    "shared_dsp_directory_note": "Both implementations compile DSP ops kernels, HVX/HMX headers, and common helpers from the shared htp/ directory. They differ in: (1) ARM-AP source file - ggml-hexagon.cpp vs ggml-hexagon-jz.cpp, selected by CMake option GGML_HEXAGON_JZ (default OFF); (2) DSP entry-point source file - htp/main.c (QCOM) vs htp/entry.c (JZ)."
+    "separate_dsp_directory_note": "Historically, JZ and Qualcomm shared a single DSP kernel directory (htp/) for ops kernels, HVX/HMX headers, and common helpers. This ended with Qualcomm's large PR #26049 (https://github.com/ggml-org/llama.cpp/pull/26049, merge commit 0a50d9909a3478e82679f505bf8595d1eee4b0a8): after merging upstream master with this PR, JZ's default inference test produced garbled output while Qualcomm's remained normal. To avoid chasing each upstream htp/ change, JZ forked htp/ into a new kernels/ directory pinned at baseline commit 2be3826c9 (where PP/TG fully exceeded Qualcomm and inference output was correct). JZ now maintains kernels/ independently; Qualcomm continues using htp/ which tracks upstream master. Selected stable upstream htp/ improvements are ported into kernels/ manually. Build is selected by CMake option GGML_HEXAGON_JZ (default OFF)."
   },
   "development_rules": {
     "primary_target": "jz_implementation",
     "jz_implementation": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
-      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/kernels/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/kernels/",
       "build_command": "./scripts/build-run-android.sh build",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory."
+      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: kernels/entry.c. DSP ops/HVX/HMX: kernels/ directory (independent fork, selectively ports stable upstream changes)."
     },
     "qualcomm_official_debug": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
       "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
       "build_command": "./scripts/build-run-android.sh build_qcom",
-      "description": "Qualcomm's official backend. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: shared htp/ directory. Use this when debugging or benchmarking against the official reference."
+      "description": "Qualcomm's official backend. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory (tracks upstream). Use this when debugging or benchmarking against the official reference."
     },
     "ccache_usage": {
       "description": "ccache is enabled for faster builds. For jz build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For qcom build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom. Do NOT disable ccache.",
