@@ -3602,6 +3602,30 @@ static bool hexagon_validate_pad(ggml_backend_hexagon_context *ctx, const ggml_t
     return true;
 }
 
+static bool hexagon_validate_im2col(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+    GGML_UNUSED(ctx);
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * dst  = op;
+    const bool is_2D = ((const int32_t *) op->op_params)[6] == 1;
+    if (!is_2D) {
+        return false;
+    }
+    // F32 image -> F16/F32 columns only
+    if (src1->type != GGML_TYPE_F32 || (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)) {
+        return false;
+    }
+    if (!ggml_is_contiguous(src1) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+    // padded im2col stays on CPU; DSP path only covers patch-embed shape
+    const int32_t p0 = ((const int32_t *) op->op_params)[2];
+    const int32_t p1 = ((const int32_t *) op->op_params)[3];
+    if (p0 != 0 || p1 != 0) {
+        return false;
+    }
+    return true;
+}
+
 static bool hexagon_validate_tri(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
@@ -3657,6 +3681,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_DIAG]           = hexagon_validate_diag;
     s_op_validators[GGML_OP_ARGSORT]        = hexagon_validate_argsort;
     s_op_validators[GGML_OP_PAD]            = hexagon_validate_pad;
+    s_op_validators[GGML_OP_IM2COL]         = hexagon_validate_im2col;
     s_op_validators[GGML_OP_TRI]            = hexagon_validate_tri;
     s_op_validators[GGML_OP_FILL]           = hexagon_validate_fill;
     s_op_validators[GGML_OP_FLASH_ATTN_EXT] = hexagon_validate_flash_attn;
