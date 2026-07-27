@@ -579,6 +579,7 @@ static inline bool prior_dst_contains_src(uint32_t src_idx,
     return false;
 }
 
+#if 0
 /* Only element-wise / in-place style ops were originally considered safe for
  * prior-dst skip. Experimentally, with PRIOR_DST_MAX_LEN == cacheline size,
  * the prior-dst is small enough to remain in scalar L2 regardless of op type,
@@ -612,6 +613,7 @@ static inline bool prior_dst_op_safe(enum htp_op_code op) {
             return false;
     }
 }
+#endif
 
 static inline void prior_dst_add(void * base, size_t len, uint32_t tensor_idx,
                                  enum htp_op_code op) {
@@ -1046,6 +1048,7 @@ static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
     htp->nb[3] = (uint32_t)ht->nb[3];
 }
 
+#if 0
 // Hexagon DSP is 32-bit address space: pointer fits in uint32_t.
 // htp_tensor.data is uint32_t offset, but Qualcomm's prep_tensor replaces
 // it with actual pointer. We set it directly to the pointer value; flags is
@@ -1066,6 +1069,7 @@ static inline void dsptensor_to_htp_tensor(const dsptensor * dt,
     ht->nb[2] = (uint32_t)dt->nb[2];
     ht->nb[3] = (uint32_t)dt->nb[3];
 }
+#endif
 
 // Map GGML opcode to HTP opcode. Returns 0 on success, -1 if unsupported.
 // For GGML_OP_UNARY, op_params[0] selects the unary sub-op.
@@ -1862,7 +1866,7 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
      * v75/8Gen3: max_hthreads=6, requested_thread_counts=6 hangs; 5 is flaky). */
     int max_usable = g_dsp_ctx->max_hw_threads - 2;
     if (requested_thread_counts > max_usable) {
-        printf("setclocks: requested_thread_counts %d exceeds safe limit %d (max_hthreads %d - 2), clamped\n",
+        printf("setclocks: requested_thread_counts %ld exceeds safe limit %d (max_hthreads %d - 2), clamped\n",
                requested_thread_counts, max_usable, g_dsp_ctx->max_hw_threads);
         requested_thread_counts = max_usable;
     }
