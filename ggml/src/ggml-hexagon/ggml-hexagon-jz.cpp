@@ -3200,11 +3200,16 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
 
-    const int64_t m = src0->ne[1];
-    const int64_t k = src0->ne[0];
-    const int64_t n = src1->ne[1];
-    const uint32_t src0_rank    = ggml_n_dims(src0);
-    const uint32_t src1_rank    = ggml_n_dims(src1);
+    const int64_t m                 = src0->ne[1];
+    const int64_t k                 = src0->ne[0];
+    const int64_t n                 = src1->ne[1];
+    const uint32_t src0_rank        = ggml_n_dims(src0);
+    const uint32_t src1_rank        = ggml_n_dims(src1);
+    GGML_UNUSED(m);
+    GGML_UNUSED(k);
+    GGML_UNUSED(n);
+    GGML_UNUSED(src0_rank);
+    GGML_UNUSED(src1_rank);
     GGMLHEXAGON_LOG_DEBUG("MUL_MAT check: m=%lld, n=%lld, k=%lld, src0_rank=%d, src1_rank=%d", (long long)m, (long long)n, (long long)k, src0_rank, src1_rank);
 
     if (dst->type != GGML_TYPE_F32) {
@@ -4979,23 +4984,54 @@ static void ggml_backend_hexagon_free(ggml_backend_t backend) {
 // passes only (offset, size) via FastRPC as doorbell.
 // avoids FastRPC scatter-gather limits entirely.
 static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t backend, struct ggml_cgraph * cgraph) {
-
-    enum ggml_status result         = GGML_STATUS_SUCCESS;
+    enum ggml_status result             = GGML_STATUS_SUCCESS;
+    int64_t begin_time                  = ggml_time_us();
     ggml_backend_hexagon_context * ctx  = (ggml_backend_hexagon_context *)backend->context;
-    int64_t begin_time = ggml_time_us();
-    int64_t gap_from_prev = ctx->last_graph_end_us ? (begin_time - ctx->last_graph_end_us) : 0;
+    int64_t gap_from_prev               = ctx->last_graph_end_us ? (begin_time - ctx->last_graph_end_us) : 0;
+    uint32_t graph_n_nodes              = (uint32_t)cgraph->n_nodes;
+    const char * ion_base               = (const char *)ctx->rpc_mempool;
+    const size_t ion_size               = ctx->rpc_mempool_len;
+    size_t saved_mempool_usage          = ctx->rpc_mempool_usage;
+    uint32_t n_tensors                  = 0;
+    uint32_t n_ops                      = 0;
+    bool cache_hit                      = false;
 
     // Snapshot cumulative phase counters at entry so we can compute the
     // current call's accounted time at exit (used for unaccounted-time).
-    int64_t snap_p1  = ctx->cum_p1_us;
-    int64_t snap_p2  = ctx->cum_p2_us;
-    int64_t snap_p25 = ctx->cum_p25_us;
-    int64_t snap_p3  = ctx->cum_p3_us;
-    int64_t snap_p5  = ctx->cum_p5_us;
-    int64_t snap_p7  = ctx->cumulative_p7_us;
+    int64_t snap_p1                     = ctx->cum_p1_us;
+    int64_t snap_p2                     = ctx->cum_p2_us;
+    int64_t snap_p25                    = ctx->cum_p25_us;
+    int64_t snap_p3                     = ctx->cum_p3_us;
+    int64_t snap_p5                     = ctx->cum_p5_us;
+    int64_t snap_p7                     = ctx->cumulative_p7_us;
+
+    // Phase timing: declare all timers here, used across the pipeline
+    int64_t t_start, t_p1, t_p2, t_p25, t_p3, t_p4, t_p45, t_p5, t_p6, t_p65, t_p7, t_p75, t_p8;
+
+    // Track temporary ION regions (mirrors, batch descriptors, repacked weights)
+    // for cleanup after Phase 8. Mark them as free (no tail compaction).
+    std::vector<size_t>         temp_region_indices;
+
+    // Storage for cache-miss path; on cache hit we reference cached vectors
+    // directly to avoid copying ~20-110 KB of descriptors per call.
+    std::vector<ggml_tensor *>  local_tensor_src;
+    std::vector<hex_op_desc>    local_hex_ops;
+    std::vector<uint8_t>        local_is_weight;
+    std::vector<int32_t>        local_mirror_offset;  // per-tensor heap mirror ION offset, -1 = none
+
+    // supported_nodes is only required to build descriptors on cache miss.
+    // On a cache hit we restore the derived descriptors directly, so avoid
+    // scanning the cgraph and allocating this vector in the hot path.
+    std::vector<ggml_tensor *>  supported_nodes;
+
+    ggml_backend_hexagon_context::cgraph_cache_entry * cached_entry = nullptr;
+
+    if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
+        GGMLHEXAGON_LOG_ALWAYS("special: no ION mempool, falling back to per-op");
+        return result;  // let scheduler use per-op path
+    }
 
     // track per-graph node statistics (what ggml core assigned to this backend)
-    uint32_t graph_n_nodes = (uint32_t)cgraph->n_nodes;
     ctx->total_nodes_processed += graph_n_nodes;
     if (ctx->min_nodes_per_graph == 0 || graph_n_nodes < ctx->min_nodes_per_graph) {
         ctx->min_nodes_per_graph = graph_n_nodes;
@@ -5007,9 +5043,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // record entry-side ring buffer samples (n_nodes, gap_from_prev) at the
     // earliest possible point so cold-cache first-call outliers are captured.
     {
-        int hidx = ctx->perf_hist_idx;
-        ctx->n_nodes_hist[hidx]       = (int32_t)graph_n_nodes;
-        ctx->gap_from_prev_hist[hidx] = gap_from_prev;
+        int hidx                        = ctx->perf_hist_idx;
+        ctx->n_nodes_hist[hidx]         = (int32_t)graph_n_nodes;
+        ctx->gap_from_prev_hist[hidx]   = gap_from_prev;
     }
 
     // TEMP DIAG: capture first 32 calls' n_nodes + n_tensors + gap to see
@@ -5025,36 +5061,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->diag_n_calls++;
     }
 
-    size_t saved_mempool_usage = ctx->rpc_mempool_usage;
-    if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
-        GGMLHEXAGON_LOG_WARN("special: no ION mempool, falling back to per-op");
-        return result;  // let scheduler use per-op path
-    }
-
-    const char * ion_base = (const char *)ctx->rpc_mempool;
-    const size_t ion_size = ctx->rpc_mempool_len;
-
-    // Track temporary ION regions (mirrors, batch descriptors, repacked weights)
-    // for cleanup after Phase 8. Mark them as free (no tail compaction).
-    std::vector<size_t> temp_region_indices;
-
-    // Storage for cache-miss path; on cache hit we reference cached vectors
-    // directly to avoid copying ~20-110 KB of descriptors per call.
-    std::vector<ggml_tensor *> local_tensor_src;
-    std::vector<hex_op_desc>   local_hex_ops;
-    std::vector<uint8_t>       local_is_weight;
-    std::vector<int32_t>       local_mirror_offset;  // per-tensor heap mirror ION offset, -1 = none
-    uint32_t n_tensors = 0;
-    uint32_t n_ops = 0;
-
-    // supported_nodes is only required to build descriptors on cache miss.
-    // On a cache hit we restore the derived descriptors directly, so avoid
-    // scanning the cgraph and allocating this vector in the hot path.
-    std::vector<ggml_tensor *> supported_nodes;
-
-    // Phase timing: declare all timers here, used across the pipeline
-    int64_t t_p1, t_p2, t_p25, t_p3, t_p4, t_p45, t_p5, t_p6, t_p65, t_p7, t_p75, t_p8;
-    int64_t t_start = ggml_time_us();
+    t_start = ggml_time_us();
 
     // ---- Phase 1: collect unique tensor objects + cgraph cache lookup ----
     // Hash over each node's {op, ne[4], nb[4], non-null src[0..3] ptr, data ptr}.
@@ -5088,9 +5095,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
         return h;
     };
+
     const uint64_t content_hash = compute_content_hash();
-    bool cache_hit = false;
-    ggml_backend_hexagon_context::cgraph_cache_entry * cached_entry = nullptr;
     {
         auto it = ctx->cgraph_cache.find(content_hash);
         if (it != ctx->cgraph_cache.end() &&
@@ -5106,13 +5112,14 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // Bind to cached descriptors on hit, local vectors on miss. This avoids
     // the expensive assign() of hex_ops/tensor_src in the hot path.
-    std::vector<ggml_tensor *> & tensor_src = cache_hit ? cached_entry->tensor_src : local_tensor_src;
-    std::vector<hex_op_desc>   & hex_ops   = cache_hit ? cached_entry->hex_ops   : local_hex_ops;
-    std::vector<uint8_t>       & is_weight = cache_hit ? cached_entry->is_weight : local_is_weight;
+    std::vector<ggml_tensor *> & tensor_src = cache_hit ? cached_entry->tensor_src  : local_tensor_src;
+    std::vector<hex_op_desc>   & hex_ops    = cache_hit ? cached_entry->hex_ops     : local_hex_ops;
+    std::vector<uint8_t>       & is_weight  = cache_hit ? cached_entry->is_weight   : local_is_weight;
 
     if (cache_hit) {
         n_tensors = (uint32_t)cached_entry->n_tensors;
         n_ops     = (uint32_t)cached_entry->n_ops;
+
         // TEMP DIAG: fill n_tensors for the first N calls (cache hit path)
         {
             uint32_t my_id = ctx->diag_n_calls - 1;
@@ -5171,136 +5178,94 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             return idx;
         };
 
-    for (auto * node : supported_nodes) {
-        hex_op_desc op;
-        memset(&op, 0, sizeof(op));
-        for (int k = 0; k < 4; k++) op.dst_idx[k] = -1;
-        for (int k = 0; k < 6; k++) op.src_idx[k] = -1;
-        op.opcode   = node->op;
-        memcpy(op.params, node->op_params, sizeof(op.params));
-        if (node->op == GGML_OP_MUL_MAT) {
-            ggml_hexagon_precompute_mm_params(ctx, node, op, false);
-            ctx->n_mul_mat_total_cum++;
-            if (((const struct htp_mm_kernel_params *) op.kernel_params)->n_hmx) {
-                ctx->n_hmx_used_cum++;
+        for (auto * node : supported_nodes) {
+            hex_op_desc op;
+            memset(&op, 0, sizeof(op));
+            for (int k = 0; k < 4; k++) op.dst_idx[k] = -1;
+            for (int k = 0; k < 6; k++) op.src_idx[k] = -1;
+            op.opcode   = node->op;
+            memcpy(op.params, node->op_params, sizeof(op.params));
+            if (node->op == GGML_OP_MUL_MAT) {
+                ggml_hexagon_precompute_mm_params(ctx, node, op, false);
+                ctx->n_mul_mat_total_cum++;
+                if (((const struct htp_mm_kernel_params *) op.kernel_params)->n_hmx) {
+                    ctx->n_hmx_used_cum++;
+                }
+            } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+                ggml_hexagon_compute_fa_params(ctx, node,
+                    (struct htp_fa_kernel_params *) op.kernel_params);
+            } else {
+                // Unary-family ops (NORM, RMS_NORM, SCALE, SQR, SQRT, UNARY_*,
+                // L2_NORM, TRI) require host-precomputed htp_unary_kernel_params
+                // since upstream commit fb30ba9a6. Without this the DSP reads
+                // zeroed kparams (n_threads=0, etc.) and the output is garbled.
+                uint32_t unary_htp_op = 0;
+                if (ggml_op_to_htp_op_unary(node->op, node->op_params, &unary_htp_op)) {
+                    ggml_hexagon_precompute_unary_params(ctx, unary_htp_op,
+                        node->src[0], node->src[1], node,
+                        (struct htp_unary_kernel_params *) op.kernel_params);
+                    op.htp_opcode = (int32_t) unary_htp_op;
+                }
             }
+            op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
+            op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
+            op.src_idx[2] = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
+            op.src_idx[3] = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
+            op.dst_idx[0]  = get_or_add_tensor_idx(node);
+            hex_ops.push_back(op);
+        }
 
-            // Diagnostic: log N=1 GEMV kernel params and tensor info for debugging
-            // ION mirror precision issues. N=1 is the smallest batch and most
-            // sensitive to data_len/data_offset mismatches.
-            if (node->src[1]->ne[1] == 1) {
-                const struct htp_mm_kernel_params * kp =
-                    (const struct htp_mm_kernel_params *) op.kernel_params;
-                const ggml_tensor * s0 = node->src[0];
-                const ggml_tensor * s1 = node->src[1];
-                GGMLHEXAGON_LOG_DEBUG("DIAG-N1 GEMV: kernel_type=%d n_prefetch=%d vtcm_size=%d "
-                                     "src0[%s] ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%zu "
-                                     "src1[%s] ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%zu "
-                                     "dst[%s]  ne=[%lld,%lld,%lld,%lld] nb=[%lld,%lld,%lld,%lld] nbytes=%zu",
-                                     kp->kernel_type, kp->n_prefetch, kp->vtcm_size,
-                                     ggml_type_name(s0->type),
-                                     (long long)s0->ne[0], (long long)s0->ne[1], (long long)s0->ne[2], (long long)s0->ne[3],
-                                     (long long)s0->nb[0], (long long)s0->nb[1], (long long)s0->nb[2], (long long)s0->nb[3],
-                                     (size_t)ggml_nbytes(s0),
-                                     ggml_type_name(s1->type),
-                                     (long long)s1->ne[0], (long long)s1->ne[1], (long long)s1->ne[2], (long long)s1->ne[3],
-                                     (long long)s1->nb[0], (long long)s1->nb[1], (long long)s1->nb[2], (long long)s1->nb[3],
-                                     (size_t)ggml_nbytes(s1),
-                                     ggml_type_name(node->type),
-                                     (long long)node->ne[0], (long long)node->ne[1], (long long)node->ne[2], (long long)node->ne[3],
-                                     (long long)node->nb[0], (long long)node->nb[1], (long long)node->nb[2], (long long)node->nb[3],
-                                     (size_t)ggml_nbytes(node));
-            }
-        } else if (node->op == GGML_OP_FLASH_ATTN_EXT) {
-            ggml_hexagon_compute_fa_params(ctx, node,
-                (struct htp_fa_kernel_params *) op.kernel_params);
-        } else {
-            // Unary-family ops (NORM, RMS_NORM, SCALE, SQR, SQRT, UNARY_*,
-            // L2_NORM, TRI) require host-precomputed htp_unary_kernel_params
-            // since upstream commit fb30ba9a6. Without this the DSP reads
-            // zeroed kparams (n_threads=0, etc.) and the output is garbled.
-            uint32_t unary_htp_op = 0;
-            if (ggml_op_to_htp_op_unary(node->op, node->op_params, &unary_htp_op)) {
-                ggml_hexagon_precompute_unary_params(ctx, unary_htp_op,
-                    node->src[0], node->src[1], node,
-                    (struct htp_unary_kernel_params *) op.kernel_params);
-                op.htp_opcode = (int32_t) unary_htp_op;
+        n_tensors = (uint32_t)tensor_src.size();
+
+        // TEMP DIAG: fill in n_tensors (now that it's known) for the first N calls
+        {
+            uint32_t my_id = ctx->diag_n_calls - 1; // diag_n_calls was already incremented at entry
+            if (my_id < ctx->DIAG_FIRST_N) {
+                ctx->diag_first_n_tensors[my_id] = n_tensors;
             }
         }
-        op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
-        op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
-        op.src_idx[2] = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
-        op.src_idx[3] = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
-        op.dst_idx[0]  = get_or_add_tensor_idx(node);
-        hex_ops.push_back(op);
-    }
 
-    n_tensors = (uint32_t)tensor_src.size();
-
-    // TEMP DIAG: fill in n_tensors (now that it's known) for the first N calls
-    {
-        uint32_t my_id = ctx->diag_n_calls - 1; // diag_n_calls was already incremented at entry
-        if (my_id < ctx->DIAG_FIRST_N) {
-            ctx->diag_first_n_tensors[my_id] = n_tensors;
-        }
-    }
-
-    GGMLHEXAGON_LOG_DEBUG("ion-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
-    for (size_t i = 0; i < hex_ops.size(); i++) {
-        const hex_op_desc & o = hex_ops[i];
-        GGMLHEXAGON_LOG_DEBUG("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
-                              i, ggml_op_name((ggml_op)o.opcode),
-                              o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0]);
-    }
-
-    // TEMP DIAG: once per session, dump the OP DISTRIBUTION of any unusually
-    // large sub-graph (n_ops > 500) so we can see whether [16] is a single
-    // mega layer (e.g., MUL_MAT * 1000) or a stack of 20 small layers.
-    {
-        static bool s_dumped_large = false;
-        if (!s_dumped_large && hex_ops.size() > 500) {
-            std::unordered_map<std::string, int> op_count;
-            for (const auto & o : hex_ops) {
-                op_count[ggml_op_name((ggml_op)o.opcode)]++;
+        GGMLHEXAGON_LOG_DEBUG("ion-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
+        if (1 == g_hexagon_appcfg.dump_debug_info) {
+            for (size_t i = 0; i < hex_ops.size(); i++) {
+                const hex_op_desc & o = hex_ops[i];
+                GGML_UNUSED(o);
+                GGMLHEXAGON_LOG_DEBUG("  ion-op[%zu] %s: src0[t%d] src1[t%d] src2[t%d] dst[t%d]",
+                                  i, ggml_op_name((ggml_op)o.opcode),
+                                  o.src_idx[0], o.src_idx[1], o.src_idx[2], o.dst_idx[0]);
             }
-            GGMLHEXAGON_LOG_INFO("LARGE-BATCH diag: n_ops=%zu op_dist:", hex_ops.size());
-            for (const auto & [k, v] : op_count) {
-                GGMLHEXAGON_LOG_INFO("  %-12s = %d", k.c_str(), v);
-            }
-            s_dumped_large = true;
         }
-    }
 
-    // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
-    // Weights are read-only across batches; AP never modifies them per batch,
-    // so cache flush/invalidate can be skipped for them.
-    // A tensor that was dst of any op in ANY cgraph (not just this one) is
-    // not a read-only weight: check the session-global ever-dst set, else
-    // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
-    {
-        static std::unordered_set<const void *> g_ever_dst_ptrs;
-        for (const auto & op : hex_ops) {
-            uint32_t didx = op.dst_idx[0];
-            if (didx < n_tensors) g_ever_dst_ptrs.insert(tensor_src[didx]->data);
-        }
-        is_weight.assign(n_tensors, 0);
-        std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
-        for (const auto & op : hex_ops) {
-            uint32_t didx = op.dst_idx[0];
-            if (didx < n_tensors) dst_indices[didx] = 1;
-        }
-        for (const auto & op : hex_ops) {
-            if (op.opcode == GGML_OP_MUL_MAT) {
-                uint32_t sidx = op.src_idx[0];
-                if (sidx < n_tensors && !dst_indices[sidx] &&
-                    !g_ever_dst_ptrs.count(tensor_src[sidx]->data)) {
-                    is_weight[sidx] = 1;
-                    GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
-                                         sidx, (int)tensor_src[sidx]->type);
+        // Identify weight tensors: src0 of MUL_MAT that is NOT dst of any op.
+        // Weights are read-only across batches; AP never modifies them per batch,
+        // so cache flush/invalidate can be skipped for them.
+        // A tensor that was dst of any op in ANY cgraph (not just this one) is
+        // not a read-only weight: check the session-global ever-dst set, else
+        // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
+        {
+            static std::unordered_set<const void *> g_ever_dst_ptrs;
+            for (const auto & op : hex_ops) {
+                uint32_t didx = op.dst_idx[0];
+                if (didx < n_tensors) g_ever_dst_ptrs.insert(tensor_src[didx]->data);
+            }
+            is_weight.assign(n_tensors, 0);
+            std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
+            for (const auto & op : hex_ops) {
+                uint32_t didx = op.dst_idx[0];
+                if (didx < n_tensors) dst_indices[didx] = 1;
+            }
+            for (const auto & op : hex_ops) {
+                if (op.opcode == GGML_OP_MUL_MAT) {
+                    uint32_t sidx = op.src_idx[0];
+                    if (sidx < n_tensors && !dst_indices[sidx] &&
+                        !g_ever_dst_ptrs.count(tensor_src[sidx]->data)) {
+                        is_weight[sidx] = 1;
+                        GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
+                                             sidx, (int)tensor_src[sidx]->type);
+                    }
                 }
             }
         }
-    }
     }  // end if (!cache_hit) for Phase 2
 
     t_p2 = t_start; t_start = ggml_time_us(); ctx->cum_p2_us += t_start - t_p2;
@@ -5318,7 +5283,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     //   HMX-eligible MUL_MATs are excluded: fusion redirects to HVX fused
     //   kernels, while HMX-eligible ops benefit more from the HMX pipeline.
     if (!cache_hit) {
-    {
         // Count src usages of each tensor to ensure fused dst is single-use
         std::vector<int> src_use_count(n_tensors, 0);
         for (const auto & op : hex_ops) {
@@ -5335,9 +5299,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         size_t n_mul_mat_add  = 0;
         size_t n_mul_mat_qkv  = 0;
         size_t n_mul_mat_ffn  = 0;
-        size_t n_mm_add_skip_use_count = 0;  // MUL_MAT+ADD candidate but src_use_count > 1
+        size_t n_mm_add_skip_use_count    = 0;  // MUL_MAT+ADD candidate but src_use_count > 1
         size_t n_mm_add_skip_not_adjacent = 0;  // MUL_MAT not followed by ADD
-        size_t n_mm_add_skip_vtcm = 0;  // MUL_MAT+ADD candidate but VTCM budget exceeded
+        size_t n_mm_add_skip_vtcm         = 0;  // MUL_MAT+ADD candidate but VTCM budget exceeded
 
         const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
         // QKV/FFN fusion only applies to algotype==29:
@@ -5548,7 +5512,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             GGMLHEXAGON_LOG_DEBUG("mm_add fusion diag: skip_use_count=%zu skip_not_adjacent=%zu",
                                     n_mm_add_skip_use_count, n_mm_add_skip_not_adjacent);
         }
-    }
     }  // end if (!cache_hit) for Phase 2.5
 
     n_ops = (uint32_t)hex_ops.size();
@@ -5572,13 +5535,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     PERF_RECORD(t_start - t_p25, ctx->p25_hist);
 
     // ---- Phase 3: compute layout sizes ----
-    const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);          // ~24 bytes
-    const uint32_t ops_region    = (uint32_t)(n_ops * sizeof(hex_op_desc));  // ~96*N
+    const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);                 // ~24 bytes
+    const uint32_t ops_region    = (uint32_t)(n_ops * sizeof(hex_op_desc));         // ~96*N
     const uint32_t tens_region   = (uint32_t)(n_tensors * sizeof(hex_tensor_desc)); // ~104*M
     // align ops/tensors regions
-    const uint32_t ops_offset    = hdr_size;
-    const uint32_t tensors_offset = ops_offset + ((ops_region + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1));
-    const uint32_t total_desc_size = tensors_offset + tens_region;
+    const uint32_t ops_offset       = hdr_size;
+    const uint32_t tensors_offset   = ops_offset + ((ops_region + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1));
+    const uint32_t total_desc_size  = tensors_offset + tens_region;
 
     t_p3 = t_start; t_start = ggml_time_us(); ctx->cum_p3_us += t_start - t_p3;
     PERF_RECORD(t_start - t_p3, ctx->p3_hist);
@@ -5701,11 +5664,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // ---- Phase 4.5: track ION offsets for repacked quantized weights ----
     t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     PERF_RECORD(t_p4, ctx->p4_hist);
+
     //   weights are already repacked to tile-based layout
     //   by set_tensor during model loading. Phase 4.5 only tracks ION
     //   offsets for DSP descriptor updates in Phase 6.
     std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
-    static std::unordered_map<const void *, uint32_t> g_x4x2_ion_offsets;
     static std::unordered_map<const void *, uint32_t> g_tiled_ion_offsets;
     {
         // Quantized weights (Q4_0 / Q4_1 / Q8_0 / IQ4_NL / MXFP4) are repacked
@@ -5860,41 +5823,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
     }
 
-    // ---- DIAGNOSTIC: dump tensor data locations and sample values ----
-    if (1 == g_hexagon_appcfg.dump_diag_info) {
-        uint32_t n_mirrored = 0, n_no_mirror = 0;
-        for (uint32_t i = 0; i < n_tensors; i++) {
-            ggml_tensor * t = tensor_src[i];
-            const char * dp = (const char *)t->data;
-            const char * location = "???";
-            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) location = "ION";
-            else location = "HEAP";
-            uint32_t offset = (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size)
-                              ? (uint32_t)(dp - ion_base) : 0xFFFFFFFFu;
-            const hex_tensor_desc * td = &tens_out[i];
-            GGMLHEXAGON_LOG_WARN("DIAG tensor[%d] type=%d ne=[%d,%d,%d,%d] nb=[%d,%d,%d,%d] ptr=%p %s off=0x%x nbytes=%u td_off=0x%x flags=%d",
-                                 i, (int)t->type,
-                                 (int)t->ne[0], (int)t->ne[1], (int)t->ne[2], (int)t->ne[3],
-                                 (int)t->nb[0], (int)t->nb[1], (int)t->nb[2], (int)t->nb[3],
-                                 (void *)dp, location, offset, (uint32_t)ggml_nbytes(t),
-                                 td->data_offset, td->flags);
-            if (td->flags == 1) n_mirrored++;
-            if (td->flags == 0 && location[0] == 'H') n_no_mirror++;
-            // dump first 4 f32 values from src tensors (if f32 type and has data)
-            if (t->data && ggml_nbytes(t) >= 16) {
-                const float * fv = (const float *)t->data;
-                float op_param0 = 0;
-                memcpy(&op_param0, t->op_params, sizeof(float));
-                GGMLHEXAGON_LOG_WARN("DIAG   sample[%d] f32=[%.4f, %.4f, %.4f, %.4f] op_params[0]=%.8f",
-                                     i, fv[0], fv[1], fv[2], fv[3], op_param0);
-            }
-        }
-        GGMLHEXAGON_LOG_WARN("DIAG summary: mirrored=%u no_mirror=%u mempool_usage=%zu/%zu bytes",
-                             n_mirrored, n_no_mirror, ctx->rpc_mempool_usage, ctx->rpc_mempool_len);
-    }
-
-    GGMLHEXAGON_LOG_DEBUG("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)",
-                         batch_offset, total_desc_size, n_ops, n_tensors);
+    GGMLHEXAGON_LOG_DEBUG("ion-batch: submitted offset=0x%x size=%u (%u ops, %u tensors)", batch_offset, total_desc_size, n_ops, n_tensors);
 
     // ion_sync_mode controls which cache coherency mechanism to use:
     //   0 = both DC CVAC/CIVAC + DMA_BUF_IOCTL_SYNC (default, safest)
@@ -5906,6 +5835,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // ---- Phase 6.5: AP -> DSP cache coherency ----
     t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     PERF_RECORD(t_p6, ctx->p6_hist);
+
     // Flush CPU cache to DRAM so DSP can read AP-written data.
     {
         // Collect per-tensor dirty ranges and flush them individually (merged).
@@ -5940,95 +5870,93 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                   g_hexagon_appcfg.ion_sync_mode, was_weights_dirty);
         } else {
 
-        for (uint32_t i = 0; i < n_tensors; i++) {
-            ggml_tensor * t = tensor_src[i];
-            if (!t || !t->data) continue;
-            if (is_weight[i] && !ctx->weights_dirty) continue;
-            const char * dp = (const char *)t->data;
-            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                // For quantized weights repacked in-place by set_tensor,
-                // use the repacked size (larger than ggml_nbytes).
-                bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
-                size_t flush_size = is_quant_weight ? ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]) : ggml_nbytes(t);
-                if (flush_size == 0) flush_size = ggml_nbytes(t);
-                add_range((uint32_t)(dp - ion_base), (uint32_t)flush_size);
-                dbg_bytes_tensor += flush_size;
-                dbg_ranges_tensor++;
-            }
-        }
-        for (const auto & m : mirrors) {
-            add_range(m.mirror_offset, m.data_len);
-            dbg_bytes_mirror += m.data_len;
-        }
-        for (const auto & rw : repacked_ion_weights) {
-            add_range(rw.first, rw.second);
-            dbg_bytes_repack_ion += rw.second;
-        }
-        add_range(batch_offset, total_desc_size);
-        dbg_bytes_batch += total_desc_size;
-
-        // Also flush non-op tensors in cgraph not in tensor_src (e.g., test sentinels).
-        // Without this, Phase 7.5 DC CIVAC can invalidate cache lines containing
-        // unflushed sentinel data, causing sentinel mismatch.
-        //
-        // CRITICAL: skip repack-buft weights when weights_dirty is false.
-        // The per-tensor loop above already guards against re-flushing clean
-        // weights via weight_indices; this loop did not, which caused every
-        // graph_compute call to re-flush the entire repack weight region
-        // (~1.5 GB for gemma4 9B) even though no repack had happened. That
-        // single oversight was responsible for ~22 s of the 34 s total
-        // graph_compute time in the algotype=29 path.
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            ggml_tensor * t = cgraph->nodes[i];
-            if (!t || !t->data) continue;
-            if (!ctx->weights_dirty &&
-                t->buffer && ggml_backend_buffer_is_hexagon_repack(t->buffer)) {
-                continue;  // repack-buft weight, cache already coherent
-            }
-            const char * dp = (const char *)t->data;
-            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                size_t sz = ggml_nbytes(t);
-                add_range((uint32_t)(dp - ion_base), (uint32_t)sz);
-                dbg_bytes_cgraph += sz;
-                dbg_ranges_cgraph++;
-            }
-        }
-
-        uint32_t flush_bytes = 0;
-        uint32_t n_flush     = 0;
-        if (do_dc_cvac && !ranges.empty()) {
-            std::sort(ranges.begin(), ranges.end());
-            // Merge overlapping/adjacent ranges. Merge gap = 1 cache line (64B):
-            // flushing a tiny gap is cheaper than issuing a second flush call.
-            const uint32_t merge_gap = 64;
-            uint32_t cur_start = ranges[0].first;
-            uint32_t cur_end   = ranges[0].second;
-            for (size_t i = 1; i < ranges.size(); i++) {
-                if (ranges[i].first <= cur_end + merge_gap) {
-                    if (ranges[i].second > cur_end) cur_end = ranges[i].second;
-                } else {
-                    cpu_dcache_flush_range(ctx, 0,
-                        (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
-                    flush_bytes += cur_end - cur_start;
-                    n_flush++;
-                    cur_start = ranges[i].first;
-                    cur_end   = ranges[i].second;
+            for (uint32_t i = 0; i < n_tensors; i++) {
+                ggml_tensor * t = tensor_src[i];
+                if (!t || !t->data) continue;
+                if (is_weight[i] && !ctx->weights_dirty) continue;
+                const char * dp = (const char *)t->data;
+                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                    // For quantized weights repacked in-place by set_tensor,
+                    // use the repacked size (larger than ggml_nbytes).
+                    bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+                    size_t flush_size = is_quant_weight ? ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]) : ggml_nbytes(t);
+                    if (flush_size == 0) flush_size = ggml_nbytes(t);
+                    add_range((uint32_t)(dp - ion_base), (uint32_t)flush_size);
+                    dbg_bytes_tensor += flush_size;
+                    dbg_ranges_tensor++;
                 }
             }
-            cpu_dcache_flush_range(ctx, 0,
-                (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
-            flush_bytes += cur_end - cur_start;
-            n_flush++;
-        }
-        // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
-        if (do_ion_sync) {
-            int ion_fd = ctx->rpc_mempool_handle;
-            if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
-        }
+            for (const auto & m : mirrors) {
+                add_range(m.mirror_offset, m.data_len);
+                dbg_bytes_mirror += m.data_len;
+            }
+            for (const auto & rw : repacked_ion_weights) {
+                add_range(rw.first, rw.second);
+                dbg_bytes_repack_ion += rw.second;
+            }
+            add_range(batch_offset, total_desc_size);
+            dbg_bytes_batch += total_desc_size;
 
-        int was_weights_dirty = ctx->weights_dirty ? 1 : 0;
-        ctx->weights_dirty = false;
-        (void)was_weights_dirty;
+            // Also flush non-op tensors in cgraph not in tensor_src (e.g., test sentinels).
+            // Without this, Phase 7.5 DC CIVAC can invalidate cache lines containing
+            // unflushed sentinel data, causing sentinel mismatch.
+            //
+            // Skip repack-buft weights when weights_dirty is false.
+            // The per-tensor loop above already guards against re-flushing clean
+            // weights via weight_indices; this loop did not, which caused every
+            // graph_compute call to re-flush the entire repack weight region
+            // even though no repack had happened.
+            for (int i = 0; i < cgraph->n_nodes; i++) {
+                ggml_tensor * t = cgraph->nodes[i];
+                if (!t || !t->data) continue;
+                if (!ctx->weights_dirty &&
+                    t->buffer && ggml_backend_buffer_is_hexagon_repack(t->buffer)) {
+                    continue;  // repack-buft weight, cache already coherent
+                }
+                const char * dp = (const char *)t->data;
+                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                    size_t sz = ggml_nbytes(t);
+                    add_range((uint32_t)(dp - ion_base), (uint32_t)sz);
+                    dbg_bytes_cgraph += sz;
+                    dbg_ranges_cgraph++;
+                }
+            }
+
+            uint32_t flush_bytes = 0;
+            uint32_t n_flush     = 0;
+            if (do_dc_cvac && !ranges.empty()) {
+                std::sort(ranges.begin(), ranges.end());
+                // Merge overlapping/adjacent ranges. Merge gap = 1 cache line (64B):
+                // flushing a tiny gap is cheaper than issuing a second flush call.
+                const uint32_t merge_gap = 64;
+                uint32_t cur_start = ranges[0].first;
+                uint32_t cur_end   = ranges[0].second;
+                for (size_t i = 1; i < ranges.size(); i++) {
+                    if (ranges[i].first <= cur_end + merge_gap) {
+                        if (ranges[i].second > cur_end) cur_end = ranges[i].second;
+                    } else {
+                        cpu_dcache_flush_range(ctx, 0,
+                            (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                        flush_bytes += cur_end - cur_start;
+                        n_flush++;
+                        cur_start = ranges[i].first;
+                        cur_end   = ranges[i].second;
+                    }
+                }
+                cpu_dcache_flush_range(ctx, 0,
+                    (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                flush_bytes += cur_end - cur_start;
+                n_flush++;
+            }
+            // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
+            if (do_ion_sync) {
+                int ion_fd = ctx->rpc_mempool_handle;
+                if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+            }
+
+            int was_weights_dirty = ctx->weights_dirty ? 1 : 0;
+            ctx->weights_dirty = false;
+            (void)was_weights_dirty;
         }  // end else (do_dc_cvac)
     }
 
@@ -6080,40 +6008,40 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
             }
         } else {
-        uint32_t inval_min = ~0u, inval_max = 0;
-        for (uint32_t oi = 0; oi < n_ops; oi++) {
-            const hex_op_desc & cur_op = hex_ops[oi];
-            uint32_t dst_idx = cur_op.dst_idx[0];
-            if (dst_idx >= n_tensors) continue;
-            ggml_tensor * dst_t = tensor_src[dst_idx];
-            if (!dst_t || !dst_t->data) continue;
+            uint32_t inval_min = ~0u, inval_max = 0;
+            for (uint32_t oi = 0; oi < n_ops; oi++) {
+                const hex_op_desc & cur_op = hex_ops[oi];
+                uint32_t dst_idx = cur_op.dst_idx[0];
+                if (dst_idx >= n_tensors) continue;
+                ggml_tensor * dst_t = tensor_src[dst_idx];
+                if (!dst_t || !dst_t->data) continue;
 
-            uint32_t dst_off = 0xFFFFFFFFu;
-            const char * dp = (const char *)dst_t->data;
-            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                dst_off = (uint32_t)(dp - ion_base);
-            } else {
-                int32_t moff = local_mirror_offset[dst_idx];
-                if (moff >= 0) dst_off = (uint32_t)moff;
+                uint32_t dst_off = 0xFFFFFFFFu;
+                const char * dp = (const char *)dst_t->data;
+                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                    dst_off = (uint32_t)(dp - ion_base);
+                } else {
+                    int32_t moff = local_mirror_offset[dst_idx];
+                    if (moff >= 0) dst_off = (uint32_t)moff;
+                }
+                if (dst_off == 0xFFFFFFFFu) continue;
+
+                uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
+                uint32_t start = dst_off & ~63u;
+                uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
+                if (start < inval_min) inval_min = start;
+                if (end > inval_max) inval_max = end;
             }
-            if (dst_off == 0xFFFFFFFFu) continue;
-
-            uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
-            uint32_t start = dst_off & ~63u;
-            uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
-            if (start < inval_min) inval_min = start;
-            if (end > inval_max) inval_max = end;
-        }
-        if (inval_max > inval_min) {
-            cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
-            GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
-                                  inval_min, inval_max, inval_max - inval_min);
-        }
-        // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
-        if (do_ion_sync) {
-            int ion_fd = ctx->rpc_mempool_handle;
-            if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
-        }
+            if (inval_max > inval_min) {
+                cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
+                GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
+                                      inval_min, inval_max, inval_max - inval_min);
+            }
+            // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
+            if (do_ion_sync) {
+                int ion_fd = ctx->rpc_mempool_handle;
+                if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+            }
         }  // end else (do_dc_cvac)
     }
 
@@ -6170,7 +6098,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         // Post-copy-back verification: check last op's dst tensor
-        if (1 == g_hexagon_appcfg.dump_diag_info && n_ops > 0) {
+        if (1 == g_hexagon_appcfg.dump_debug_info && n_ops > 0) {
             const hex_op_desc & last_op = hex_ops[n_ops - 1];
             uint32_t last_dst_idx = last_op.dst_idx[0];
             if (last_dst_idx < n_tensors) {
@@ -6202,8 +6130,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     for (size_t ri : temp_region_indices) {
         ctx->ion_regions[ri].in_use = false;
     }
+
     t_p8 = ggml_time_us() - t_prev;
     PERF_RECORD(t_p8, ctx->p8_hist);
+
     int64_t end_time = ggml_time_us();
     int64_t graph_dur = end_time - begin_time;
     // (cumulative_p7_us is already updated at the end of the Phase 7 invoke()
@@ -6231,6 +6161,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     ctx->cumulative_graph_us += graph_dur;
     ctx->last_graph_end_us   = end_time;
+
     // TEMP DIAG: record graph_dur for the first N calls
     {
         uint32_t my_id = ctx->diag_n_calls - 1;
@@ -6238,6 +6169,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             ctx->diag_first_graph_us[my_id] = graph_dur;
         }
     }
+
     // record total graph_us + advance ring buffer slot
     ctx->graph_us_hist[ctx->perf_hist_idx] = graph_dur;
     ctx->perf_hist_idx = (ctx->perf_hist_idx + 1) % ctx->PERF_HIST_CAP;
@@ -6252,7 +6184,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     ctx->cum_p8_us  += t_p8;
     // per-call min/max
     if (ctx->min_p7_us == 0 || t_p7 < ctx->min_p7_us)    ctx->min_p7_us = t_p7;
-    if (t_p7 > ctx->max_p7_us)                            ctx->max_p7_us = t_p7;
+    if (t_p7 > ctx->max_p7_us)                           ctx->max_p7_us = t_p7;
+
     {
         int64_t rpc_overhead = graph_dur - t_p7;
         if (rpc_overhead < 0) rpc_overhead = 0;
@@ -6264,7 +6197,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
         ctx->sum_rpc_overhead_us += rpc_overhead;
     }
+
     if (ctx->min_graph_us == 0 || graph_dur < ctx->min_graph_us) ctx->min_graph_us = graph_dur;
+
     if (graph_dur > ctx->max_graph_us) {
         ctx->max_graph_us     = graph_dur;
         ctx->max_graph_n_nodes = graph_n_nodes;
