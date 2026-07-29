@@ -3500,6 +3500,59 @@ static bool hexagon_validate_flash_attn(ggml_backend_hexagon_context *ctx, const
     return ggmlhexagon_supported_flash_attn(ctx, op);
 }
 
+static bool hexagon_validate_gated_delta_net(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+    GGML_UNUSED(ctx);
+    const struct ggml_tensor * q     = op->src[0];
+    const struct ggml_tensor * k     = op->src[1];
+    const struct ggml_tensor * v     = op->src[2];
+    const struct ggml_tensor * g     = op->src[3];
+    const struct ggml_tensor * beta  = op->src[4];
+    const struct ggml_tensor * state = op->src[5];
+    const struct ggml_tensor * dst   = op;
+
+    if (!q || !k || !v || !g || !beta || !state) {
+        return false;
+    }
+
+    if (q->type != GGML_TYPE_F32 || k->type != GGML_TYPE_F32 || v->type != GGML_TYPE_F32 ||
+        g->type != GGML_TYPE_F32 || beta->type != GGML_TYPE_F32 || state->type != GGML_TYPE_F32 ||
+        dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (!ggml_is_contiguous_rows(q) || !ggml_is_contiguous_rows(k) || !ggml_is_contiguous_rows(v) ||
+        !ggml_is_contiguous(g) || !ggml_is_contiguous(beta) || !ggml_is_contiguous(state) ||
+        !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H        = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+    const int64_t K        = ggml_get_op_params_i32(op, 0);
+
+    if (S_v <= 0 || S_v > 128 || H <= 0 || n_tokens <= 0 || n_seqs <= 0) {
+        return false;
+    }
+    if (q->ne[0] != S_v || k->ne[0] != S_v || q->ne[1] <= 0 || k->ne[1] <= 0 ||
+        q->ne[2] != n_tokens || k->ne[2] != n_tokens || q->ne[3] <= 0 || k->ne[3] <= 0 ||
+        (n_seqs % q->ne[3]) != 0 || (n_seqs % k->ne[3]) != 0) {
+        return false;
+    }
+    if ((g->ne[0] != 1 && g->ne[0] != S_v) || beta->ne[0] != 1) {
+        return false;
+    }
+    if (ggml_nelements(state) != S_v * S_v * H * n_seqs) {
+        return false;
+    }
+    if (dst->ne[0] != S_v * H || dst->ne[1] != n_tokens * n_seqs + S_v * n_seqs * K) {
+        return false;
+    }
+
+    return true;
+}
+
 // Static lookup table: one validator per GGML_OP, indexed by op_tensor->op.
 // NULL entries mean "not supported on DSP" (returns false).
 // Initialized once at first call via init_op_validators().
@@ -3538,6 +3591,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_ARGSORT]        = hexagon_validate_argsort;
     s_op_validators[GGML_OP_PAD]            = hexagon_validate_pad;
     s_op_validators[GGML_OP_IM2COL]         = hexagon_validate_im2col;
+    s_op_validators[GGML_OP_GATED_DELTA_NET]= hexagon_validate_gated_delta_net;
     s_op_validators[GGML_OP_TRI]            = hexagon_validate_tri;
     s_op_validators[GGML_OP_FILL]           = hexagon_validate_fill;
     s_op_validators[GGML_OP_FLASH_ATTN_EXT] = hexagon_validate_flash_attn;
@@ -5007,6 +5061,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             op.src_idx[1] = (node->src[1]) ? get_or_add_tensor_idx(node->src[1]) : -1;
             op.src_idx[2] = (node->src[2]) ? get_or_add_tensor_idx(node->src[2]) : -1;
             op.src_idx[3] = (node->src[3]) ? get_or_add_tensor_idx(node->src[3]) : -1;
+            op.src_idx[4] = (node->src[4]) ? get_or_add_tensor_idx(node->src[4]) : -1;
+            op.src_idx[5] = (node->src[5]) ? get_or_add_tensor_idx(node->src[5]) : -1;
             op.dst_idx[0]  = get_or_add_tensor_idx(node);
             hex_ops.push_back(op);
         }

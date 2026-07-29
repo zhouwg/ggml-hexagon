@@ -1100,6 +1100,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_ARGSORT: *htp_op = HTP_OP_ARGSORT;     return 0;
         case GGML_OP_PAD:     *htp_op = HTP_OP_PAD;         return 0;
         case GGML_OP_IM2COL:  *htp_op = HTP_OP_IM2COL;      return 0;
+        case GGML_OP_GATED_DELTA_NET: *htp_op = HTP_OP_GATED_DELTA_NET; return 0;
         case GGML_OP_CUMSUM:  *htp_op = HTP_OP_CUMSUM;      return 0;
         case GGML_OP_FILL:    *htp_op = HTP_OP_FILL;        return 0;
         case GGML_OP_DIAG:    *htp_op = HTP_OP_DIAG;        return 0;
