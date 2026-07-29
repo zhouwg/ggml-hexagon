@@ -265,51 +265,11 @@ struct ggml_backend_hexagon_context {
     int64_t  cum_p8_us;             // Phase 8: ION->heap copy-back
     int64_t  cum_unaccounted_us;    // wall-clock not covered by p1..p8 (gaps, scheduler, etc.)
 
-    // Per-call fine-grained profiling (ring buffer, capacity 1024).
-    // Captures per-call durations so dump_perf_stats can compute
-    // min/p50/p95/max and reveal distribution that cumulative averages hide.
-    static constexpr int PERF_HIST_CAP = 1024;
-    int      perf_hist_count;                   // number of valid samples (<= PERF_HIST_CAP)
-    int      perf_hist_idx;                     // next ring slot (mod PERF_HIST_CAP)
-    int64_t  p1_hist[PERF_HIST_CAP];            // Phase 1: collect unique tensor objects
-    int64_t  p2_hist[PERF_HIST_CAP];            // Phase 2: build op descriptors
-    int64_t  p25_hist[PERF_HIST_CAP];           // Phase 2.5: op fusion
-    int64_t  p3_hist[PERF_HIST_CAP];            // Phase 3: compute layout sizes
-    int64_t  p4_hist[PERF_HIST_CAP];            // Phase 4: tensor mirroring
-    int64_t  p45_hist[PERF_HIST_CAP];           // Phase 4.5: weight repack
-    int64_t  p5_hist[PERF_HIST_CAP];            // Phase 5: allocate batch descriptor in ION
-    int64_t  p6_hist[PERF_HIST_CAP];            // Phase 6: descriptor construction
-    int64_t  p65_hist[PERF_HIST_CAP];           // Phase 6.5: cache flush
-    int64_t  p7_hist[PERF_HIST_CAP];            // Phase 7: FastRPC + DSP exec + cache inval (cumulative; see 3-way split below)
-    int64_t  p75_hist[PERF_HIST_CAP];           // Phase 7.5: cache inval
-    int64_t  p8_hist[PERF_HIST_CAP];            // Phase 8: ION->heap copy-back
-    int64_t  unaccounted_hist[PERF_HIST_CAP];   // wall-clock not covered by p1..p8
-    int64_t  graph_us_hist[PERF_HIST_CAP];      // total wall-clock per graph_compute_batch call
-    int32_t  n_nodes_hist[PERF_HIST_CAP];       // cgraph->n_nodes at entry
-    int32_t  n_ops_hist[PERF_HIST_CAP];         // offloaded DSP ops at FastRPC dispatch
-    int64_t  gap_from_prev_hist[PERF_HIST_CAP]; // us between consecutive graph_compute calls (sampler)
-
-    // ---- TEMP DIAG: first-N sub-graph counters (PP split analysis) ----
-    // Captures per-call n_nodes, n_tensors, graph_us, gap_us for the first
-    // 32 graph_compute_batch calls.
-    // Safe to keep enabled (no-op after 32 calls; no perf impact on the
-    // hot path; if no longer needed, grep `TEMP DIAG` to remove).
-    static constexpr int DIAG_FIRST_N = 32;
-    uint32_t diag_n_calls;                       // total graph_compute_batch calls so far
-    uint32_t diag_first_n_nodes  [DIAG_FIRST_N];
-    uint32_t diag_first_n_tensors[DIAG_FIRST_N];
-    int64_t  diag_first_graph_us [DIAG_FIRST_N];
-    int64_t  diag_first_gap_us   [DIAG_FIRST_N];
-    int64_t  diag_first_unaccounted_us[DIAG_FIRST_N];
-
     // p7 3-way breakdown: split the FastRPC + DSP exec + cache inval window
     // so we can tell AP-side cache-coherency cost apart from DSP-side work.
     int64_t  cum_p7_rpc_setup_us;               // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
     int64_t  cum_p7_dsp_exec_us;                // pure DSP execution time inside the sync call
     int64_t  cum_p7_civac_us;                   // AP cache invalidate after DSP reply
-    int64_t  p7_rpc_setup_hist[PERF_HIST_CAP];  // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
-    int64_t  p7_dsp_exec_hist[PERF_HIST_CAP];   // pure DSP execution time inside the sync call
-    int64_t  p7_civac_hist[PERF_HIST_CAP];      // AP cache invalidate after DSP reply
 
     // FastRPC transport overhead calibration (measured via 0xFFFB warmup invokes at init).
     // The 0xFFFB warmup mode does no DSP work, so measured time is an upper bound of
@@ -628,34 +588,6 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
 
-// Compute min/p50/p95/max over a ring buffer. `count` <= cap, so we sort a
-// scratch copy. Sorts are only paid at dump time (once per deinit), so the
-// per-call hot path stays branch-free.
-static void ggmlhexagon_compute_hist_stats(const int64_t * hist, int count, int64_t & mn, int64_t & p50, int64_t & p95, int64_t & mx) {
-    if (count <= 0) { mn = p50 = p95 = mx = 0; return; }
-    std::vector<int64_t> tmp(hist, hist + count);
-    std::sort(tmp.begin(), tmp.end());
-    mn  = tmp.front();
-    mx  = tmp.back();
-    p50 = tmp[count / 2];
-    p95 = tmp[(int)((int64_t)count * 95 / 100)];
-    if (p95 >= count) p95 = count - 1;
-}
-
-// int32_t variant for n_nodes / n_ops which are stored as int32_t to save
-// memory. Returning into int64_t keeps the print site uniform with the
-// int64_t variant above.
-static void ggmlhexagon_compute_hist_stats_i32(const int32_t * hist, int count, int64_t & mn, int64_t & p50, int64_t & p95, int64_t & mx) {
-    if (count <= 0) { mn = p50 = p95 = mx = 0; return; }
-    std::vector<int32_t> tmp(hist, hist + count);
-    std::sort(tmp.begin(), tmp.end());
-    mn  = tmp.front();
-    mx  = tmp.back();
-    p50 = tmp[count / 2];
-    p95 = tmp[(int)((int64_t)count * 95 / 100)];
-    if (p95 >= count) p95 = count - 1;
-}
-
 // dump accumulated performance statistics collected during graph_compute_batch
 static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx) {
     if (nullptr == ctx) {
@@ -686,22 +618,6 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              ctx->rpc_batch_call_count ? (long long)(ctx->sum_rpc_overhead_us / (int64_t)ctx->rpc_batch_call_count) : 0);
     GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
                              (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
-    // TEMP DIAG: dump first N (sub-)graphs to see how PP is split
-    {
-        uint32_t dump_n = ctx->diag_n_calls < (uint32_t)ctx->DIAG_FIRST_N
-                          ? ctx->diag_n_calls : (uint32_t)ctx->DIAG_FIRST_N;
-        // Each entry up to ~50 bytes ([31]nnnnn/nnnnn/nnnnnnn/nnnnnnn = ~40), so 4 KiB fits 64+ entries.
-        char line[4096]; int off = 0;
-        off += snprintf(line+off, sizeof(line)-off, "first-%u graphs (n_nodes/n_tensors/graph_us/gap_us/unaccounted_us):",
-                        dump_n);
-        for (uint32_t i = 0; i < dump_n; i++) {
-            off += snprintf(line+off, sizeof(line)-off, " [%u]%u/%u/%lld/%lld/%lld",
-                            i, ctx->diag_first_n_nodes[i], ctx->diag_first_n_tensors[i],
-                            (long long)ctx->diag_first_graph_us[i], (long long)ctx->diag_first_gap_us[i],
-                            (long long)ctx->diag_first_unaccounted_us[i]);
-        }
-        GGMLHEXAGON_LOG_ALWAYS("%s", line);
-    }
     GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p2.5=%lld p3=%lld p4=%lld p4.5=%lld p5=%lld p6=%lld p6.5=%lld p7.5=%lld p8=%lld unaccounted=%lld us",
                              (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
                              (long long)ctx->cum_p25_us, (long long)ctx->cum_p3_us,
@@ -776,46 +692,6 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                                         ? 100.0 * ctx->n_hmx_vtcm_fail / ctx->n_hmx_basic_pass
                                         : 0.0);
         }
-    }
-
-    // Per-call distribution (min/p50/p95/max) for the last PERF_HIST_CAP calls
-    if (ctx->perf_hist_count > 0) {
-        int64_t mn, p50, p95, mx;
-        const int n = ctx->perf_hist_count;
-        GGMLHEXAGON_LOG_ALWAYS("---- per-call distribution over last %d calls (us) ----", n);
-
-        #define DUMP_PHASE_HIST(NAME, ARR) do { \
-            ggmlhexagon_compute_hist_stats((ARR), n, mn, p50, p95, mx); \
-            GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld", \
-                (NAME), (long long)mn, (long long)p50, (long long)p95, (long long)mx); \
-        } while (0)
-        DUMP_PHASE_HIST("p1",   ctx->p1_hist);
-        DUMP_PHASE_HIST("p2",   ctx->p2_hist);
-        DUMP_PHASE_HIST("p2.5", ctx->p25_hist);
-        DUMP_PHASE_HIST("p3",   ctx->p3_hist);
-        DUMP_PHASE_HIST("p4",   ctx->p4_hist);
-        DUMP_PHASE_HIST("p4.5", ctx->p45_hist);
-        DUMP_PHASE_HIST("p5",   ctx->p5_hist);
-        DUMP_PHASE_HIST("p6",   ctx->p6_hist);
-        DUMP_PHASE_HIST("p6.5", ctx->p65_hist);
-        DUMP_PHASE_HIST("p7",   ctx->p7_hist);
-        DUMP_PHASE_HIST("p7.5", ctx->p75_hist);
-        DUMP_PHASE_HIST("p8",   ctx->p8_hist);
-        DUMP_PHASE_HIST("unaccounted", ctx->unaccounted_hist);
-        DUMP_PHASE_HIST("p7rpc", ctx->p7_rpc_setup_hist);
-        DUMP_PHASE_HIST("p7dsp", ctx->p7_dsp_exec_hist);
-        DUMP_PHASE_HIST("p7civ", ctx->p7_civac_hist);
-        DUMP_PHASE_HIST("graph", ctx->graph_us_hist);
-        DUMP_PHASE_HIST("gap",   ctx->gap_from_prev_hist);
-        #undef DUMP_PHASE_HIST
-
-        // n_nodes / n_ops are int32_t in ctx, use the i32 variant
-        ggmlhexagon_compute_hist_stats_i32(ctx->n_nodes_hist, n, mn, p50, p95, mx);
-        GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
-            "n_node", (long long)mn, (long long)p50, (long long)p95, (long long)mx);
-        ggmlhexagon_compute_hist_stats_i32(ctx->n_ops_hist, n, mn, p50, p95, mx);
-        GGMLHEXAGON_LOG_ALWAYS("  %-5s min=%6lld p50=%6lld p95=%6lld max=%6lld",
-            "n_ops",  (long long)mn, (long long)p50, (long long)p95, (long long)mx);
     }
 }
 
@@ -3171,9 +3047,6 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       cum_p75_us(0),
       cum_p8_us(0),
       cum_unaccounted_us(0),
-      perf_hist_count(0),
-      diag_n_calls(0),
-      perf_hist_idx(0),
       cum_p7_rpc_setup_us(0),
       cum_p7_dsp_exec_us(0),
       cum_p7_civac_us(0),
@@ -5088,27 +4961,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->max_nodes_per_graph = graph_n_nodes;
     }
 
-    // record entry-side ring buffer samples (n_nodes, gap_from_prev) at the
-    // earliest possible point so cold-cache first-call outliers are captured.
-    {
-        int hidx                        = ctx->perf_hist_idx;
-        ctx->n_nodes_hist[hidx]         = (int32_t)graph_n_nodes;
-        ctx->gap_from_prev_hist[hidx]   = gap_from_prev;
-    }
-
-    // TEMP DIAG: capture first 32 calls' n_nodes + n_tensors + gap to see
-    // how PP is split into sub-graphs. Dumped at the end of the run.
-    {
-        uint32_t call_id = ctx->diag_n_calls;
-        if (call_id < ctx->DIAG_FIRST_N) {
-            ctx->diag_first_n_nodes  [call_id] = graph_n_nodes;
-            ctx->diag_first_n_tensors[call_id] = 0; // filled later after n_tensors is known
-            ctx->diag_first_graph_us [call_id] = 0; // filled at end_time
-            ctx->diag_first_gap_us   [call_id] = gap_from_prev;
-        }
-        ctx->diag_n_calls++;
-    }
-
     t_start = ggml_time_us();
 
     // ---- Phase 1: collect unique tensor objects + cgraph cache lookup ----
@@ -5167,14 +5019,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     if (cache_hit) {
         n_tensors = (uint32_t)cached_entry->n_tensors;
         n_ops     = (uint32_t)cached_entry->n_ops;
-
-        // TEMP DIAG: fill n_tensors for the first N calls (cache hit path)
-        {
-            uint32_t my_id = ctx->diag_n_calls - 1;
-            if (my_id < ctx->DIAG_FIRST_N) {
-                ctx->diag_first_n_tensors[my_id] = n_tensors;
-            }
-        }
     }
 
     if (!cache_hit) {
@@ -5200,17 +5044,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         hex_ops.reserve(supported_nodes.size());
     }
 
-    // Per-call ring buffer recorder. Writes `t_value` into the next slot of
-    // `hist_arr`, using the current perf_hist_idx. The slot index is shared
-    // across all phase histograms so a single dump can correlate a specific
-    // call's phase breakdown (n_nodes, p1, p2, ..., graph_us).
-    auto PERF_RECORD = [&](int64_t t_value, int64_t * hist_arr) {
-        const int hidx = ctx->perf_hist_idx;
-        hist_arr[hidx] = t_value;
-    };
-
     t_p1 = t_start; t_start = ggml_time_us(); ctx->cum_p1_us += t_start - t_p1;
-    PERF_RECORD(t_start - t_p1, ctx->p1_hist);
 
     // ---- Phase 2: build op descriptors (cache miss only) ----
     if (!cache_hit) {
@@ -5265,14 +5099,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
         n_tensors = (uint32_t)tensor_src.size();
 
-        // TEMP DIAG: fill in n_tensors (now that it's known) for the first N calls
-        {
-            uint32_t my_id = ctx->diag_n_calls - 1; // diag_n_calls was already incremented at entry
-            if (my_id < ctx->DIAG_FIRST_N) {
-                ctx->diag_first_n_tensors[my_id] = n_tensors;
-            }
-        }
-
         GGMLHEXAGON_LOG_DEBUG("ion-batch %zu ops, %u unique tensors", hex_ops.size(), n_tensors);
         if (1 == g_hexagon_appcfg.dump_debug_info) {
             for (size_t i = 0; i < hex_ops.size(); i++) {
@@ -5317,7 +5143,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }  // end if (!cache_hit) for Phase 2
 
     t_p2 = t_start; t_start = ggml_time_us(); ctx->cum_p2_us += t_start - t_p2;
-    PERF_RECORD(t_start - t_p2, ctx->p2_hist);
 
     // ---- Phase 2.5: op fusion ----
     // Supported fusions:
@@ -5580,7 +5405,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     t_p25 = t_start; t_start = ggml_time_us(); ctx->cum_p25_us += t_start - t_p25;
-    PERF_RECORD(t_start - t_p25, ctx->p25_hist);
 
     // ---- Phase 3: compute layout sizes ----
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);                 // ~24 bytes
@@ -5592,7 +5416,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     const uint32_t total_desc_size  = tensors_offset + tens_region;
 
     t_p3 = t_start; t_start = ggml_time_us(); ctx->cum_p3_us += t_start - t_p3;
-    PERF_RECORD(t_start - t_p3, ctx->p3_hist);
 
     // ---- Phase 4: handle heap tensors -> mirror into ION ----
     int64_t t_prev = ggml_time_us();
@@ -5711,7 +5534,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // ---- Phase 4.5: track ION offsets for repacked quantized weights ----
     t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    PERF_RECORD(t_p4, ctx->p4_hist);
 
     //   weights are already repacked to tile-based layout
     //   by set_tensor during model loading. Phase 4.5 only tracks ION
@@ -5769,7 +5591,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // ---- Phase 5: allocate batch descriptor region in ION mempool ----
     t_p45 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    PERF_RECORD(t_p45, ctx->p45_hist);
     size_t batch_align = HEX_BATCH_ALIGN;
     size_t batch_offset_raw = ctx->rpc_mempool_usage;
     size_t batch_offset_aligned = (batch_offset_raw + batch_align - 1) & ~(batch_align - 1);
@@ -5795,7 +5616,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     temp_region_indices.push_back(ctx->ion_regions.size() - 1);
 
     t_p5 = t_prev; t_prev = ggml_time_us(); ctx->cum_p5_us += t_prev - t_p5;
-    PERF_RECORD(t_prev - t_p5, ctx->p5_hist);
 
     // ---- Phase 6: build descriptors directly in ION mempool ----
     t_prev = ggml_time_us();
@@ -5882,7 +5702,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // ---- Phase 6.5: AP -> DSP cache coherency ----
     t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    PERF_RECORD(t_p6, ctx->p6_hist);
 
     // Flush CPU cache to DRAM so DSP can read AP-written data.
     {
@@ -6014,13 +5833,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     //   dsp_exec:  the synchronous invoke() call itself (RPC round-trip
     //              + DSP-side work + DSP->AP reply)
     //   civac:     AP-side cache invalidate after invoke() returns
-    //               (measured in Phase 7.5 below, written into p7_civac_hist)
+    //               (measured in Phase 7.5 below, accumulated into cum_p7_civac_us)
     t_p65 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    PERF_RECORD(t_p65, ctx->p65_hist);
     ctx->rpc_batch_call_count++;
-
-    // n_ops_hist: record at FastRPC dispatch time (most relevant for p7 breakdown)
-    ctx->n_ops_hist[ctx->perf_hist_idx] = (int32_t)n_ops;
 
     int64_t t_p7_pre = ggml_time_us();
     int hexagon_error = ggml_dsp_execute_batch(ctx->ggmlop_handle, batch_offset, total_desc_size);
@@ -6033,13 +5848,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // t_p7 captures the entire synchronous invoke (== old p7 minus civac)
     t_p7 = t_p7_post - t_p7_pre;
     ctx->cumulative_p7_us += t_p7;
-    PERF_RECORD(t_p7, ctx->p7_hist);
     ctx->cum_p7_dsp_exec_us  += t_p7;
-    ctx->p7_dsp_exec_hist[ctx->perf_hist_idx] = t_p7;
     // rpc_setup = AP-side cost between Phase 6.5 end and the invoke entry
     int64_t p7_rpc_setup = t_p7_pre - t_prev;
     ctx->cum_p7_rpc_setup_us  += p7_rpc_setup;
-    ctx->p7_rpc_setup_hist[ctx->perf_hist_idx] = p7_rpc_setup;
     t_prev = ggml_time_us();
 
     // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
@@ -6093,11 +5905,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }  // end else (do_dc_cvac)
     }
 
-    // record civac time (Phase 7.5 only). Cum + hist use a separate field.
+    // record civac time (Phase 7.5 only). Accumulated into cum_p7_civac_us.
     {
         int64_t civac_us = ggml_time_us() - t_civac;
         ctx->cum_p7_civac_us  += civac_us;
-        ctx->p7_civac_hist[ctx->perf_hist_idx] = civac_us;
     }
 
     // ---- Phase 7.6: Post-CIVAC verification ----
@@ -6125,7 +5936,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // t_p75 = Phase 7.6 verify + Phase 8 copy-back (civac is now its own field)
     t_p75 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     ctx->cum_p75_us += t_p75;
-    PERF_RECORD(t_p75, ctx->p75_hist);
     if (hexagon_error == AEE_SUCCESS && !mirrors.empty()) {
         std::unordered_map<void *, std::pair<uint32_t, uint32_t>> copyback_map;
         for (const auto & m : mirrors) {
@@ -6180,7 +5990,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     t_p8 = ggml_time_us() - t_prev;
-    PERF_RECORD(t_p8, ctx->p8_hist);
 
     int64_t end_time = ggml_time_us();
     int64_t graph_dur = end_time - begin_time;
@@ -6200,28 +6009,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         int64_t unaccounted = graph_dur - accounted_this_call;
         if (unaccounted < 0) unaccounted = 0;  // guard against measurement noise
         ctx->cum_unaccounted_us += unaccounted;
-        PERF_RECORD(unaccounted, ctx->unaccounted_hist);
-        uint32_t my_id = ctx->diag_n_calls - 1;
-        if (my_id < ctx->DIAG_FIRST_N) {
-            ctx->diag_first_unaccounted_us[my_id] = unaccounted;
-        }
     }
 
     ctx->cumulative_graph_us += graph_dur;
     ctx->last_graph_end_us   = end_time;
 
-    // TEMP DIAG: record graph_dur for the first N calls
-    {
-        uint32_t my_id = ctx->diag_n_calls - 1;
-        if (my_id < ctx->DIAG_FIRST_N) {
-            ctx->diag_first_graph_us[my_id] = graph_dur;
-        }
-    }
-
-    // record total graph_us + advance ring buffer slot
-    ctx->graph_us_hist[ctx->perf_hist_idx] = graph_dur;
-    ctx->perf_hist_idx = (ctx->perf_hist_idx + 1) % ctx->PERF_HIST_CAP;
-    if (ctx->perf_hist_count < ctx->PERF_HIST_CAP) ctx->perf_hist_count++;
     // per-phase cumulative time (cum_p75_us / cum_p7_civac_us already
     //  accumulated at the end of their respective phase; p4..p8 + p65 still
     //  use the trailing accumulator pattern.)
