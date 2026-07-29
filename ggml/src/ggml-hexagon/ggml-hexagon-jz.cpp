@@ -171,8 +171,6 @@ static bool                  ggml_hexagon_compute_fa_params(const ggml_backend_h
 // =================================================================================================
 enum qcom_htp_arch {
     NONE = 0,
-    V68 = 68,
-    V69 = 69,
     V73 = 73,
     V75 = 75,
     V79 = 79,
@@ -181,14 +179,10 @@ enum qcom_htp_arch {
 
 enum qcom_chipset_soc_model {
     UNKNOWN_SM = 0,
-    SM7450 = 41,  // v69, 7 Gen1
-    SM8350 = 30,  // v68, 888
-    SM8450 = 36,  // v69, SD 8 Gen 1
-    SM8475 = 42,  // v69, SD 8+ Gen 1
     SM8550 = 43,  // v73, SD 8 Gen 2
     SM8650 = 57,  // v75, SD 8 Gen 3
-    SM8750 = 69,  // v79, SD 8 Elite
-    SM8850 = 73,  // v81, SD 8 Elite Gen 5
+    SM8750 = 69,  // v79, SD 8 Elite(aka 8 Gen 4)
+    SM8850 = 73,  // v81, SD 8 Elite Gen 5(aka 8 Gen 5)
 };
 
 struct qcom_socinfo {
@@ -449,26 +443,16 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .cfgfilename            = "ggml-hexagon.cfg",
 #if defined(__ANDROID__)
         .runtime_libpath        = "/data/local/tmp/",
+#elif defined(__linux__)
+        .runtime_libpath        = "/tmp/",
+#elif defined(_WIN32)
+        .runtime_libpath        = "C:\\temp\\",
 #endif
         .version                = {"0.99.4"},
 };
 
 //supported Snapdragon devices with Hexagon DSP
 static struct qcom_socinfo g_hexagon_soc_info_table[] = {
-        /* Qualcomm SnapDragon 8 Gen 1 */
-        {
-                .soc_model         = SM8450,
-                .htp_arch          = V69,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 8 Gen 1"},
-
-        /* Qualcomm SnapDragon 8 Gen 1+ */
-        {
-                .soc_model         = SM8475,
-                .htp_arch          = V69,
-                .vtcm_size_in_mb   = 8,
-                .soc_desc          = "Qualcomm SnapDragon 8 Gen 1+"},
-
         /* Qualcomm SnapDragon 8 Gen 2 */
         {
                 .soc_model         = SM8550,
@@ -504,6 +488,17 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
 // dtors, so function-local std::mutex objects (e.g. the log mutex) are still
 // alive when ~ggml_backend_hexagon_context calls ggmlhexagon_deinit_cdsp.
 static ggml_backend_hexagon_reg_context * g_reg_ctx = nullptr;
+
+// Static buffer for runtime libpath (updated via ggml_hexagon_set_runtime_libpath API)
+static char g_runtime_libpath_buf[512] =
+#if defined(__ANDROID__)
+    "/data/local/tmp/"
+#elif defined(__linux__)
+    "/tmp/"
+#elif defined(_WIN32)
+    "C:\\temp\\"
+#endif
+;
 
 // =================================================================================================
 //  section-3: troubleshooting and profiler
@@ -996,6 +991,17 @@ static void ggmlhexagon_load_cfg() {
     GGMLHEXAGON_LOG_DEBUG("program running start time:%s", time_string);
     std::string cfg_filename = std::string(g_hexagon_appcfg.runtime_libpath) + std::string(g_hexagon_appcfg.cfgfilename);
 
+    // Prefer user-editable copy in /data/local/tmp/ (accessible via adb shell),
+    // fall back to runtime_libpath/ggml-hexagon.cfg (such as app data dir in Android APK).
+#if defined(__ANDROID__)
+    {
+        std::string user_cfg = "/data/local/tmp/" + std::string(g_hexagon_appcfg.cfgfilename);
+        if (access(user_cfg.c_str(), F_OK) == 0) {
+            cfg_filename = user_cfg;
+        }
+    }
+#endif
+
     hexagon_appcfg hexagoncfg_instance;
     hexagoncfg_instance.load(cfg_filename);
     hexagoncfg_instance.dump([](const std::string & section, const std::string & key, const std::string value) {
@@ -1115,6 +1121,18 @@ static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
     return false;
 }
 
+// Set the runtime library path where DSP skeleton .so files (libggmldsp-skel-v*.so)
+// and ggml-hexagon.cfg are located. Must be called before any hexagon backend
+// registration to take effect.
+GGML_BACKEND_API void ggml_hexagon_set_runtime_libpath(const char * path) {
+    if (path == nullptr) {
+        return;
+    }
+    strncpy(g_runtime_libpath_buf, path, sizeof(g_runtime_libpath_buf) - 1);
+    g_runtime_libpath_buf[sizeof(g_runtime_libpath_buf) - 1] = '\0';
+    g_hexagon_appcfg.runtime_libpath = g_runtime_libpath_buf;
+}
+
 // =================================================================================================
 //  section-5: general helper functions
 // =================================================================================================
@@ -1157,8 +1175,10 @@ static int ion_sync_for_direction(int fd, int direction) {
         static int logged_fail2 = 0;
         if (!logged_fail2) { GGMLHEXAGON_LOG_WARN("ION_IOC_SYNC(%s) fallback FAILED fd=%d errno=%d (%s)", direction ? "WRITE" : "READ", fd, errno, strerror(errno)); logged_fail2 = 1; }
     }
-#else
-    (void)fd; (void)direction;
+#elif defined(_WIN32)
+    // WoA: ION allocator and DMA_BUF_IOCTL_SYNC are not available on Windows.
+    // Cache sync is handled by dspqueue's platform-specific driver implementation.
+    GGML_UNUSED(fd); GGML_UNUSED(direction);
 #endif
     return -1;
 }
@@ -1189,6 +1209,10 @@ static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend
         __asm__ volatile("dsb ish" ::: "memory");
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
+#elif defined(_WIN32)
+    // WoA: MSVC does not support GCC inline asm for ARM64.
+    // Cache sync is handled by dspqueue's platform-specific driver implementation.
+    GGML_UNUSED(backend_ctx); GGML_UNUSED(ion_fd); GGML_UNUSED(p); GGML_UNUSED(size);
 #endif
 }
 
@@ -1219,6 +1243,10 @@ static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend
         __asm__ volatile("isb" ::: "memory");
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
+#elif defined(_WIN32)
+    // WoA: MSVC does not support GCC inline asm for ARM64.
+    // Cache sync is handled by dspqueue's platform-specific driver implementation.
+    GGML_UNUSED(backend_ctx); GGML_UNUSED(ion_fd); GGML_UNUSED(p); GGML_UNUSED(size);
 #endif
 }
 
@@ -1241,14 +1269,6 @@ static bool ggmlhexagon_is_metadata_op(enum ggml_op op) {
 
 static const char * ggmlhexagon_get_socmodel_desc(uint32_t soc_model) {
     switch (soc_model) {
-        case SM7450:
-            return "SM7450";
-        case SM8350:
-            return "SM8350";
-        case SM8450:
-            return "SM8450";
-        case SM8475:
-            return "SM8475";
         case SM8550:
             return "SM8550";
         case SM8650:
@@ -1262,7 +1282,7 @@ static const char * ggmlhexagon_get_socmodel_desc(uint32_t soc_model) {
     }
 }
 
-//0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
+//0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
 static size_t ggmlhexagon_htparch_hex_to_decimal(size_t htp_arch) {
     //naive algorithm
     int a = htp_arch / 16;
@@ -1272,10 +1292,6 @@ static size_t ggmlhexagon_htparch_hex_to_decimal(size_t htp_arch) {
 
 static const char * ggmlhexagon_get_htparch_desc(size_t htp_arch) {
     switch (htp_arch) {
-        case V68:
-            return "QCOM_HTP_V68";
-        case V69:
-            return "QCOM_HTP_V69";
         case V73:
             return "QCOM_HTP_V73";
         case V75:
@@ -1405,6 +1421,7 @@ static void ggmlhexagon_get_opkey_from_op(const ggml_tensor * op, std::string & 
 static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path) {
     GGML_UNUSED(device);
 #if defined(__ANDROID__)
+    // Android: LD_LIBRARY_PATH uses ':' as separator
     std::string lib_runtime_path = path + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images";
     if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
         GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
@@ -1412,8 +1429,39 @@ static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path
         GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
     }
 
+    // ADSP_LIBRARY_PATH uses ';' as separator on all platforms
     std::string adsp_runtime_path = path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp";
     if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
+        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
+    } else {
+        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
+    }
+#elif defined(__linux__)
+    // Linux: LD_LIBRARY_PATH uses ':' as separator
+    std::string lib_runtime_path = path + ":/usr/local/lib:/usr/lib";
+    if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
+        GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
+    } else {
+        GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
+    }
+
+    std::string adsp_runtime_path = path + ";/usr/local/lib;/usr/lib";
+    if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
+        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
+    } else {
+        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
+    }
+#elif defined(_WIN32)
+    // WoA: PATH uses ';' as separator
+    std::string lib_runtime_path = path + ";C:\\Windows\\System32;C:\\Windows\\SysWOW64";
+    if (0 == _putenv_s("PATH", lib_runtime_path.c_str())) {
+        GGMLHEXAGON_LOG_DEBUG("setenv PATH %s successfully", lib_runtime_path.c_str());
+    } else {
+        GGMLHEXAGON_LOG_ERROR("setenv PATH %s failure", lib_runtime_path.c_str());
+    }
+
+    std::string adsp_runtime_path = path + ";C:\\Windows\\System32";
+    if (0 == _putenv_s("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str())) {
         GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
     } else {
         GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
