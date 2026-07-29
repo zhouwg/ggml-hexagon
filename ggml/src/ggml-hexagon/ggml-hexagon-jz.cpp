@@ -207,104 +207,109 @@ struct ggml_backend_hexagon_context {
     char name[GGML_MAX_NAME];
     char desc[GGML_MAX_NAME];
     char lib[GGML_MAX_NAME];
+
     struct ggml_backend * backend;
-    struct qcom_socinfo           socinfo;
+    struct qcom_socinfo   socinfo;
 
     int n_threads;
-    int dsp_thread_counts = 0; // actual worker threads in effect on DSP (max_hw_threads - 2)
+    int dsp_thread_counts = 0;                  // actual worker threads in effect on DSP (max_hw_threads - 2)
 
     //Hexagon resource management for the general approach through Hexagon CDSP
+    int domain_id;
+    int session_id;
+    remote_handle64 ggmlop_handle;
     size_t rpc_mempool_capacity;
     size_t rpc_mempool_len;
     size_t rpc_mempool_usage;
-    bool   weights_dirty;               // set by set_tensor/memset_tensor, cleared by Phase 6.5
+    int    rpc_mempool_handle;
     void * rpc_mempool;
-    int rpc_mempool_handle;
-    void * rpc_mempool_dsp_base;        // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
-    std::vector<ion_pool_region> ion_regions;  // region tracking for ION pool free-space management
-    remote_handle64 ggmlop_handle;
-    int domain_id;
-    int session_id;
+    void * rpc_mempool_dsp_base;                // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
+    bool   weights_dirty;                       // set by set_tensor/memset_tensor, cleared by Phase 9
+    std::vector<ion_pool_region> ion_regions;   // region tracking for ION pool free-space management
 
     // FastRPC call statistics
-    uint64_t rpc_batch_call_count;   // total ggml_dsp_execute_batch calls
-    int64_t  cumulative_p7_us;       // cumulative FastRPC time (p7 phase)
-    int64_t  cumulative_graph_us;    // cumulative graph inference duration
-    int64_t  last_graph_end_us;      // wall clock of last graph end (to measure gap)
+    uint64_t rpc_batch_call_count;              // total ggml_dsp_execute_batch calls
+    int64_t  cumulative_graph_us;               // cumulative graph inference duration
+    int64_t  last_graph_end_us;                 // wall clock of last graph end (to measure gap)
 
     // Per-graph node statistics
-    uint32_t max_nodes_per_graph;    // max node count in a single graph
-    uint32_t min_nodes_per_graph;    // min node count in a single graph
-    uint32_t total_nodes_processed;  // cumulative node count across all graphs
+    uint32_t max_nodes_per_graph;               // max node count in a single graph
+    uint32_t min_nodes_per_graph;               // min node count in a single graph
+    uint32_t total_nodes_processed;             // cumulative node count across all graphs
 
     // Per-call execution time range
-    int64_t  min_graph_us;          // shortest single graph execution
-    int64_t  max_graph_us;          // longest single graph execution
-    uint32_t max_graph_n_nodes;     // cgraph node count when max_graph_us recorded
-    uint32_t max_graph_n_ops;       // DSP op count (post-fusion) when max_graph_us recorded
-    int64_t  min_p7_us;             // shortest single FastRPC call
-    int64_t  max_p7_us;             // longest single FastRPC call
+    int64_t  min_graph_us;                      // shortest single graph execution
+    int64_t  max_graph_us;                      // longest single graph execution
+    uint32_t max_graph_n_nodes;                 // cgraph node count when max_graph_us recorded
+    uint32_t max_graph_n_ops;                   // DSP op count (post-fusion) when max_graph_us recorded
+    uint32_t min_n_ops_per_call;                // min hex_ops.size() across all graph_compute calls
+    uint32_t max_n_ops_per_call;                // max hex_ops.size() across all graph_compute calls
+    int64_t  min_p10_us;                        // shortest single FastRPC call
+    int64_t  max_p10_us;                        // longest single FastRPC call
 
-    // Per-call AP-side overhead (graph_dur - p7). Tracks how much time each
-    // graph_compute_batch call spends outside of pure DSP execution.
+    // Per-call AP-side overhead (graph_dur - p10). Tracks how much time each
+    // graph_compute_batch call spends outside of pure DSP execution
     int64_t  min_rpc_overhead_us;
     int64_t  max_rpc_overhead_us;
     int64_t  sum_rpc_overhead_us;
 
     // AP-side per-phase cumulative time
-    int64_t  cum_p1_us;             // Phase 1: collect unique tensor objects
-    int64_t  cum_p2_us;             // Phase 2: build op descriptors
-    int64_t  cum_p25_us;            // Phase 2.5: op fusion
-    int64_t  cum_p3_us;             // Phase 3: compute layout sizes
-    int64_t  cum_p4_us;             // Phase 4: tensor mirroring
-    int64_t  cum_p45_us;            // Phase 4.5: weight repack
-    int64_t  cum_p5_us;             // Phase 5: allocate batch descriptor in ION
-    int64_t  cum_p6_us;             // Phase 6: descriptor construction
-    int64_t  cum_p65_us;            // Phase 6.5: cache flush
-    int64_t  cum_p75_us;            // Phase 7.5: cache inval
-    int64_t  cum_p8_us;             // Phase 8: ION->heap copy-back
-    int64_t  cum_unaccounted_us;    // wall-clock not covered by p1..p8 (gaps, scheduler, etc.)
+    int64_t  cum_p1_us;                         // Phase 1: collect unique tensor objects
+    int64_t  cum_p2_us;                         // Phase 2: build op descriptors
+    int64_t  cum_p3_us;                         // Phase 3: op fusion
+    int64_t  cum_p4_us;                         // Phase 4: compute layout sizes
+    int64_t  cum_p5_us;                         // Phase 5: tensor mirroring
+    int64_t  cum_p6_us;                         // Phase 6: track repacked weight ION offsets
+    int64_t  cum_p7_us;                         // Phase 7: allocate batch descriptor in ION
+    int64_t  cum_p8_us;                         // Phase 8: descriptor construction
+    int64_t  cum_p9_us;                         // Phase 9: cache flush
 
-    // p7 3-way breakdown: split the FastRPC + DSP exec + cache inval window
-    // so we can tell AP-side cache-coherency cost apart from DSP-side work.
-    int64_t  cum_p7_rpc_setup_us;               // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
-    int64_t  cum_p7_dsp_exec_us;                // pure DSP execution time inside the sync call
-    int64_t  cum_p7_civac_us;                   // AP cache invalidate after DSP reply
+    // Phase 10: FastRPC doorbell call (cumulative) + 3-way breakdown
+    int64_t  cum_p10_us;                        // cumulative FastRPC time
+    // p10 3-way breakdown: split the FastRPC + DSP exec + cache inval window
+    // so we can tell AP-side cache-coherency cost apart from DSP-side work
+    int64_t  cum_p10_rpc_setup_us;              // AP setup before ggml_dsp_execute_batch (ioctl / marshalling)
+    int64_t  cum_p10_dsp_exec_us;               // pure DSP execution time inside the sync call
+    int64_t  cum_p10_civac_us;                  // AP cache invalidate after DSP reply
 
-    // FastRPC transport overhead calibration (measured via 0xFFFB warmup invokes at init).
+    int64_t  cum_p11_us;                        // Phase 11: cache inval
+    int64_t  cum_p12_us;                        // Phase 12: ION->heap copy-back
+    int64_t  cum_unaccounted_us;                // wall-clock not covered by p1..p12 (gaps, scheduler, etc.)
+
+    // FastRPC transport overhead calibration (measured via 0xFFFB warmup invokes at init)
     // The 0xFFFB warmup mode does no DSP work, so measured time is an upper bound of
-    // pure FastRPC transport overhead (invoke round-trip: AP -> DSP -> AP).
-    int64_t  rpc_overhead_min_us;  // shortest warmup invoke
-    int64_t  rpc_overhead_max_us;  // longest warmup invoke
-    int64_t  rpc_overhead_sum_us;  // sum of all warmup invokes (for avg)
-    uint32_t rpc_overhead_count;   // number of warmup invokes measured
+    // pure FastRPC transport overhead (invoke round-trip: AP -> DSP -> AP)
+    int64_t  rpc_overhead_min_us;               // shortest warmup invoke
+    int64_t  rpc_overhead_max_us;               // longest warmup invoke
+    int64_t  rpc_overhead_sum_us;               // sum of all warmup invokes (for avg)
+    uint32_t rpc_overhead_count;                // number of warmup invokes measured
 
-    // Cumulative MUL_MAT counters (PP optimization diagnostics).
+    // Cumulative MUL_MAT counters (PP optimization diagnostics)
     // Tracked in ctx so we can read rates after a sweep run without
-    // changing existing per-call LOG_DEBUG output paths.
-    uint64_t n_mul_mat_total_cum = 0;        // total MUL_MAT ops in supported_nodes
-    uint64_t n_hmx_used_cum      = 0;        // MUL_MAT dispatched to HMX kernels
-    uint64_t n_fused_qkv_cum     = 0;        // 3x MUL_MAT -> HTP_OP_MUL_MAT_QKV fusions
-    uint64_t n_fused_ffn_cum     = 0;        // 2x MUL_MAT -> HTP_OP_MUL_MAT_FFN fusions
-    uint64_t n_fused_mm_add_cum  = 0;        // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
+    // changing existing per-call LOG_DEBUG output paths
+    uint64_t n_mul_mat_total_cum = 0;           // total MUL_MAT ops in supported_nodes
+    uint64_t n_hmx_used_cum      = 0;           // MUL_MAT dispatched to HMX kernels
+    uint64_t n_fused_qkv_cum     = 0;           // 3x MUL_MAT -> HTP_OP_MUL_MAT_QKV fusions
+    uint64_t n_fused_ffn_cum     = 0;           // 2x MUL_MAT -> HTP_OP_MUL_MAT_FFN fusions
+    uint64_t n_fused_mm_add_cum  = 0;           // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
 
     // HMX eligibility diagnostic counters (why MUL_MATs fall back to HVX)
-    uint64_t n_hmx_basic_pass          = 0;  // passed basic HMX eligibility
-    uint64_t n_hmx_basic_fail_ne01     = 0;  // ne01_padded %% 32 != 0
-    uint64_t n_hmx_basic_fail_ne00     = 0;  // ne00 %% 32 != 0
-    uint64_t n_hmx_basic_fail_wtype    = 0;  // weight type not HMX-compatible
-    uint64_t n_hmx_basic_fail_batched  = 0;  // batched non-F16
-    uint64_t n_hmx_basic_fail_permuted = 0;  // nb[0] > nb[1] (permuted)
-    uint64_t n_hmx_basic_fail_small_n  = 0;  // ne11 <= HTP_MM_HMX_MIN_NROWS
-    uint64_t n_hmx_vtcm_pass           = 0;  // HMX VTCM precompute succeeded
-    uint64_t n_hmx_vtcm_fail           = 0;  // HMX VTCM precompute failed
+    uint64_t n_hmx_basic_pass          = 0;     // passed basic HMX eligibility
+    uint64_t n_hmx_basic_fail_ne01     = 0;     // ne01_padded %% 32 != 0
+    uint64_t n_hmx_basic_fail_ne00     = 0;     // ne00 %% 32 != 0
+    uint64_t n_hmx_basic_fail_wtype    = 0;     // weight type not HMX-compatible
+    uint64_t n_hmx_basic_fail_batched  = 0;     // batched non-F16
+    uint64_t n_hmx_basic_fail_permuted = 0;     // nb[0] > nb[1] (permuted)
+    uint64_t n_hmx_basic_fail_small_n  = 0;     // ne11 <= HTP_MM_HMX_MIN_NROWS
+    uint64_t n_hmx_vtcm_pass           = 0;     // HMX VTCM precompute succeeded
+    uint64_t n_hmx_vtcm_fail           = 0;     // HMX VTCM precompute failed
 
     // Buffer type owned by this context (each device has its own buft)
     struct ggml_backend_buffer_type buffer_type;
     // Repack buffer type(is_host=false), same ION pool as buffer_type
     struct ggml_backend_buffer_type repack_buffer_type;
-    char buft_name[GGML_MAX_NAME];        // "hexagon-ion-buffer-<name>", unique per device
-    char repack_buft_name[GGML_MAX_NAME]; // "hexagon-ion-buffer-<name>-REPACK"
+    char buft_name[GGML_MAX_NAME];              // "hexagon-ion-buffer-<name>", unique per device
+    char repack_buft_name[GGML_MAX_NAME];       // "hexagon-ion-buffer-<name>-REPACK"
 
     // Per-device hardware caps (probed at init, used by supports_op)
     bool has_vtcm;  // domain has VTCM pages available
@@ -318,14 +323,12 @@ struct ggml_backend_hexagon_context {
     std::unordered_map<uintptr_t, struct htp_mm_kernel_params> mm_params_cache;
 
     // cgraph cache: Phase 1 (tensor dedup) + Phase 2 (hex_ops build) +
-    // Phase 2.5 (op fusion) result keyed by content-based cgraph hash.
-    // The scheduler's split->graph pointer changes every call, but the
-    // underlying node ops/shapes/src/data ptrs are stable for graph-reuse.
-    // A FNV-1a hash over {op, ne[4], nb[4], non-null src[0..3] ptr, data ptr}
-    // per node gives a 64-bit key that is stable across pointer churn
-    // and effectively collision-free (2^-64 false positive).
-    // On hit, skip ~38us of Phase 1+2 work. With 17 subgraphs/token and
-    // 100% hit rate after warmup, this saves ~646us/token = 1.1% of TG.
+    // Phase 3 (op fusion) result keyed by content-based cgraph hash.
+    // The scheduler rebuilds split->graph every call, so the cgraph pointer
+    // is NOT hashed. The underlying node ops/shapes/src/data ptrs are stable
+    // for graph-reuse, which is what the hash covers.
+    // A FNV-1a hash over {op, ne[4], nb[4], non-null src[0..GGML_MAX_SRC-1] ptr, data ptr}
+    // per node gives a 64-bit key that is effectively collision-free.
     struct cgraph_cache_entry {
         uint64_t content_hash = 0;
         int n_nodes = 0;
@@ -334,7 +337,7 @@ struct ggml_backend_hexagon_context {
         std::vector<ggml_tensor *> tensor_src;
         std::vector<ggml_tensor *> supported_nodes;
         std::vector<hex_op_desc>   hex_ops;
-        std::vector<uint8_t>       is_weight;      // per-tensor boolean
+        std::vector<uint8_t>       is_weight;   // per-tensor boolean
     };
     std::unordered_map<uint64_t, cgraph_cache_entry> cgraph_cache;
     uint64_t cgraph_cache_hits   = 0;
@@ -601,37 +604,39 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
                              ctx->socinfo.vtcm_size_in_mb,
                              (int)ctx->has_hvx, (int)ctx->has_hmx);
-    GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
+    GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
                              (unsigned long long)ctx->rpc_batch_call_count,
-                             (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
-                             ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_p7_us / (int64_t)ctx->rpc_batch_call_count) : 0,
+                             (long long)ctx->cum_p10_us, (long long)ctx->cumulative_graph_us,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->cum_p10_us / (int64_t)ctx->rpc_batch_call_count) : 0,
                              ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
     GGMLHEXAGON_LOG_VERBOSE("graph nodes: min=%u max=%u total=%u",
                              ctx->min_nodes_per_graph, ctx->max_nodes_per_graph, ctx->total_nodes_processed);
-    GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p7=[%lld, %lld] us",
+    GGMLHEXAGON_LOG_VERBOSE("graph ops (post-fusion): min=%u max=%u",
+                             ctx->min_n_ops_per_call, ctx->max_n_ops_per_call);
+    GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p10=[%lld, %lld] us",
                              (long long)ctx->min_graph_us, (long long)ctx->max_graph_us,
-                             (long long)ctx->min_p7_us, (long long)ctx->max_p7_us);
-    GGMLHEXAGON_LOG_VERBOSE("per-call overhead: n=%llu min=%lld max=%lld avg=%lld us (graph_dur - p7)",
+                             (long long)ctx->min_p10_us, (long long)ctx->max_p10_us);
+    GGMLHEXAGON_LOG_VERBOSE("per-call overhead: n=%llu min=%lld max=%lld avg=%lld us (graph_dur - p10)",
                              (unsigned long long)ctx->rpc_batch_call_count,
                              (long long)ctx->min_rpc_overhead_us,
                              (long long)ctx->max_rpc_overhead_us,
                              ctx->rpc_batch_call_count ? (long long)(ctx->sum_rpc_overhead_us / (int64_t)ctx->rpc_batch_call_count) : 0);
     GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
                              (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
-    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p2.5=%lld p3=%lld p4=%lld p4.5=%lld p5=%lld p6=%lld p6.5=%lld p7.5=%lld p8=%lld unaccounted=%lld us",
+    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p3=%lld p4=%lld p5=%lld p6=%lld p7=%lld p8=%lld p9=%lld p11=%lld p12=%lld unaccounted=%lld us",
                              (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
-                             (long long)ctx->cum_p25_us, (long long)ctx->cum_p3_us,
-                             (long long)ctx->cum_p4_us, (long long)ctx->cum_p45_us,
-                             (long long)ctx->cum_p5_us,
-                             (long long)ctx->cum_p6_us, (long long)ctx->cum_p65_us,
-                             (long long)ctx->cum_p75_us, (long long)ctx->cum_p8_us,
+                             (long long)ctx->cum_p3_us, (long long)ctx->cum_p4_us,
+                             (long long)ctx->cum_p5_us, (long long)ctx->cum_p6_us,
+                             (long long)ctx->cum_p7_us,
+                             (long long)ctx->cum_p8_us, (long long)ctx->cum_p9_us,
+                             (long long)ctx->cum_p11_us, (long long)ctx->cum_p12_us,
                              (long long)ctx->cum_unaccounted_us);
-    // Fine-grained: 3-way p7 split + per-call distribution
-    GGMLHEXAGON_LOG_VERBOSE("p7 3-way cumulative: rpc_setup=%lld dsp_exec=%lld civac=%lld us (sum=%lld)",
-                             (long long)ctx->cum_p7_rpc_setup_us,
-                             (long long)ctx->cum_p7_dsp_exec_us,
-                             (long long)ctx->cum_p7_civac_us,
-                             (long long)(ctx->cum_p7_rpc_setup_us + ctx->cum_p7_dsp_exec_us + ctx->cum_p7_civac_us));
+    // Fine-grained: 3-way p10 split + per-call distribution
+    GGMLHEXAGON_LOG_VERBOSE("p10 3-way cumulative: rpc_setup=%lld dsp_exec=%lld civac=%lld us (sum=%lld)",
+                             (long long)ctx->cum_p10_rpc_setup_us,
+                             (long long)ctx->cum_p10_dsp_exec_us,
+                             (long long)ctx->cum_p10_civac_us,
+                             (long long)(ctx->cum_p10_rpc_setup_us + ctx->cum_p10_dsp_exec_us + ctx->cum_p10_civac_us));
     GGMLHEXAGON_LOG_VERBOSE("rpc overhead (warmup): n=%u min=%lld max=%lld avg=%lld us (upper bound, pure FastRPC/ION transport overhead)",
                              ctx->rpc_overhead_count,
                              (long long)ctx->rpc_overhead_min_us, (long long)ctx->rpc_overhead_max_us,
@@ -3025,7 +3030,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       domain_id(CDSP_DOMAIN_ID),
       session_id(0),
       rpc_batch_call_count(0),
-      cumulative_p7_us(0),
+      cum_p10_us(0),
       cumulative_graph_us(0),
       last_graph_end_us(0),
       max_nodes_per_graph(0),
@@ -3035,21 +3040,23 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       max_graph_us(0),
       max_graph_n_nodes(0),
       max_graph_n_ops(0),
-      min_p7_us(0),
-      max_p7_us(0),
+      min_n_ops_per_call(0),
+      max_n_ops_per_call(0),
+      min_p10_us(0),
+      max_p10_us(0),
       min_rpc_overhead_us(0),
       max_rpc_overhead_us(0),
       sum_rpc_overhead_us(0),
-      cum_p4_us(0),
-      cum_p45_us(0),
+      cum_p5_us(0),
       cum_p6_us(0),
-      cum_p65_us(0),
-      cum_p75_us(0),
       cum_p8_us(0),
+      cum_p9_us(0),
+      cum_p11_us(0),
+      cum_p12_us(0),
       cum_unaccounted_us(0),
-      cum_p7_rpc_setup_us(0),
-      cum_p7_dsp_exec_us(0),
-      cum_p7_civac_us(0),
+      cum_p10_rpc_setup_us(0),
+      cum_p10_dsp_exec_us(0),
+      cum_p10_civac_us(0),
       rpc_overhead_min_us(0),
       rpc_overhead_max_us(0),
       rpc_overhead_sum_us(0),
@@ -4539,10 +4546,10 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
         memcpy((char *)tensor->data + offset, data, size);
     }
 
-    // Mark weights dirty so Phase 6.5 flushes them on the next batch.
+    // Mark weights dirty so Phase 9 flushes them on the next batch.
     // For repack-buft weights, flush immediately after repack; this moves the
     // cold-state cache-clean cost from the first inference batch to model-load
-    // time and lets Phase 6.5 skip already-coherent repack weights.
+    // time and lets Phase 9 skip already-coherent repack weights.
     ggml_backend_hexagon_buffer_context * bctx =
         (ggml_backend_hexagon_buffer_context *)buffer->context;
     if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
@@ -4921,16 +4928,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // current call's accounted time at exit (used for unaccounted-time).
     int64_t snap_p1                     = ctx->cum_p1_us;
     int64_t snap_p2                     = ctx->cum_p2_us;
-    int64_t snap_p25                    = ctx->cum_p25_us;
     int64_t snap_p3                     = ctx->cum_p3_us;
-    int64_t snap_p5                     = ctx->cum_p5_us;
-    int64_t snap_p7                     = ctx->cumulative_p7_us;
+    int64_t snap_p4                     = ctx->cum_p4_us;
+    int64_t snap_p7                     = ctx->cum_p7_us;
+    int64_t snap_p10                    = ctx->cum_p10_us;
 
     // Phase timing: declare all timers here, used across the pipeline
-    int64_t t_start, t_p1, t_p2, t_p25, t_p3, t_p4, t_p45, t_p5, t_p6, t_p65, t_p7, t_p75, t_p8;
+    int64_t t_start, t_p1, t_p2, t_p3, t_p4, t_p5, t_p6, t_p7, t_p8, t_p9, t_p10, t_p11, t_p12;
 
     // Track temporary ION regions (mirrors, batch descriptors, repacked weights)
-    // for cleanup after Phase 8. Mark them as free (no tail compaction).
+    // for cleanup after Phase 12. Mark them as free (no tail compaction).
     std::vector<size_t>         temp_region_indices;
 
     // Storage for cache-miss path; on cache hit we reference cached vectors
@@ -4946,11 +4953,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     std::vector<ggml_tensor *>  supported_nodes;
 
     ggml_backend_hexagon_context::cgraph_cache_entry * cached_entry = nullptr;
-
-    if (!ctx->rpc_mempool || ctx->rpc_mempool_len == 0) {
-        GGMLHEXAGON_LOG_ALWAYS("special: no ION mempool, falling back to per-op");
-        return result;  // let scheduler use per-op path
-    }
 
     // track per-graph node statistics (what ggml core assigned to this backend)
     ctx->total_nodes_processed += graph_n_nodes;
@@ -5144,7 +5146,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     t_p2 = t_start; t_start = ggml_time_us(); ctx->cum_p2_us += t_start - t_p2;
 
-    // ---- Phase 2.5: op fusion ----
+    // ---- Phase 3: op fusion ----
     // Supported fusions:
     //   RMS_NORM + MUL      -> HTP_OP_RMS_NORM_MUL
     //   MUL_MAT + ADD       -> HTP_OP_MUL_MAT_ADD     (bias add inside kernel)
@@ -5385,11 +5387,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             GGMLHEXAGON_LOG_DEBUG("mm_add fusion diag: skip_use_count=%zu skip_not_adjacent=%zu",
                                     n_mm_add_skip_use_count, n_mm_add_skip_not_adjacent);
         }
-    }  // end if (!cache_hit) for Phase 2.5
+    }  // end if (!cache_hit) for Phase 3
 
     n_ops = (uint32_t)hex_ops.size();
 
-    // ---- Cache save: store Phase 1/2/2.5 result keyed by content_hash ----
+    // ---- Cache save: store Phase 1/2/3 result keyed by content_hash ----
     // Only on miss. operator[] safely creates entry if absent; on hit we
     // already restored from cache, so skip the assign work entirely.
     if (!cache_hit) {
@@ -5404,9 +5406,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         entry.is_weight.assign(is_weight.begin(), is_weight.end());
     }
 
-    t_p25 = t_start; t_start = ggml_time_us(); ctx->cum_p25_us += t_start - t_p25;
+    t_p3 = t_start; t_start = ggml_time_us(); ctx->cum_p3_us += t_start - t_p3;
 
-    // ---- Phase 3: compute layout sizes ----
+    // ---- Phase 4: compute layout sizes ----
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);                 // ~24 bytes
     const uint32_t ops_region    = (uint32_t)(n_ops * sizeof(hex_op_desc));         // ~96*N
     const uint32_t tens_region   = (uint32_t)(n_tensors * sizeof(hex_tensor_desc)); // ~104*M
@@ -5415,9 +5417,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     const uint32_t tensors_offset   = ops_offset + ((ops_region + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1));
     const uint32_t total_desc_size  = tensors_offset + tens_region;
 
-    t_p3 = t_start; t_start = ggml_time_us(); ctx->cum_p3_us += t_start - t_p3;
+    t_p4 = t_start; t_start = ggml_time_us(); ctx->cum_p4_us += t_start - t_p4;
 
-    // ---- Phase 4: handle heap tensors -> mirror into ION ----
+    // ---- Phase 5: handle heap tensors -> mirror into ION ----
     int64_t t_prev = ggml_time_us();
     // Two-step approach:
     //   Step 1: Collect unique data pointers and compute max mirror size per buffer
@@ -5426,11 +5428,11 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     //               (b) each tensor descriptor gets correct ne/nb.
     //
     // Cache coherency fix: for in-place ops (src0->data == dst->data), the
-    // shared mirror causes Phase 6.5 DC CVAC to pollute the dst cache lines
+    // shared mirror causes Phase 9 DC CVAC to pollute the dst cache lines
     // with stale src0 data. After DSP writes the MUL result to DRAM, the CPU
-    // cache still holds the old src0 data, so Phase 8 copy-back reads stale
+    // cache still holds the old src0 data, so Phase 12 copy-back reads stale
     // data. Fix: allocate a separate dst mirror for in-place ops so that
-    // Phase 6.5 only flushes the src0 mirror, and the dst mirror is never
+    // Phase 9 only flushes the src0 mirror, and the dst mirror is never
     // flushed (CPU cache has no stale data for it).
     struct ion_mirror {
         int32_t  tensor_idx;
@@ -5532,23 +5534,23 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         mirrors.push_back(m);
     }
 
-    // ---- Phase 4.5: track ION offsets for repacked quantized weights ----
-    t_p4 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    // ---- Phase 6: track ION offsets for repacked quantized weights ----
+    t_p5 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
 
     //   weights are already repacked to tile-based layout
-    //   by set_tensor during model loading. Phase 4.5 only tracks ION
-    //   offsets for DSP descriptor updates in Phase 6.
+    //   by set_tensor during model loading. Phase 6 only tracks ION
+    //   offsets for DSP descriptor updates in Phase 8.
     std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
     static std::unordered_map<const void *, uint32_t> g_tiled_ion_offsets;
     {
         // Quantized weights (Q4_0 / Q4_1 / Q8_0 / IQ4_NL / MXFP4) are repacked
         // to tile-based (HMX) layout in set_tensor during model loading.
         // By the time graph_compute_batch runs, every quantized weight's
-        // data at t->data is already in tiled layout, so Phase 4.5 does
+        // data at t->data is already in tiled layout, so Phase 6 does
         // NO repack work here.
         //
-        // The only thing Phase 4.5 still needs to do is record the ION offset
-        // of each repacked weight in g_tiled_ion_offsets so Phase 7 can build
+        // The only thing Phase 6 still needs to do is record the ION offset
+        // of each repacked weight in g_tiled_ion_offsets so Phase 10 can build
         // the DSP descriptor with the correct data_offset. Any quantized weight
         // that somehow lives outside the repack buft is logged as a one-shot
         // warning (should not happen with the current model loader) but its
@@ -5578,8 +5580,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 continue;  // already recorded on a prior graph_compute call
             }
 
-            // Record the ION offset for Phase 7. The data is in ION either
-            // directly (repack buft) or via the Phase 4 heap->ION mirror.
+            // Record the ION offset for Phase 10. The data is in ION either
+            // directly (repack buft) or via the Phase 5 heap->ION mirror.
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
                 g_tiled_ion_offsets[t->data] = (uint32_t)(dp - ion_base);
@@ -5589,8 +5591,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
     }
 
-    // ---- Phase 5: allocate batch descriptor region in ION mempool ----
-    t_p45 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    // ---- Phase 7: allocate batch descriptor region in ION mempool ----
+    t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     size_t batch_align = HEX_BATCH_ALIGN;
     size_t batch_offset_raw = ctx->rpc_mempool_usage;
     size_t batch_offset_aligned = (batch_offset_raw + batch_align - 1) & ~(batch_align - 1);
@@ -5615,9 +5617,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     ctx->ion_regions.push_back(batch_region);
     temp_region_indices.push_back(ctx->ion_regions.size() - 1);
 
-    t_p5 = t_prev; t_prev = ggml_time_us(); ctx->cum_p5_us += t_prev - t_p5;
+    t_p7 = t_prev; t_prev = ggml_time_us(); ctx->cum_p7_us += t_prev - t_p7;
 
-    // ---- Phase 6: build descriptors directly in ION mempool ----
+    // ---- Phase 8: build descriptors directly in ION mempool ----
     t_prev = ggml_time_us();
     uint8_t *ion_batch = (uint8_t *)ctx->rpc_mempool + batch_offset;
     hex_batch_hdr * hdr = (hex_batch_hdr *)ion_batch;
@@ -5700,8 +5702,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     const bool do_dc_cvac  = (g_hexagon_appcfg.ion_sync_mode != 1);
     const bool do_ion_sync = (g_hexagon_appcfg.ion_sync_mode != 2);
 
-    // ---- Phase 6.5: AP -> DSP cache coherency ----
-    t_p6 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    // ---- Phase 9: AP -> DSP cache coherency ----
+    t_p8 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
 
     // Flush CPU cache to DRAM so DSP can read AP-written data.
     {
@@ -5733,7 +5735,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             }
             int was_weights_dirty = ctx->weights_dirty ? 1 : 0;
             ctx->weights_dirty = false;
-            GGMLHEXAGON_LOG_WARN("ion-batch: phase6.5 skipped (ion_sync_mode=%d) dirty=%d",
+            GGMLHEXAGON_LOG_WARN("ion-batch: phase9 skipped (ion_sync_mode=%d) dirty=%d",
                                   g_hexagon_appcfg.ion_sync_mode, was_weights_dirty);
         } else {
 
@@ -5765,7 +5767,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             dbg_bytes_batch += total_desc_size;
 
             // Also flush non-op tensors in cgraph not in tensor_src (e.g., test sentinels).
-            // Without this, Phase 7.5 DC CIVAC can invalidate cache lines containing
+            // Without this, Phase 11 DC CIVAC can invalidate cache lines containing
             // unflushed sentinel data, causing sentinel mismatch.
             //
             // Skip repack-buft weights when weights_dirty is false.
@@ -5827,39 +5829,39 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }  // end else (do_dc_cvac)
     }
 
-    // ---- Phase 7: FastRPC doorbell call (only 2 scalars!) ----
+    // ---- Phase 10: FastRPC doorbell call (only 2 scalars!) ----
     // 3-way split for fine-grained perf:
-    //   rpc_setup: AP-side work between Phase 6.5 end and invoke() entry
+    //   rpc_setup: AP-side work between Phase 9 end and invoke() entry
     //   dsp_exec:  the synchronous invoke() call itself (RPC round-trip
     //              + DSP-side work + DSP->AP reply)
     //   civac:     AP-side cache invalidate after invoke() returns
-    //               (measured in Phase 7.5 below, accumulated into cum_p7_civac_us)
-    t_p65 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    //               (measured in Phase 11 below, accumulated into cum_p10_civac_us)
+    t_p9 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     ctx->rpc_batch_call_count++;
 
-    int64_t t_p7_pre = ggml_time_us();
+    int64_t t_p10_pre = ggml_time_us();
     int hexagon_error = ggml_dsp_execute_batch(ctx->ggmlop_handle, batch_offset, total_desc_size);
-    int64_t t_p7_post = ggml_time_us();
+    int64_t t_p10_post = ggml_time_us();
 
     if (AEE_SUCCESS != hexagon_error) {
         GGMLHEXAGON_LOG_WARN("ggml_dsp_execute_batch failed: 0x%x", hexagon_error);
     }
 
-    // t_p7 captures the entire synchronous invoke (== old p7 minus civac)
-    t_p7 = t_p7_post - t_p7_pre;
-    ctx->cumulative_p7_us += t_p7;
-    ctx->cum_p7_dsp_exec_us  += t_p7;
-    // rpc_setup = AP-side cost between Phase 6.5 end and the invoke entry
-    int64_t p7_rpc_setup = t_p7_pre - t_prev;
-    ctx->cum_p7_rpc_setup_us  += p7_rpc_setup;
+    // t_p10 captures the entire synchronous invoke (== old p10 minus civac)
+    t_p10 = t_p10_post - t_p10_pre;
+    ctx->cum_p10_us += t_p10;
+    ctx->cum_p10_dsp_exec_us  += t_p10;
+    // rpc_setup = AP-side cost between Phase 9 end and the invoke entry
+    int64_t p10_rpc_setup = t_p10_pre - t_prev;
+    ctx->cum_p10_rpc_setup_us  += p10_rpc_setup;
     t_prev = ggml_time_us();
 
-    // ---- Phase 7.5: invalidate CPU cache for DSP-written ION regions ----
+    // ---- Phase 11: invalidate CPU cache for DSP-written ION regions ----
     // civac is now tracked separately via t_civac so the AP-side cache-coherency
-    // cost is broken out from p7 (sync invoke) and from p75 (verify+copy-back).
+    // cost is broken out from p10 (sync invoke) and from p11 (verify+copy-back).
     int64_t t_civac = ggml_time_us();  // civac start
     // DSP writes results to DRAM via ION buffer, but CPU cache may still hold
-    // stale data.  DC CIVAC + ion_sync controlled by ion_sync_mode (see Phase 6.5).
+    // stale data.  DC CIVAC + ion_sync controlled by ion_sync_mode (see Phase 9).
     if (hexagon_error == AEE_SUCCESS) {
         if (!do_dc_cvac) {
             // ion_sync_mode=1: rely solely on DMA_BUF_IOCTL_SYNC.
@@ -5894,7 +5896,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             }
             if (inval_max > inval_min) {
                 cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
-                GGMLHEXAGON_LOG_DEBUG("ion-batch: phase7.5 DC CIVAC [0x%x, 0x%x] (%u bytes)",
+                GGMLHEXAGON_LOG_DEBUG("ion-batch: phase11 DC CIVAC [0x%x, 0x%x] (%u bytes)",
                                       inval_min, inval_max, inval_max - inval_min);
             }
             // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
@@ -5905,26 +5907,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }  // end else (do_dc_cvac)
     }
 
-    // record civac time (Phase 7.5 only). Accumulated into cum_p7_civac_us.
+    // record civac time (Phase 11 only). Accumulated into cum_p10_civac_us.
     {
         int64_t civac_us = ggml_time_us() - t_civac;
-        ctx->cum_p7_civac_us  += civac_us;
-    }
-
-    // ---- Phase 7.6: Post-CIVAC verification ----
-    // Read dst AFTER DC CIVAC to see what the test framework will actually read.
-    // Compare with [AP-POST] (pre-CIVAC, AP cache) and DSP-DIAG dst to pinpoint issues.
-    if (hexagon_error == AEE_SUCCESS && n_ops > 0) {
-        const hex_op_desc & last_op = hex_ops[n_ops - 1];
-        uint32_t last_dst_idx = last_op.dst_idx[0];
-        if (last_dst_idx < n_tensors) {
-            ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
-            if (dst_tensor && dst_tensor->data) {
-                const float * ptr_vals = (const float *)dst_tensor->data;
-                GGMLHEXAGON_LOG_WARN("[AP-POST-CIVAC] dst[tensor%u]: PTR_f32=[%.4f, %.4f, %.4f, %.4f]",
-                                     last_dst_idx, ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3]);
-            }
-        }
+        ctx->cum_p10_civac_us  += civac_us;
     }
 
     // Reset bump pointer so next graph_compute reuses the same ION pool region.
@@ -5932,10 +5918,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // causing mirror alloc failure (data_offset=0 -> DSP corrupts model weights).
     ctx->rpc_mempool_usage = saved_mempool_usage;
 
-    // ---- Phase 8: copy-back mirrored results to heap ----
-    // t_p75 = Phase 7.6 verify + Phase 8 copy-back (civac is now its own field)
-    t_p75 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
-    ctx->cum_p75_us += t_p75;
+    // ---- Phase 12: copy-back mirrored results to heap ----
+    t_p11 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
+    ctx->cum_p11_us += t_p11;
     if (hexagon_error == AEE_SUCCESS && !mirrors.empty()) {
         std::unordered_map<void *, std::pair<uint32_t, uint32_t>> copyback_map;
         for (const auto & m : mirrors) {
@@ -5954,32 +5939,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             uint32_t max_len = kv.second.second;
             memcpy(orig_data, (const char *)ctx->rpc_mempool + moff, max_len);
         }
-
-        // Post-copy-back verification: check last op's dst tensor
-        if (1 == g_hexagon_appcfg.dump_debug_info && n_ops > 0) {
-            const hex_op_desc & last_op = hex_ops[n_ops - 1];
-            uint32_t last_dst_idx = last_op.dst_idx[0];
-            if (last_dst_idx < n_tensors) {
-                ggml_tensor * dst_tensor = tensor_src[last_dst_idx];
-                if (dst_tensor && dst_tensor->data && ggml_nbytes(dst_tensor) >= 16) {
-                    const float * ptr_vals = (const float *)dst_tensor->data;
-                    // Find ION offset
-                    uint32_t ion_off = 0;
-                    for (const auto & m : mirrors) {
-                        if ((uint32_t)m.tensor_idx == last_dst_idx) { ion_off = m.mirror_offset; break; }
-                    }
-                    if (ion_off == 0 && dst_tensor->data >= (void *)ion_base && dst_tensor->data < (void *)(ion_base + ion_size)) {
-                        ion_off = (uint32_t)((const char *)dst_tensor->data - ion_base);
-                    }
-                    const float * ion_vals = (const float *)((const char *)ctx->rpc_mempool + ion_off);
-                    GGMLHEXAGON_LOG_WARN("[POST-COPY] op[%u] dst[t%d]: ION=[%.4f, %.4f, %.4f, %.4f] HEAP=[%.4f, %.4f, %.4f, %.4f] ion_off=0x%x",
-                                         n_ops - 1, last_dst_idx,
-                                         ion_vals[0], ion_vals[1], ion_vals[2], ion_vals[3],
-                                         ptr_vals[0], ptr_vals[1], ptr_vals[2], ptr_vals[3],
-                                         ion_off);
-                }
-            }
-        }
     }
 
     // Free temporary ION regions (mirrors, batch descriptors, repacked weights).
@@ -5989,45 +5948,52 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->ion_regions[ri].in_use = false;
     }
 
-    t_p8 = ggml_time_us() - t_prev;
+    t_p12 = ggml_time_us() - t_prev;
 
     int64_t end_time = ggml_time_us();
     int64_t graph_dur = end_time - begin_time;
-    // (cumulative_p7_us is already updated at the end of the Phase 7 invoke()
-    //  block; do not add t_p7 a second time here.)
+    // (cum_p10_us is already updated at the end of the Phase 10 invoke()
+    //  block; do not add t_p10 a second time here.)
 
-    // Compute wall-clock time not covered by the explicit phase timers.
+    // compute unaccounted time (wall-clock not covered by phase timers above)
     // Use entry snapshots so the subtraction yields this call's contribution only.
     {
         int64_t accounted_this_call = (ctx->cum_p1_us  - snap_p1)
                                     + (ctx->cum_p2_us  - snap_p2)
-                                    + (ctx->cum_p25_us - snap_p25)
-                                    + (ctx->cum_p3_us  - snap_p3)
-                                    + (ctx->cum_p5_us  - snap_p5)
-                                    + (ctx->cumulative_p7_us - snap_p7)
-                                    + t_p4 + t_p45 + t_p6 + t_p65 + t_p75 + t_p8;
+                                    + (ctx->cum_p3_us - snap_p3)
+                                    + (ctx->cum_p4_us  - snap_p4)
+                                    + (ctx->cum_p7_us  - snap_p7)
+                                    + (ctx->cum_p10_us - snap_p10)
+                                    + t_p5 + t_p6 + t_p8 + t_p9 + t_p11 + t_p12;
         int64_t unaccounted = graph_dur - accounted_this_call;
         if (unaccounted < 0) unaccounted = 0;  // guard against measurement noise
         ctx->cum_unaccounted_us += unaccounted;
     }
 
+    // update cumulative stats
     ctx->cumulative_graph_us += graph_dur;
     ctx->last_graph_end_us   = end_time;
 
-    // per-phase cumulative time (cum_p75_us / cum_p7_civac_us already
-    //  accumulated at the end of their respective phase; p4..p8 + p65 still
+    // per-phase cumulative time (cum_p11_us / cum_p10_civac_us already
+    //  accumulated at the end of their respective phase; p5..p12 + p9 still
     //  use the trailing accumulator pattern.)
-    ctx->cum_p4_us  += t_p4;
-    ctx->cum_p45_us += t_p45;
-    ctx->cum_p6_us  += t_p6;
-    ctx->cum_p65_us += t_p65;
+    ctx->cum_p5_us  += t_p5;
+    ctx->cum_p6_us += t_p6;
     ctx->cum_p8_us  += t_p8;
+    ctx->cum_p9_us += t_p9;
+    ctx->cum_p12_us  += t_p12;
     // per-call min/max
-    if (ctx->min_p7_us == 0 || t_p7 < ctx->min_p7_us)    ctx->min_p7_us = t_p7;
-    if (t_p7 > ctx->max_p7_us)                           ctx->max_p7_us = t_p7;
+    if (ctx->min_p10_us == 0 || t_p10 < ctx->min_p10_us)    ctx->min_p10_us = t_p10;
+    if (t_p10 > ctx->max_p10_us)                           ctx->max_p10_us = t_p10;
+    if (ctx->min_n_ops_per_call == 0 || n_ops < ctx->min_n_ops_per_call) {
+        ctx->min_n_ops_per_call = n_ops;
+    }
+    if (n_ops > ctx->max_n_ops_per_call) {
+        ctx->max_n_ops_per_call = n_ops;
+    }
 
     {
-        int64_t rpc_overhead = graph_dur - t_p7;
+        int64_t rpc_overhead = graph_dur - t_p10;
         if (rpc_overhead < 0) rpc_overhead = 0;
         if (ctx->min_rpc_overhead_us == 0 || rpc_overhead < ctx->min_rpc_overhead_us) {
             ctx->min_rpc_overhead_us = rpc_overhead;
@@ -6044,19 +6010,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         ctx->max_graph_us     = graph_dur;
         ctx->max_graph_n_nodes = graph_n_nodes;
         ctx->max_graph_n_ops   = n_ops;
-        GGMLHEXAGON_LOG_DEBUG("new max graph_dur=%lld us (n_nodes=%u n_ops=%u p7=%lld p6.5=%lld p7.5=%lld)",
+        GGMLHEXAGON_LOG_DEBUG("new max graph_dur=%lld us (n_nodes=%u n_ops=%u p10=%lld p9=%lld p11=%lld)",
                               (long long)graph_dur, graph_n_nodes, n_ops,
-                              (long long)t_p7, (long long)t_p65, (long long)t_p75);
+                              (long long)t_p10, (long long)t_p9, (long long)t_p11);
     }
-    GGMLHEXAGON_LOG_DEBUG("ion-batch timing: p4=%lld p4.5=%lld p6=%lld p6.5=%lld p7=%lld p7.5=%lld p8=%lld (us) ops=%u",
-                          (long long)t_p4, (long long)t_p45, (long long)t_p6, (long long)t_p65,
-                          (long long)t_p7, (long long)t_p75, (long long)t_p8, n_ops);
+    GGMLHEXAGON_LOG_DEBUG("ion-batch timing: p5=%lld p6=%lld p8=%lld p9=%lld p10=%lld p11=%lld p12=%lld (us) ops=%u",
+                          (long long)t_p5, (long long)t_p6, (long long)t_p8, (long long)t_p9,
+                          (long long)t_p10, (long long)t_p11, (long long)t_p12, n_ops);
     GGMLHEXAGON_LOG_DEBUG("graph n_ops   %u", n_ops);
     GGMLHEXAGON_LOG_DEBUG("graph inference duration %lld microseconds (gap_from_prev=%lld us)", (long long)graph_dur, (long long)gap_from_prev);
-    GGMLHEXAGON_LOG_DEBUG("rpc stats: batch_calls=%llu cum_p7=%lld us cum_graph=%lld us avg_p7=%lld us avg_graph=%lld us",
+    GGMLHEXAGON_LOG_DEBUG("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
                           (unsigned long long)ctx->rpc_batch_call_count,
-                          (long long)ctx->cumulative_p7_us, (long long)ctx->cumulative_graph_us,
-                          ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_p7_us / (int64_t)ctx->rpc_batch_call_count) : 0,
+                          (long long)ctx->cum_p10_us, (long long)ctx->cumulative_graph_us,
+                          ctx->rpc_batch_call_count ? (long long)(ctx->cum_p10_us / (int64_t)ctx->rpc_batch_call_count) : 0,
                           ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
 
     return result;
@@ -6067,7 +6033,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 // reuse VTCM-resident dynamically quantized src1 across consecutive matmuls.
 // Matches htp_opnode::stackable() + reorder logic in Qualcomm's ggml-hexagon
 //
-// Fusion pairs recognized by Phase 2.5 inline fusion in graph_compute_batch
+// Fusion pairs recognized by Phase 3 inline fusion in graph_compute_batch
 // (RMS_NORM+MUL, MUL_MAT+ADD) are kept adjacent so the inline fusion still
 // triggers. Only independent MUL_MAT groups (single node, quantized src0) are
 // eligible for reordering.
@@ -6080,8 +6046,8 @@ static void ggml_backend_hexagon_graph_optimize(ggml_backend_t backend, struct g
         return;
     }
 
-    // Step 1: mark fusion pairs (Phase 2.5 patterns). Nodes sharing group_id
-    // must stay adjacent and in order so Phase 2.5 can still detect (i, i+1).
+    // Step 1: mark fusion pairs (Phase 3 patterns). Nodes sharing group_id
+    // must stay adjacent and in order so Phase 3 can still detect (i, i+1).
     std::vector<int> group_id(n, -1);
     int next_group = 0;
     int n_mm_add_groups = 0;  // count of MUL_MAT+ADD fusion pairs found
