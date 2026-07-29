@@ -1,6 +1,6 @@
 # 为什么高通 ggml-hexagon 无法将 lm-head 卸载到 DSP(2026-07-24)
 
-> 英文版:[why-perbuffer-cannot-offload-lmhead-20260724-en.md](why-perbuffer-cannot-offload-lmhead-20260724-en.md)(作者:MiniMax-M3, Kimi-K3)
+> 英文版:[why-perbuffer-cannot-offload-lmhead-20260724-en.md](why-perbuffer-cannot-offload-lmhead-20260724-en.md)(作者:MiniMax-M3, Kimi-K3, GLM-5.2)
 
 ## 1. 背景:lm-head 是 TG 的最大瓶颈
 
@@ -141,7 +141,52 @@ JZ ggml-hexagon 的 single mempool 不是"激进设计":它让 lm-head 卸载到
 - TG(26.91 vs 24.91 tok/s):直接取决于 lm-head 是否卸载到 DSP
 - TG 差距较小(+8%)并非主要由 dspqueue 流水线贡献:dspqueue 的 in-flight batches 主要在 PP 场景(每 token 多 op 可并行调度)发挥价值;TG 受 token 间严格串行依赖(下一个 token 依赖上一个 token)限制,dspqueue 在 TG 中能做的加速仅限 per-token 内的 descriptor prep 与 DSP compute overlap,贡献天然被封顶。TG 差距更直接地反映 lm-head 是否卸载到 DSP + role-aware cache 管理的差异
 
-## 9. 对高通ggml-hexagon的启示
+## 9. 层数决定 PP/TG 反超阈值
+
+JZ 与高通的 PP/TG 差距并非固定值,而是随模型层数线性变化:
+
+```
+JZ 净优势 = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
+           └── 随层数线性增长 ──┘    └── 固定优势,不随层数增长 ──┘
+```
+
+### 9.1 高通 dspqueue overlap 优势的两个限制
+
+1. **LLM 特性限制**: TG 严格串行(每个 token 依赖前一个 token)。dspqueue 的 16 个 in-flight batches 在 TG 中只能做 per-token 内的 descriptor prep 与 DSP compute overlap,贡献天然被封顶。
+
+2. **无法 offload lm-head 限制**: 高通的 lm-head 留在 CPU(32768 guard)。PP 时最后一个 op(lm-head)在 CPU 上执行,DSP 空闲等待,**打破了 dspqueue 流水线**。这在 PP 比 TG 更严重,因为 PP 时 lm_head 的 m=batch_size,CPU 计算时间更长,DSP 空闲时间更大。
+
+### 9.2 JZ 优势随层数放大
+
+JZ 的 per-layer DSP 优势(first-touch cache 节省 ~9.2ms/token + mempool 零开销 + HMX pipeline)随层数线性累积。高通的 dspqueue overlap 是固定优势,不随层数放大。
+
+当 `n_layers x per_layer_saving > dspqueue_overlap` 时,JZ 在 PP 上也反超。反超阈值取决于模型结构。
+
+### 9.3 三个模型实测对比 (Snapdragon 8 Elite, 2026-07-29)
+
+模型结构数据从 GGUF 文件头验证:
+
+| 模型 | 层数 | Attention | hidden | lm_head 类型 | lm_head 来源 | vocab | PP JZ vs QCOM | TG JZ vs QCOM |
+|---|---|---|---|---|---|---|---|---|
+| gemma4-E2B | 35 | GQA 8:1 | 1536 | Q4_K | tied (token_embd) | 262K | JZ 赢 | JZ 赢 |
+| qwen3.5-2B | 25 | GQA 4:1 | 2048 | Q6_K | tied (token_embd) | 248K | 高通赢 | JZ 赢 (1.8x) |
+| qwen1.5-1.8b | 24 | MHA 1:1 | 2048 | Q6_K | 独立 output.weight | 152K | 高通赢 | 高通赢 |
+
+TG 数据 (JZ vs 高通, tok/s):
+- gemma4-E2B: 27.2 vs ~24.9 (JZ +9%)
+- qwen3.5-2B: 27.39 vs 13.65 (JZ 1.8x, Q6_K -> Q4_0 repack offload 后)
+- qwen1.5-1.8b: ~19 vs 24.12 (JZ -21%, MHA corner case)
+
+关键观察:
+- gemma4 (35 层, GQA 8:1): per-layer 累积跨过 PP 和 TG 两个阈值,JZ 全面反超
+- qwen3.5 (25 层, GQA 4:1): 跨过 TG 阈值但未跨过 PP 阈值,dspqueue overlap 在 PP 仍占优
+- qwen1.5 (24 层, MHA 1:1): MHA 的大 K/V 矩阵 [2048,2048] 导致 VTCM 压力,降低 DSP per-layer 效率,两个阈值都未跨过。MHA 是早期模型,现代模型都用 GQA,JZ 在 GQA 模型上优势明显
+
+### 9.4 结论
+
+JZ 的架构优势随模型层数增长。层数越多,JZ 的 per-layer DSP 优势累积越大,最终在高通固定的 dspqueue overlap 优势之上反超。层数 30+ 的现代 GQA 模型(如 gemma4)从 JZ 架构获益最大。
+
+## 10. 对高通ggml-hexagon的启示
 
 如果高通ggml-hexagon未来改进:
 

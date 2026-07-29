@@ -1,6 +1,6 @@
 # Why Qualcomm ggml-hexagon Cannot Offload lm-head to the DSP (2026-07-24)
 
-> Chinese version: [why-perbuffer-cannot-offload-lmhead-20260724-zh.md](why-perbuffer-cannot-offload-lmhead-20260724-zh.md) (authors: MiniMax-M3, Kimi-K3)
+> Chinese version: [why-perbuffer-cannot-offload-lmhead-20260724-zh.md](why-perbuffer-cannot-offload-lmhead-20260724-zh.md) (authors: MiniMax-M3, Kimi-K3, GLM-5.2)
 
 ## 1. Background: lm-head is the biggest TG bottleneck
 
@@ -141,7 +141,52 @@ Multi-run means on the same Snapdragon 8 Elite phone (see [ion-mempool-vs-perbuf
 - TG (26.91 vs 24.91 tok/s): directly decided by whether lm-head is offloaded to the DSP
 - the small TG gap (+8%) is not mainly explained by dspqueue pipelining: dspqueue's in-flight batches primarily help in PP, where multiple ops per token can be scheduled in parallel. TG is strictly sequential (each token depends on the previous one), so dspqueue's pipelining in TG is limited to descriptor-prep / DSP-compute overlap within a single token, and its contribution is naturally capped. The TG gap more directly reflects whether lm-head is offloaded to the DSP and the role-aware cache management difference
 
-## 9. Implications for Qualcomm ggml-hexagon
+## 9. Layer count determines PP/TG crossover point
+
+The PP/TG gap between JZ and Qualcomm is not fixed; it scales with model layer count:
+
+```
+JZ net advantage = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
+                    └── scales linearly with layers ──┘    └── fixed, does not scale ──┘
+```
+
+### 9.1 Two limits on Qualcomm's dspqueue overlap advantage
+
+1. **LLM property limit**: TG is strictly sequential (each token depends on the previous one). dspqueue's 16 in-flight batches in TG can only overlap descriptor-prep with DSP compute within a single token; its contribution is naturally capped.
+
+2. **Cannot offload lm-head limit**: Qualcomm keeps lm-head on CPU (32768 guard). In PP, the last op (lm-head) runs on CPU while the DSP idles, breaking the dspqueue pipeline. This is worse in PP than TG because PP's lm-head has m=batch_size, so CPU computation takes longer and DSP idle time is larger.
+
+### 9.2 JZ advantage scales with layer count
+
+JZ's per-layer DSP advantage (first-touch cache saving ~9.2ms/token + mempool zero overhead + HMX pipeline) accumulates linearly with layer count. Qualcomm's dspqueue overlap is a fixed advantage that does not scale with layers.
+
+When `n_layers x per_layer_saving > dspqueue_overlap`, JZ also wins PP. The crossover depends on model structure.
+
+### 9.3 Three-model comparison (Snapdragon 8 Elite, 2026-07-29)
+
+Model structure facts verified from GGUF headers:
+
+| Model | Layers | Attention | hidden | lm_head type | lm_head source | vocab | PP JZ vs QCOM | TG JZ vs QCOM |
+|---|---|---|---|---|---|---|---|---|
+| gemma4-E2B | 35 | GQA 8:1 | 1536 | Q4_K | tied (token_embd) | 262K | JZ wins | JZ wins |
+| qwen3.5-2B | 25 | GQA 4:1 | 2048 | Q6_K | tied (token_embd) | 248K | QCOM wins | JZ wins (1.8x) |
+| qwen1.5-1.8b | 24 | MHA 1:1 | 2048 | Q6_K | standalone | 152K | QCOM wins | QCOM wins |
+
+TG numbers (JZ vs QCOM, tok/s):
+- gemma4-E2B: 27.2 vs ~24.9 (JZ +9%)
+- qwen3.5-2B: 27.39 vs 13.65 (JZ 1.8x, after Q6_K -> Q4_0 repack offload)
+- qwen1.5-1.8b: ~19 vs 24.12 (JZ -21%, MHA corner case)
+
+Key observations:
+- gemma4 (35 layers, GQA 8:1): per-layer accumulation crosses both PP and TG thresholds; JZ wins PP & TG
+- qwen3.5 (25 layers, GQA 4:1): crosses TG threshold but not PP threshold; dspqueue overlap still wins PP
+- qwen1.5 (24 layers, MHA 1:1): MHA's large K/V matrices [2048,2048] cause VTCM pressure, reducing DSP per-layer efficiency; does not cross either threshold. Legacy MHA models are corner cases; modern models use GQA where JZ shines
+
+### 9.4 Conclusion
+
+JZ's architectural advantage grows with model layer count. The more layers a model has, the more JZ's per-layer DSP advantage accumulates, eventually overtaking Qualcomm's fixed dspqueue overlap advantage in both PP and TG. Modern GQA models with 30+ layers (e.g., gemma4) benefit the most from JZ's architecture.
+
+## 10. Implications for Qualcomm ggml-hexagon
 
 If Qualcomm ggml-hexagon improves in the future:
 

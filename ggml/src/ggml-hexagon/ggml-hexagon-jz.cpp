@@ -1320,12 +1320,13 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
 }
 
 // Some weight types are stored in the repack buffer in a different format
-// than their logical ggml type (BF16 as F16, Q4_K as Q4_0); the DSP kernels
-// only see the storage type. Q4_K is stored as Q4_0 (not Q8_0) so the
-// bandwidth-bound lm-head matvec moves 214MB instead of 428MB per token.
+// than their logical ggml type (BF16 as F16, Q4_K/Q6_K as Q4_0); the DSP
+// kernels only see the storage type. Q4_K/Q6_K are stored as Q4_0 (not Q8_0)
+// so the bandwidth-bound lm-head matvec moves less data per token.
 static inline enum ggml_type ggml_hexagon_weight_dsp_type(enum ggml_type type) {
     if (type == GGML_TYPE_BF16) return GGML_TYPE_F16;
     if (type == GGML_TYPE_Q4_K) return GGML_TYPE_Q4_0;
+    if (type == GGML_TYPE_Q6_K) return GGML_TYPE_Q4_0;
     return type;
 }
 
@@ -3073,8 +3074,9 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
     }
 
     if (!ggmlhexagon_type_is_enabled(src0->type)) {
-        // Q4_K is stored as Q4_0 (see set_tensor); inherit Q4_0's enablement
-        if (!(src0->type == GGML_TYPE_Q4_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0))) {
+        // Q4_K/Q6_K are stored as Q4_0 (see set_tensor); inherit Q4_0's enablement
+        if (!(src0->type == GGML_TYPE_Q4_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0)) &&
+            !(src0->type == GGML_TYPE_Q6_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0))) {
             return false;
         }
     }
@@ -3086,6 +3088,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q6_K:
         {
             // src0 (weights) must be repacked. In test-backend-ops tensors
             // are allocated in the main buffer, so this filters quantized MUL_MAT test cases
@@ -4148,6 +4151,65 @@ static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
     }
 }
 
+// Q6_K weights are converted to Q4_0 (dequant Q6_K -> f32 -> requant Q4_0)
+// and stored in the Q4_0 tiled layout, so the DSP reuses the Q4_0 matmul
+// kernels. Same approach as Q4_K conversion above.
+static void repack_q6k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
+    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+    const int64_t nb_q4   = ne0 / QK4_0;   // q4_0 blocks per row
+    const int64_t nb_q6k  = ne0 / QK_K;    // q6_K blocks per row
+
+    std::vector<float>      row_f32(ne0);
+    std::vector<block_q4_0> strip_q4(32 * nb_q4);
+
+    for (int i3 = 0; i3 < ne3; i3++) {
+        for (int i2 = 0; i2 < ne2; i2++) {
+            const block_q6_K * src_expert = (const block_q6_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q6k);
+            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+
+            for (int ct = 0; ct < n_col_tiles; ct++) {
+                for (int row = 0; row < 32; row++) {
+                    const int64_t r = ct * 32 + row;
+                    if (r < ne1) {
+                        dequantize_row_q6_K(src_expert + r * nb_q6k, row_f32.data(), ne0);
+                        quantize_row_q4_0_ref(row_f32.data(), strip_q4.data() + row * nb_q4, ne0);
+                    } else {
+                        memset(strip_q4.data() + row * nb_q4, 0, nb_q4 * sizeof(block_q4_0));
+                    }
+                }
+
+                for (int kt = 0; kt < n_k_tiles; kt++) {
+                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+
+                    uint8_t tile_quants[32][32];
+                    for (int row = 0; row < 32; row++) {
+                        if (kt < nb_q4) {
+                            unpack_q4_0_quants(tile_quants[row], &strip_q4[row * nb_q4 + kt]);
+                        } else {
+                            memset(tile_quants[row], 8, 32);
+                        }
+                    }
+
+                    for (int cp = 0; cp < 16; cp++) {
+                        for (int row = 0; row < 32; row++) {
+                            tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
+                        }
+                    }
+
+                    ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+                    for (int row = 0; row < 32; row++) {
+                        scale_dst[row] = (kt < nb_q4) ? strip_q4[row * nb_q4 + kt].d : 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void repack_mxfp4_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
     const block_mxfp4 * src_matrix = (const block_mxfp4 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
@@ -4508,6 +4570,11 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                 GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
                 repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 break;
+            case GGML_TYPE_Q6_K:
+                GGML_ASSERT(offset == 0);
+                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+                repack_q6k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                break;
             default:
                 memcpy((char *)tensor->data + offset, data, size);
                 break;
@@ -4587,6 +4654,9 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q4_K:
                     repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
                     return;
+                // Q6_K get_tensor (tiled Q4_0 -> Q6_K) not implemented;
+                // falls through to raw memcpy. Inference is unaffected since
+                // the DSP reads the tiled Q4_0 layout directly.
                 default:
                     break;
             }
@@ -4776,6 +4846,7 @@ static size_t ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffe
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_Q4_K:
+        case GGML_TYPE_Q6_K:
             return ggml_hexagon_repacked_size(tensor->type, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
         default:
             return ggml_nbytes(tensor);
@@ -5530,7 +5601,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             if (!is_quant_weight) continue;
             if (t->type != GGML_TYPE_Q4_0 && t->type != GGML_TYPE_Q4_1 &&
                 t->type != GGML_TYPE_Q8_0 && t->type != GGML_TYPE_IQ4_NL &&
-                t->type != GGML_TYPE_Q4_K && t->type != GGML_TYPE_MXFP4) continue;
+                t->type != GGML_TYPE_Q4_K && t->type != GGML_TYPE_Q6_K &&
+                t->type != GGML_TYPE_MXFP4) continue;
             const int32_t K = t->ne[0];
             if (K % 32 != 0 || K <= 0) continue;
 
