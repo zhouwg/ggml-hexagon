@@ -1596,9 +1596,9 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
     if (0 == htp_arch)
         return 1;
-
     if (nullptr == ctx)
         return 2;
+
     /* Probe mempool capacity, find a large contiguous block near the 4 GiB boundary on devices. */
     probe_slots.push_back(2048);
     if (htp_arch > 75) {
@@ -1688,9 +1688,9 @@ static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if (ctx->rpc_mempool) {
         GGMLHEXAGON_LOG_DEBUG("free rpc mempool %p", ctx->rpc_mempool);
         rpcmem_free(ctx->rpc_mempool);
-        ctx->rpc_mempool = nullptr;
-        ctx->rpc_mempool_len = 0;
-        ctx->rpc_mempool_capacity = 0;
+        ctx->rpc_mempool            = nullptr;
+        ctx->rpc_mempool_len        = 0;
+        ctx->rpc_mempool_capacity   = 0;
     }
 }
 
@@ -1724,7 +1724,7 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     ggmlhexagon_get_vtcm_info(ctx->domain_id, VTCM_PAGE, &vtcm_page);
     ctx->has_vtcm = (vtcm_count > 0 && vtcm_page > 0);
 
-    uint32_t hmx_depth = 0;
+    uint32_t hmx_depth   = 0;
     uint32_t hmx_spatial = 0;
     //FIXME: better approach to get correct/accurate info
     ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_DEPTH, &hmx_depth);
@@ -2555,16 +2555,16 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     // (observed with ubatch<=32); upstream's own backend is unaffected.
     const bool pipeline = is_matmul_id ? false : true;
     const int n_threads = (int) ctx->n_threads;
-    const int ne10 = src1->ne[0];
+    const int ne10      = src1->ne[0];
 
-    const bool is_batched_val = is_matmul_id ? false : is_batched;
-    const int group_size = (ne02 > 0 ? ne12 / ne02 : 1);
+    const bool is_batched_val   = is_matmul_id ? false : is_batched;
+    const int group_size        = (ne02 > 0 ? ne12 / ne02 : 1);
 
-    size_t m_chunk = 0;
-    size_t n_chunk = 0;
-    size_t vtcm_size = 0;
-    bool use_grouped = false;
-    int act_threads_selected = 0;
+    size_t m_chunk              = 0;
+    size_t n_chunk              = 0;
+    size_t vtcm_size            = 0;
+    bool use_grouped            = false;
+    int act_threads_selected    = 0;
 
     if (is_batched_val && wtype == GGML_TYPE_F16 && group_size > 1) {
         // Try grouped path first
@@ -2588,17 +2588,17 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
         }
     }
 
-    kparams->n_hmx = 1;
-    kparams->pipeline = pipeline ? 1 : 0;
-    kparams->m_chunk = (int32_t) m_chunk;
-    kparams->n_chunk = (int32_t) n_chunk;
-    kparams->n_threads = n_threads;
-    kparams->n_act_threads = act_threads_selected;
-    kparams->tile_size = (int32_t) htp_mm_get_weight_tile_size(wtype);
-    kparams->aligned_tile_size = (int32_t) aligned_tile_size;
-    kparams->src1_row_size = (int32_t)((wtype == GGML_TYPE_Q4_1)
-        ? htp_mm_q8_1_tiled_row_size(ne10)
-        : htp_mm_q8_0_tiled_row_size(ne10));
+    kparams->n_hmx              = 1;
+    kparams->pipeline           = pipeline ? 1 : 0;
+    kparams->m_chunk            = (int32_t) m_chunk;
+    kparams->n_chunk            = (int32_t) n_chunk;
+    kparams->n_threads          = n_threads;
+    kparams->n_act_threads      = act_threads_selected;
+    kparams->tile_size          = (int32_t) htp_mm_get_weight_tile_size(wtype);
+    kparams->aligned_tile_size  = (int32_t) aligned_tile_size;
+    kparams->src1_row_size      = (int32_t)((wtype == GGML_TYPE_Q4_1)
+                                        ? htp_mm_q8_1_tiled_row_size(ne10)
+                                        : htp_mm_q8_0_tiled_row_size(ne10));
     kparams->vtcm_size          = (int32_t) vtcm_size;
     kparams->vtcm_src0_size     = 0;
     kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) act_threads_selected);
@@ -2764,31 +2764,31 @@ static void ggml_hexagon_precompute_hvx_mm_params(
         );
 
         if (!is_batched && !is_permuted && vtcm_size <= vtcm_budget) {
-            kparams->kernel_type = HTP_MM_KERNEL_HVX_F16_F16_VTCM;
-            kparams->src1_row_size = (int32_t) hex_round_up(ne10 * 2, 128);
-            kparams->vtcm_size = (int32_t) vtcm_size;
+            kparams->kernel_type    = HTP_MM_KERNEL_HVX_F16_F16_VTCM;
+            kparams->src1_row_size  = (int32_t) hex_round_up(ne10 * 2, 128);
+            kparams->vtcm_size      = (int32_t) vtcm_size;
             kparams->vtcm_src0_size = (int32_t) vtcm_src0_size;
             kparams->vtcm_src1_size = (int32_t) vtcm_src1_size;
-            kparams->vtcm_dst_size = (int32_t) vtcm_dst_size;
-            kparams->n_prefetch = 16;
+            kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
+            kparams->n_prefetch     = 16;
         } else {
             if (src1->type == GGML_TYPE_F32) {
                 kparams->kernel_type = HTP_MM_KERNEL_HVX_F16_F32_DDR;
             } else {
                 kparams->kernel_type = HTP_MM_KERNEL_HVX_F16_F16_DDR;
             }
-            kparams->src1_row_size = (int32_t) src1->nb[1];
-            size_t ddr_size = htp_mm_hvx_get_vtcm_sizes(
+            kparams->src1_row_size  = (int32_t) src1->nb[1];
+            size_t ddr_size         = htp_mm_hvx_get_vtcm_sizes(
                 kparams->kernel_type, wtype, ne10, src1_nrows,
                 (uint32_t)ctx->n_threads,
                 dst->nb[1], src0->nb[1], src1->nb[1], 16,
                 &vtcm_src0_size, &vtcm_src1_size, &vtcm_dst_size
             );
-            kparams->vtcm_size = (int32_t) ddr_size;
+            kparams->vtcm_size      = (int32_t) ddr_size;
             kparams->vtcm_src0_size = (int32_t) vtcm_src0_size;
             kparams->vtcm_src1_size = (int32_t) vtcm_src1_size;
-            kparams->vtcm_dst_size = (int32_t) vtcm_dst_size;
-            kparams->n_prefetch = 16;
+            kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
+            kparams->n_prefetch     = 16;
         }
     } else {
         // F32 HVX
@@ -2855,15 +2855,15 @@ static void ggml_hexagon_precompute_mm_params(
 
     // weights may be stored in a different format (see set_tensor);
     // select kernels and VTCM layout by the storage type
-    const int wtype = ggml_hexagon_weight_dsp_type(src0->type);
-    const bool is_repack = ggml_hexagon_is_repack_type((ggml_type) wtype);
-    const int ne00_padded = is_repack ? (int) hex_round_up((uint32_t) ne00, 32) : ne00;
-    const int ne01_padded = is_repack ? (int) hex_round_up((uint32_t) ne01, 32) : ne01;
-    const int ne11_padded = (int) hex_round_up((uint32_t) ne11, 32);
+    const int wtype         = ggml_hexagon_weight_dsp_type(src0->type);
+    const bool is_repack    = ggml_hexagon_is_repack_type((ggml_type) wtype);
+    const int ne00_padded   = is_repack ? (int) hex_round_up((uint32_t) ne00, 32) : ne00;
+    const int ne01_padded   = is_repack ? (int) hex_round_up((uint32_t) ne01, 32) : ne01;
+    const int ne11_padded   = (int) hex_round_up((uint32_t) ne11, 32);
 
     const bool is_batched   = (ne02 * ne03 > 1 || ne12 * ne13 > 1);
 
-    const size_t vtcm_budget = (size_t)ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
+    const size_t vtcm_budget  = (size_t)ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
 
     // Cache key: tensor ptr (unique per weight object) ^ data ptr (stable
     // mempool offset) ^ ne11 (varies for PP batched matmul, fixed for TG).
@@ -2943,7 +2943,7 @@ finalize:
 ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev)
     : device(dev_id),
       backend(nullptr),
-      socinfo{},
+      socinfo(),
       n_threads(6),
       domain_id(CDSP_DOMAIN_ID),
       session_id(0),
@@ -3218,14 +3218,14 @@ static bool ggmlhexagon_supported_flash_attn(
 // Replaces the large switch statement with individual validator functions
 // indexed by GGML_OP. Each validator receives the Hexagon context and the
 // op tensor; returns true if the DSP can handle the op.
-typedef bool (*hexagon_op_validator_t)(ggml_backend_hexagon_context *ctx, const ggml_tensor *op);
+typedef bool (*hexagon_op_validator_t)(ggml_backend_hexagon_context * ctx, const ggml_tensor * op);
 
 // Binary element-wise ops: ADD, SUB, MUL, DIV
-static bool hexagon_validate_binary_op(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_binary_op(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
-    const ggml_tensor *dst  = op;
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
+    const ggml_tensor * dst  = op;
     if (src0->type == GGML_TYPE_F32) {
         if (!src1 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32)
             return false;
@@ -3241,13 +3241,13 @@ static bool hexagon_validate_binary_op(ggml_backend_hexagon_context *ctx, const 
     return true;
 }
 
-static bool hexagon_validate_mul_mat(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_mul_mat(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     return ggmlhexagon_supported_mul_mat(op, ctx);
 }
 
-static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!ggml_is_contiguous(src0))
@@ -3256,9 +3256,9 @@ static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context *ctx, const g
 }
 
 // NORM, L2_NORM: dispatched to op_unary (F32, same shape, contiguous dst)
-static bool hexagon_validate_norm_op(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_norm_op(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!ggml_are_same_shape(src0, op))
@@ -3269,14 +3269,14 @@ static bool hexagon_validate_norm_op(ggml_backend_hexagon_context *ctx, const gg
 }
 
 // SQR, SQRT: element-wise unary, same as norm_op
-static bool hexagon_validate_sqr_sqrt(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_sqr_sqrt(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     return hexagon_validate_norm_op(ctx, op);
 }
 
-static bool hexagon_validate_rope(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!src1 || src1->type != GGML_TYPE_I32)
@@ -3286,10 +3286,10 @@ static bool hexagon_validate_rope(ggml_backend_hexagon_context *ctx, const ggml_
     return true;
 }
 
-static bool hexagon_validate_soft_max(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_soft_max(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (src1 != nullptr && src1->type != GGML_TYPE_F16 && src1->type != GGML_TYPE_F32)
@@ -3299,9 +3299,9 @@ static bool hexagon_validate_soft_max(ggml_backend_hexagon_context *ctx, const g
     return true;
 }
 
-static bool hexagon_validate_unary(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_unary(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     const int unary_op = (int)op->op_params[0];
     switch (unary_op) {
         case GGML_UNARY_OP_SILU:
@@ -3326,9 +3326,9 @@ static bool hexagon_validate_unary(ggml_backend_hexagon_context *ctx, const ggml
     }
 }
 
-static bool hexagon_validate_glu(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_glu(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!ggml_is_contiguous_1(src0) || !ggml_is_contiguous(op))
@@ -3344,18 +3344,18 @@ static bool hexagon_validate_glu(ggml_backend_hexagon_context *ctx, const ggml_t
     }
 }
 
-static bool hexagon_validate_scale(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_scale(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != op->type) return false;
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
         return false;
     return true;
 }
 
-static bool hexagon_validate_cpy(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_cpy(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F16 && src0->type != GGML_TYPE_F32)
         return false;
     if (op->type != GGML_TYPE_F16 && op->type != GGML_TYPE_F32)
@@ -3363,10 +3363,10 @@ static bool hexagon_validate_cpy(ggml_backend_hexagon_context *ctx, const ggml_t
     return true;
 }
 
-static bool hexagon_validate_get_rows(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
     if (!src1 || src1->type != GGML_TYPE_I32)
         return false;
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
@@ -3374,10 +3374,10 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context *ctx, const g
     return true;
 }
 
-static bool hexagon_validate_set_rows(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_set_rows(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
-    const ggml_tensor *src1 = op->src[1];
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
     if (!src1 || (src1->type != GGML_TYPE_I32 && src1->type != GGML_TYPE_I64))
         return false;
     if (src0->type != GGML_TYPE_F32)
@@ -3387,16 +3387,16 @@ static bool hexagon_validate_set_rows(ggml_backend_hexagon_context *ctx, const g
     return true;
 }
 
-static bool hexagon_validate_sum_rows(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_sum_rows(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_cont(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_cont(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16)
         return false;
     if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16)
@@ -3404,9 +3404,9 @@ static bool hexagon_validate_cont(ggml_backend_hexagon_context *ctx, const ggml_
     return true;
 }
 
-static bool hexagon_validate_concat(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_concat(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != op->type) return false;
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
         src0->type != GGML_TYPE_I32 && src0->type != GGML_TYPE_I16)
@@ -3414,18 +3414,18 @@ static bool hexagon_validate_concat(ggml_backend_hexagon_context *ctx, const ggm
     return true;
 }
 
-static bool hexagon_validate_repeat(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_repeat(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
         src0->type != GGML_TYPE_I32 && src0->type != GGML_TYPE_I16)
         return false;
     return true;
 }
 
-static bool hexagon_validate_diag_mask_inf(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_diag_mask_inf(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
-    const ggml_tensor *src0 = op->src[0];
+    const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!ggml_is_contiguous(src0) || !ggml_is_contiguous(op))
@@ -3433,35 +3433,35 @@ static bool hexagon_validate_diag_mask_inf(ggml_backend_hexagon_context *ctx, co
     return true;
 }
 
-static bool hexagon_validate_cumsum(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_cumsum(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_diag(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_diag(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_argsort(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_argsort(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_pad(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_pad(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_im2col(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_im2col(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const struct ggml_tensor * src1 = op->src[1];
     const struct ggml_tensor * dst  = op;
@@ -3485,25 +3485,25 @@ static bool hexagon_validate_im2col(ggml_backend_hexagon_context *ctx, const ggm
     return true;
 }
 
-static bool hexagon_validate_tri(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_tri(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
         return false;
     return true;
 }
 
-static bool hexagon_validate_fill(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_fill(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16)
         return false;
     return true;
 }
 
-static bool hexagon_validate_flash_attn(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_flash_attn(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     return ggmlhexagon_supported_flash_attn(ctx, op);
 }
 
-static bool hexagon_validate_gated_delta_net(ggml_backend_hexagon_context *ctx, const ggml_tensor *op) {
+static bool hexagon_validate_gated_delta_net(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const struct ggml_tensor * q     = op->src[0];
     const struct ggml_tensor * k     = op->src[1];
