@@ -49,7 +49,7 @@
 #define DSP_OPT_MAX_TENSORS             2048
 
 // Queue capacity/stack sizes for JZ-owned work/hmx queues. Mirror the defaults
-// in Qualcomm's htp/main.c (HMX_QUEUE_CAPACITY=16, HMX_QUEUE_STACK_SIZE=16384,
+// in htp/main.c (HMX_QUEUE_CAPACITY=16, HMX_QUEUE_STACK_SIZE=16384,
 // WORK_QUEUE_CAPACITY=16, WORK_QUEUE_STACK_SIZE=16384). main.c keeps these as
 // file-local #defines; we replicate them here with a JZ_ prefix so the JZ
 // entry.c path can construct queues with the same geometry.
@@ -226,7 +226,7 @@ static dsptensor g_pre_dt[DSP_OPT_MAX_TENSORS];
 
 // Pre-converted htp_tensor descriptors for op dispatch. Eliminates per-op
 // dsptensor_to_htp_tensor() calls and stack-allocated src_ht/dst_ht arrays.
-// Mirrors Qualcomm's prep_tensors pattern: tensors are directly usable by
+// Mirrors htp/main.c prep_tensors pattern: tensors are directly usable by
 // execute_op without any per-op conversion.
 static struct htp_tensor g_pre_ht[DSP_OPT_MAX_TENSORS];
 
@@ -579,51 +579,13 @@ static inline bool prior_dst_contains_src(uint32_t src_idx,
     return false;
 }
 
-#if 0
-/* Only element-wise / in-place style ops were originally considered safe for
- * prior-dst skip. Experimentally, with PRIOR_DST_MAX_LEN == cacheline size,
- * the prior-dst is small enough to remain in scalar L2 regardless of op type,
- * so the whitelist below is intentionally disabled in prior_dst_add(). It is
- * kept here to document the experiment and make re-enabling trivial. */
-static inline bool prior_dst_op_safe(enum htp_op_code op) {
-    switch (op) {
-        case HTP_OP_ADD:
-        case HTP_OP_SUB:
-        case HTP_OP_MUL:
-        case HTP_OP_DIV:
-        case HTP_OP_SCALE:
-        case HTP_OP_SQR:
-        case HTP_OP_SQRT:
-        case HTP_OP_NORM:
-        case HTP_OP_RMS_NORM:
-        case HTP_OP_RMS_NORM_MUL:
-        case HTP_OP_L2_NORM:
-        case HTP_OP_UNARY_NEG:
-        case HTP_OP_UNARY_SIGMOID:
-        case HTP_OP_UNARY_TANH:
-        case HTP_OP_UNARY_EXP:
-        case HTP_OP_UNARY_SOFTPLUS:
-        case HTP_OP_UNARY_SILU:
-        case HTP_OP_UNARY_GELU:
-        case HTP_OP_GLU_SWIGLU:
-        case HTP_OP_GLU_SWIGLU_OAI:
-        case HTP_OP_GLU_GEGLU:
-            return true;
-        default:
-            return false;
-    }
-}
-#endif
-
 static inline void prior_dst_add(void * base, size_t len, uint32_t tensor_idx,
                                  enum htp_op_code op) {
     (void)op;
     if (!base || len == 0) return;
     /* With PRIOR_DST_MAX_LEN == cacheline size, the prior-dst is small enough
-     * that it should still reside in scalar L2. Drop the op-type whitelist to
-     * maximize the number of dcinva skips. */
+     * that it should still reside in scalar L2. */
     if (len > PRIOR_DST_MAX_LEN) return;
-    /* if (!prior_dst_op_safe(op)) return; */  /* see prior_dst_op_safe() docs */
     if (g_prior_dst_count >= DSP_OPT_MAX_BATCH_DSTS) return;  /* overflow guard */
     g_prior_dst_ranges[g_prior_dst_count].base = base;
     g_prior_dst_ranges[g_prior_dst_count].len  = len;
@@ -913,7 +875,7 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
 }
 
 // ===========================================================================
-// Qualcomm execute_op dispatch (moved from htp/main.c)
+// execute_op dispatch wrapper
 // All op_xxx functions are exported from htp/*.c (non-static, declared in
 // htp-ctx.h). We only need this dispatch wrapper + a translation layer.
 //
@@ -1027,8 +989,8 @@ static inline void hex_tensor_to_dsptensor(const hex_tensor_desc * ht,
 }
 
 // Convert hex_tensor_desc directly to htp_tensor. Eliminates the intermediate
-// dsptensor step for op dispatch. Mirrors Qualcomm's prep_tensor: data pointer
-// is computed from ION base + offset. flags is never read on the JZ path;
+// dsptensor step for op dispatch. Mirrors htp/main.c prep_tensor: data pointer
+// is computed from mempool base + offset. flags is never read on the JZ path;
 // cache coherency is handled by entry.c itself.
 static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
                                              const char * ion_base,
@@ -1047,29 +1009,6 @@ static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
     htp->nb[2] = (uint32_t)ht->nb[2];
     htp->nb[3] = (uint32_t)ht->nb[3];
 }
-
-#if 0
-// Hexagon DSP is 32-bit address space: pointer fits in uint32_t.
-// htp_tensor.data is uint32_t offset, but Qualcomm's prep_tensor replaces
-// it with actual pointer. We set it directly to the pointer value; flags is
-// never read on the JZ path (we handle cache ourselves).
-static inline void dsptensor_to_htp_tensor(const dsptensor * dt,
-                                            struct htp_tensor * ht) {
-    ht->data  = (uint32_t)(uintptr_t)dt->data;
-    ht->size  = (uint32_t)dt->data_len;
-    ht->flags = HTP_TENSOR_FLUSHED;
-    ht->type  = (uint16_t)dt->type;
-    ht->bi    = 0;
-    ht->ne[0] = (uint32_t)dt->ne[0];
-    ht->ne[1] = (uint32_t)dt->ne[1];
-    ht->ne[2] = (uint32_t)dt->ne[2];
-    ht->ne[3] = (uint32_t)dt->ne[3];
-    ht->nb[0] = (uint32_t)dt->nb[0];
-    ht->nb[1] = (uint32_t)dt->nb[1];
-    ht->nb[2] = (uint32_t)dt->nb[2];
-    ht->nb[3] = (uint32_t)dt->nb[3];
-}
-#endif
 
 // Map GGML opcode to HTP opcode. Returns 0 on success, -1 if unsupported.
 // For GGML_OP_UNARY, op_params[0] selects the unary sub-op.
@@ -1146,7 +1085,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
 
 // Build htp_ops_context directly from pre-converted g_pre_ht tensors.
 // Eliminates per-op dsptensor_to_htp_tensor() calls and stack-allocated
-// src_ht/dst_ht arrays. Mirrors Qualcomm's proc_op_req: direct tensor
+// src_ht/dst_ht arrays. Mirrors htp/main.c proc_op_req: direct tensor
 // table indexing (tens + op->src[i]).
 static void build_htp_octx(
     struct htp_ops_context * octx,
@@ -1290,8 +1229,7 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
     kparams->n_prefetch         = 16;
     kparams->kernel_type        = is_batched ? HTP_MM_KERNEL_HMX_F16_BATCHED
                                              : HTP_MM_KERNEL_HMX_2D;
-    // HMX kernels consume these two fastdivs for activation DMA/work split
-    // (matmul-ops.c); mirror Qualcomm's AP-side precompute.
+    // Used by HMX kernels for activation DMA/work split (matmul-ops.c).
     kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) best_act_threads);
     kparams->div_ne00_padded    = init_fastdiv_values((uint32_t) ne00_padded);
     return true;
@@ -1702,7 +1640,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
             g_dsp_ctx->vtcm_size = vtcm_ptr_size;
             GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_dsp_ctx->vtcm_size, g_dsp_ctx->vtcm_base);
 
-            /* VTCM: acquire once for the whole session (matches Qualcomm
+            /* VTCM: acquire once for the whole session (matches
              * htp/main.c htp_packet_callback pattern: acquire once at
              * session start, release once at session end).
              * Avoids per-batch HAP_compute_res_acquire/release_cached churn
@@ -1712,7 +1650,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         }
     }
 
-    /* Step 3.5: Create async HMX queue for pipeline overlap (DMA/HVX/HMX).
+    /* Step 4: Create async HMX queue for pipeline overlap (DMA/HVX/HMX).
      * New Qualcomm API (b2dd28a3b) requires a pre-allocated backing buffer;
      * we memalign it here and track it in dsp_context.hmx_queue_buf for
      * cleanup in ggml_dsp_close. Capacity/stack_size match main.c defaults. */
@@ -1728,7 +1666,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         size_t hmx_align = hmx_queue_alignof();
         void * hmx_buf   = memalign(hmx_align, hmx_size);
         if (hmx_buf) {
-            // Trace slot mirrors main.c (&ctx->trace[HTP_MAX_NTHREADS]): must be a
+            // Trace slot mirrors htp/main.c (&ctx->trace[HTP_MAX_NTHREADS]): must be a
             // valid (zeroed) htp_thread_trace, htp_trace_event_start/stop dereference
             // it unconditionally on every HMX descriptor completion.
             g_dsp_ctx->hmx_queue = hmx_queue_init(hmx_buf, JZ_HMX_QUEUE_CAPACITY,
@@ -1752,7 +1690,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
                              g_dsp_ctx->hmx_available, g_dsp_ctx->compute_res_ctx_id);
     }
 
-    /* Step 4: probe DSP memory for information only (no allocation) */
+    /* Step 5: probe DSP memory for information only (no allocation) */
     {
         struct HAP_mem_stats mem_stats;
         memset(&mem_stats, 0, sizeof(mem_stats));
@@ -1834,7 +1772,7 @@ int ggml_dsp_close(remote_handle64 handle) {
         GGMLHEXAGON_LOG_INFO("released async HMX queue");
     }
 
-    /* VTCM: release once at session end (matches Qualcomm pattern, see
+    /* VTCM: release once at session end (matches the pattern, see
      * ggml_dsp_open). The release callback is still registered and will
      * set vtcm_needs_release=1 if another session preempts during the
      * session, but we intentionally ignore it here so that VTCM stays
@@ -2032,7 +1970,7 @@ AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t siz
 }
 
 // Wake/suspend the work_queue + hmx_queue worker threads around a batch,
-// mirroring main.c htp_packet_callback. Without wakeup the workers stay in
+// mirroring htp/main.c htp_packet_callback. Without wakeup the workers stay in
 // qurt_futex_wait and (depending on QuRT futex semantics) can miss seqn
 // bumps; without hmx_queue_flush the batch can return while HMX descriptors
 // are still in flight, so AP reads back incomplete dst tensors.
@@ -2139,7 +2077,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
 
     /* VTCM is acquired once in ggml_dsp_open and held for the whole
-     * session (matches Qualcomm htp_packet_callback pattern). Per-batch
+     * session (matches htp/main.c htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
 
     GGMLHEXAGON_LOG_DEBUG("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
@@ -2242,21 +2180,10 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             g_dst_dt_ptrs[k] = &g_dst_dt_buf[k];
         }
 
-        /* Cache maintenance for non-coherent ION memory.
-         * Uses per-batch invalidation tracking (g_batch_tensor_needs_inval)
-         * to skip redundant dcinva calls when the same tensor is used as src
-         * by multiple ops. When a tensor is written as dst, its invalidation
-         * marker is cleared so it gets re-invalidated on next use as src.
-         *
-         * dsp_cache_mode bits (independent):
-         *   bit 0 (0x1): first-touch weight bitmap (session-scoped)
-         *   bit 1 (0x2): skip dcinva for prior dst (batch-scoped range check)
-         *   bit 2 (0x4): bulk dst flush at batch end
-         *
-         * Per-batch tracking (this optimization) works with all modes:
-         * it only skips invalidation when the tensor has already been
-         * invalidated AND hasn't been dirtied since. The per-mode checks
-         * (bit 0/1) are still applied on top of this. */
+        /* Cache maintenance for non-coherent mempool memory.
+         * Per-batch tracking skips redundant dcinva when the same tensor is
+         * used as src by multiple ops. See dsp_cache_mode bit definitions
+         * at the batch_size==0xFFFC gate above. */
         INVAL_SRC_IF_NEEDED(i, 0, src0_dt, op->src_idx[0]);
         if (src1_dt) INVAL_SRC_IF_NEEDED(i, 1, src1_dt, op->src_idx[1]);
         if (src2_dt) INVAL_SRC_IF_NEEDED(i, 2, src2_dt, op->src_idx[2]);
@@ -2329,21 +2256,14 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                 dp[16], dp[17], dp[18], dp[19],
                 src0_dt->nb[0], src0_dt->nb[1], src0_dt->nb[2], src0_dt->nb[3],
                 src0_dt->ne[0], src0_dt->ne[1], src0_dt->ne[2], src0_dt->ne[3]);
+            /* ktype, pipe, mch, nch, nthr, nact, nhmx, npf, src1rs, vtcm_sz,
+             * vtcm_src0, vtcm_src1, vtcm_dst */
             GGMLHEXAGON_LOG_ERROR("[DSP-MM-KP]  op%u ktype=%d pipe=%d mch=%d nch=%d nthr=%d nact=%d nhmx=%d npf=%d src1rs=%d vtcm_sz=%d src0_sz=%d src1_sz=%d dst_sz=%d",
-                i,
-                octx.kernel_params[0],  /* kernel_type */
-                octx.kernel_params[1],  /* pipeline */
-                octx.kernel_params[2],  /* m_chunk */
-                octx.kernel_params[3],  /* n_chunk */
-                octx.kernel_params[4],  /* n_threads */
-                octx.kernel_params[5],  /* n_act_threads */
-                octx.kernel_params[6],  /* n_hmx */
-                octx.kernel_params[7],  /* n_prefetch */
-                octx.kernel_params[10], /* src1_row_size */
-                octx.kernel_params[11], /* vtcm_size */
-                octx.kernel_params[12], /* vtcm_src0_size */
-                octx.kernel_params[13], /* vtcm_src1_size */
-                octx.kernel_params[16]);/* vtcm_dst_size */
+                i, octx.kernel_params[0], octx.kernel_params[1], octx.kernel_params[2],
+                octx.kernel_params[3], octx.kernel_params[4], octx.kernel_params[5],
+                octx.kernel_params[6], octx.kernel_params[7], octx.kernel_params[10],
+                octx.kernel_params[11], octx.kernel_params[12], octx.kernel_params[13],
+                octx.kernel_params[16]);
         }
 #endif
 
@@ -2466,7 +2386,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     __asm__ __volatile__("" ::: "memory");
 
     /* VTCM is held for the whole session; release is deferred to
-     * ggml_dsp_close. Matches Qualcomm htp_packet_callback pattern. */
+     * ggml_dsp_close. Matches htp/main.c htp_packet_callback pattern. */
 
 #if HEX_OP_PROF
     /* Per-op profiler: print accumulated cum/count/avg every N batches so
