@@ -148,6 +148,8 @@ struct ggml_backend_hexagon_reg_context;
 static bool                  ggmlhexagon_is_metadata_op(enum ggml_op op);
 static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
 static const char *          ggmlhexagon_get_htparch_desc(size_t htp_arch);
+static size_t                ggmlhexagon_get_system_total_memory_in_bytes(void);
+static int                   ggmlhexagon_get_hvx_arch_ver(int domain, uint32_t * capability);
 static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
 static bool                  ggml_backend_buffer_is_hexagon_repack(const ggml_backend_buffer * b);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
@@ -359,9 +361,8 @@ struct hexagon_appcfg_t {
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int dsp_cache_mode;         // DSP-side entry.c cache optimization bitmask, pushed to DSP at init via
-                                //   execute_batch(0xFFFC) special mode (no IDL change). All four bits
-                                //   are wired into ggml_dsp_execute_batch(); dsp_cache_mode=0 is
-                                //   behaviorally identical to baseline 29c1cf196.
+                                //   execute_batch(0xFFFC) special mode. All four bits
+                                //   are wired into ggml_dsp_execute_batch()
                                 //   bit 0 (0x1): first-touch weight bitmap
                                 //   bit 1 (0x2): skip dcinva for prior dst
                                 //   bit 2 (0x4): bulk dst flush at batch end
@@ -369,16 +370,16 @@ struct hexagon_appcfg_t {
                                 //     dsts still consumed by a later op in the same batch (pure
                                 //     intermediates). Requires bit 2. Mirrored dsts (flags&0x1)
                                 //     and final outputs always flush.
-    int dsp_cache_trace_bit0;   // DSP-side bit 0 (first-touch weight) trace enable. 0=off (production),
+    int dsp_cache_trace_bit0;   // DSP-side bit 0 (first-touch weight) trace enable
+                                //   0=off (production)
                                 //   1=emit one [DSP-CACHE-TRACE-BIT0] log line per bit 0 decision
                                 //   (SKIP or INVAL) with op/src/ptr/len. Pushed to DSP at init via
                                 //   bit 16 of the same execute_batch(0xFFFC) payload as dsp_cache_mode.
-                                //   Used for diagnosing the bit 0 stale-L2-read bug observed on llama3
-                                //   (33% prompt-repeat rate, 2026-07-10). Once root-caused this can
-                                //   be removed.
-    int dsp_cache_trace_bit1;   // DSP-side bit 1 (skip dcinva for prior dst) trace enable. 0=off
-                                //   (production), 1=emit one [DSP-CACHE-TRACE-BIT1] log line per bit 1
-                                //   decision (SKIP if prior_dst_contains_src, INVAL otherwise) with
+                                //   Used for diagnosing the bit 0 stale-L2-read bug.
+    int dsp_cache_trace_bit1;   // DSP-side bit 1 (skip dcinva for prior dst) trace enable
+                                //   0=off (production)
+                                //   1=emit one [DSP-CACHE-TRACE-BIT1] log line per bit 1 decision
+                                //   (SKIP if prior_dst_contains_src, INVAL otherwise) with
                                 //   op/src/ptr/len. Pushed to DSP at init via bit 17 of the same
                                 //   execute_batch(0xFFFC) payload. Used for diagnosing why dsp_cache_mode
                                 //   5/6/7 garble on the new matmul pipeline (81ff7abe5). Pair with
@@ -413,7 +414,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.4"},
+        .version                = {"0.99.5"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -603,6 +604,11 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     // Logging convention in this function (inverted from the usual level names):
     //   VERBOSE -> terminal + adb logcat (key summary for immediate visibility)
     //   ALWAYS  -> adb logcat only (detailed diagnostics for post-analysis)
+    uint32_t dsp_version = 0;
+    ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
+    size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
+    GGMLHEXAGON_LOG_VERBOSE("device info: %s, dsp arch version 0x%x, system mem size %d MiB",
+                             ctx->socinfo.soc_desc, dsp_version, total_mem / SIZE_IN_MB);
     GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d",
                              ctx->device, ctx->name,
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
@@ -898,7 +904,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
-    hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 4);
+    hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
     hexagoncfg_instance.get_intvalue("cdsp", "dump_diag_info", g_hexagon_appcfg.dump_diag_info, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "ndev", g_hexagon_appcfg.ndev, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "ion_sync_mode", g_hexagon_appcfg.ion_sync_mode, 1);
@@ -1460,7 +1466,7 @@ static void ggmlhexagon_set_rpc_latency(remote_handle64 handle, int qos, int lat
             GGMLHEXAGON_LOG_WARN("failed with error 0x%x", hexagon_error);
             goto bail;
         } else {
-            GGMLHEXAGON_LOG_VERBOSE("set rpc qos %d (DSP default latency)", qos);
+            GGMLHEXAGON_LOG_ALWAYS("set rpc qos %d (DSP default latency)", qos);
         }
     } else {
         hexagon_error = AEE_EUNSUPPORTEDAPI;
@@ -1698,13 +1704,10 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     if (ctx == nullptr) {
         return 0;
     }
-    uint32_t dsp_version = 0;
+
     int htp_arch         = 0;
+    uint32_t dsp_version = 0;
     ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
-
-    size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
-
-
     if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73
         || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
         //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
@@ -1712,10 +1715,12 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
         struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_htparch(htp_arch);
         GGML_ASSERT(nullptr != socinfo);
         ctx->socinfo = *socinfo;
-        GGMLHEXAGON_LOG_VERBOSE("device info: %s, %s, dsp arch version 0x%x, system mem size %d MiB",
+        size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
+        GGMLHEXAGON_LOG_ALWAYS("device info: %s, %s, dsp arch version 0x%x, system mem size %d MiB",
                                 socinfo->soc_desc, ggmlhexagon_get_htparch_desc(htp_arch), dsp_version, total_mem / SIZE_IN_MB);
     } else {
-        GGMLHEXAGON_LOG_VERBOSE("device info: unknown");
+        GGMLHEXAGON_LOG_ERROR("device info: unknown");
+        GGML_ASSERT(1 == 0);
     }
 
     uint32_t vtcm_count = 0;
@@ -1741,7 +1746,7 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     }
     GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
     //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
-    GGMLHEXAGON_LOG_VERBOSE("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
+    GGMLHEXAGON_LOG_ALWAYS("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
                             "unsigned pd supported %d, async fastrpc supported %d",
                                 ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
                                 ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
@@ -1880,7 +1885,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     GGMLHEXAGON_LOG_DEBUG("ggmlop domain uri: %s", final_uri);
     hexagon_error = ggml_dsp_open(final_uri, &ctx->ggmlop_handle);
     if (AEE_SUCCESS == hexagon_error) {
-        GGMLHEXAGON_LOG_VERBOSE("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
+        GGMLHEXAGON_LOG_ALWAYS("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
         ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.thread_counts, &ctx->dsp_thread_counts);
         // Mirror DSP-side clamp into the global cfg so subsequent log sites
         // (including the dtor, where ctx may be unavailable) reflect the
@@ -1921,7 +1926,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
                 g_hexagon_appcfg.dsp_cache_trace_bit0 = 0;
                 g_hexagon_appcfg.dsp_cache_trace_bit1 = 0;
             } else {
-                GGMLHEXAGON_LOG_VERBOSE("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
+                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to DSP (payload=0x%x)",
                                      mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
                                      g_hexagon_appcfg.dsp_cache_trace_bit1, payload);
             }
@@ -6551,7 +6556,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
 
             int ndev = g_hexagon_appcfg.ndev;
             ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
-            GGMLHEXAGON_LOG_VERBOSE("registering %d Hexagon device(s), ndev=%d", ndev, g_hexagon_appcfg.ndev);
+            GGMLHEXAGON_LOG_ALWAYS("registering %d Hexagon device(s), ndev=%d", ndev, g_hexagon_appcfg.ndev);
 
             for (int i = 0; i < ndev; i++) {
                 if (i >= GGML_HEXAGON_MAX_DEVICES) {
@@ -6560,7 +6565,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                     break;
                 }
 
-                GGMLHEXAGON_LOG_VERBOSE("register backend device %d (context created lazily)", i);
+                GGMLHEXAGON_LOG_ALWAYS("register backend device %d (context created lazily)", i);
                 // Only register the device struct here. Context (DSP session,
                 // mempool) is created lazily by ggml_backend_hexagon_ensure_context
                 // (called from get_buffer_type or init_backend) and persists across

@@ -940,9 +940,14 @@ function run_llamacli()
 
     prepare_run_on_phone llama-completion
 
-    echo "${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
+    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    echo "adb shell \"cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
                && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
 
 }
@@ -952,13 +957,16 @@ function run_llamabench()
 {
     prepare_run_on_phone llama-bench
 
+    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}\""
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -fa 1 --ubatch-size 1024 -p 200,512,800,1024 -m ${GGUF_MODEL_NAME}"
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}"
 }
 
 
