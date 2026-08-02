@@ -392,7 +392,7 @@ function build_arm64
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
     local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
@@ -421,6 +421,10 @@ function build_arm64
             [ -f "$skel" ] || continue
             /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
         done
+        # libggml-opencl.so is optional (GGML_OPENCL=OFF by default); back up if present
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ]; then
+            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-jz.so
+        fi
     fi
     show_pwd
 
@@ -439,7 +443,7 @@ function build_arm64_debug
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
     local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
@@ -486,6 +490,10 @@ function build_arm64_qcom
             [ -f "$skel" ] || continue
             /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
         done
+        # libggml-opencl.so is optional (GGML_OPENCL=OFF by default); back up if present
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ]; then
+            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-qcom.so
+        fi
     fi
     show_pwd
 
@@ -704,6 +712,10 @@ function update_ggml_libs()
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
         adb push ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${REMOTE_PATH}/
     fi
+    #libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ]; then
+        adb push ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so          ${REMOTE_PATH}/
+    fi
     adb push ${LOCAL_BUILD_DIR}/bin/libggml.so                      ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-common.so              ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so     ${REMOTE_PATH}/
@@ -730,6 +742,12 @@ function update_jz_libs()
     for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
     done
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${ab_test_dir}/libggml-opencl-jz.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
+    else
+        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    fi
     adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
     echo "jz" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
     echo "JZ runtime .so pushed to device."
@@ -754,6 +772,12 @@ function update_qcom_libs()
     for skel in ${ab_test_dir}/libggml-htp-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
     done
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${ab_test_dir}/libggml-opencl-qcom.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
+    else
+        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    fi
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
     echo "qcom" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
     echo "QCOM runtime .so pushed to device."
@@ -874,6 +898,7 @@ function prepare_run_on_phone()
             adb shell rm -f ${REMOTE_PATH}/libggml-hexagon.so
             adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
             adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
+            adb shell rm -f ${REMOTE_PATH}/libggml-opencl.so
             ;;
     esac
 
@@ -1043,6 +1068,12 @@ function run_abtest()
     for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
     done
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${ab_test_dir}/libggml-opencl-jz.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
+    else
+        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    fi
     adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
 
     echo ""
@@ -1068,6 +1099,12 @@ function run_abtest()
     for skel in ${ab_test_dir}/libggml-htp-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
     done
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${ab_test_dir}/libggml-opencl-qcom.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
+    else
+        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    fi
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
 
     echo ""
