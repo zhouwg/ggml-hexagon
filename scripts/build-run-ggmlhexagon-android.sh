@@ -1183,6 +1183,9 @@ function run_ubatchtest()
     trap "rm -f '${tmpf}'" RETURN
 
     # ---------- Phase 1: raw runs (stream to terminal + combined + temp) ----------
+    # grep/awk in command substitutions may return non-zero on no-match;
+    # with set -e + declare -A array assignment this would exit the script early
+    set +e
     for ub in "${ubatch_sizes[@]}"; do
         count=$(( count + 1 ))
         echo "" | tee -a "${combined_log}"
@@ -1225,6 +1228,7 @@ function run_ubatchtest()
         # truncate temp for next iteration (so grep on next ubatch is clean)
         : > "${tmpf}"
     done
+    set -e
 
     # trap will clean up tmpf on function return
     running_params="${save_params}"
