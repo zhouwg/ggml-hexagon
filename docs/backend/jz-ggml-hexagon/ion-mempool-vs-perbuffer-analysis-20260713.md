@@ -1,4 +1,6 @@
-# JZ ggml-hexagon vs Qualcomm ggml-hexagon: Architecture Analysis (2026-07-24)
+# JZ ggml-hexagon vs Qualcomm ggml-hexagon: Architecture Analysis
+
+> Last updated: 2026-08-04 (file name date 20260713 reflects the original creation; see Revision History)
 
 > Author: Kimi-K2.7-Code (original), revised by Kimi-K3, GLM-5.2, Kimi-K3
 
@@ -59,6 +61,8 @@ option(GGML_HEXAGON_JZ "Use JZ's AP implementation" OFF)
 |---|---|---|
 | JZ ggml-hexagon (dsp_cache_mode=5) | 686.46 | 26.91 |
 | Qualcomm ggml-hexagon | 435.14 | 24.91 |
+
+Per-run breakdowns are provided in the automated AB-test tables below (Table 3A/3B), which were measured under different (warm) thermal conditions.
 
 Test conditions: gemma-4-E2B-it-Q4_0.gguf, Snapdragon 8 Elite (v79, OnePlus 13), `/data/local/tmp/llama-completion -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on --jinja -st -m /sdcard/gemma-4-E2B-it-Q4_0.gguf -p "Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"`. Both backends run the same HMX kernels from `kernels/` (JZ) or `htp/` (QCOM); the difference is architectural.
 
@@ -166,7 +170,7 @@ JZ maps the pool once at init (`fastrpc_mmap`, capacity probed up to 4032 MiB on
 ### The three changes, all enabled by the pool
 
 1. **Removed the `ne[1] > 32768` guard** for quantized weights in `ggmlhexagon_supported_mul_mat`, allowing lm-head to offload.
-2. **Q4_K stored as Q4_0 tiled repack** (`repack_q4k_as_q4_0_tiled_to_buf` in [`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp), 32-row strip conversion; inverse transform in `get_tensor` for host reads): the lm-head matvec moves 214 MB instead of 428 MB per token.
+2. **Q4_K stored as Q4_0 tiled repack** (`repack_q4k_as_q4_0_tiled_to_buf` in [`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp), 32-row strip conversion; inverse transform in `get_tensor` for host reads): the resident repacked lm-head is ~214 MB. Note the repack does **not** reduce bandwidth - Q4_K and Q4_0 have the same data size (both 0.5625 B/param), so per-token DRAM traffic is unchanged. Its value is that it turns the Q4_K weight into a tiled Q4_0 layout the DSP can execute directly, which is what makes the offload possible.
 3. **First-touch weight invalidation** (`dsp_cache_mode` bit 0, default mode=5). With lm-head resident, per-token weight traffic grew to ~1.9 GB and re-invalidating it every token cost ~9.2 ms/token of DSP-side dcinva sweeping. Repack weights are written once by the AP at load time and never touched again, so after a first-touch invalidate the DSP skips re-invalidation for the rest of the session, removing the ~9.2 ms entirely. The two-pass defense (DSP-side `weight_inval_unmark()` on dst write plus an AP-side `g_ever_dst_ptrs` set) closes cross-graph stale reads.
 
 Removing DSP-side debug/profiler logging afterwards (`-DNDEBUG` skel build) brought further PP/TG gains.
@@ -185,7 +189,7 @@ Qualcomm's per-batch cache maintenance is uniform and role-blind: the driver's f
 
 3. **Offset-based addressing is simpler and faster than `bi` indirection**: JZ's `dsptensor` carries a direct `void *` pointer into the pool. Qualcomm's `htp_tensor` carries a `bi` (buffer index) that the DSP must dereference through `htp_buf_desc[]` to get the actual base address. On the DSP side, one fewer level of indirection per tensor access.
 
-4. **One FastRPC `invoke` per batch vs. dspqueue multi-write**: JZ packs all descriptors into a single `invoke` call. Qualcomm's `dspqueue_write` may split a batch across multiple writes, each with its own kernel transition. Fewer user-kernel transitions per batch.
+4. **One FastRPC `invoke` per batch vs. dspqueue async enqueue**: JZ packs all descriptors into a single `invoke` call. Qualcomm uses `dspqueue_write` per batch (both split work into batches by descriptor capacity via `fit_op`; the real difference is JZ's synchronous `invoke` vs. Qualcomm's async `dspqueue` with up to 16 batches in flight). Fewer user-kernel transitions per batch.
 
 5. **Pool lifecycle is trivial**: one alloc, one free. Qualcomm must track per-buffer lifecycles, handle partial allocation failures, and coordinate buffer teardown with DSP-side unmapping. JZ's pool is inherently simpler and less error-prone.
 
@@ -259,17 +263,36 @@ This is a hardware-level effect that neither JZ nor Qualcomm can fix in user spa
 2. Use a hardware page coloring scheme to stabilize cache set mapping (requires Hexagon DSP firmware modification)
 3. Run inside a static VM with fixed physical memory layout (not applicable to Android)
 
-After the optimization campaign (lm-head offload + dsp_cache_mode=5 + DSP log removal), three software jitter sources were removed: (a) periodic DSP-side FARF profiler dumps, (b) the CPU-resident lm-head segment (the CPU is the least deterministic execution unit), and (c) redundant per-token weight invalidation. The observed PP distribution tightened substantially: current practical range is ~680-690 tok/s (JZ) and ~390-460 tok/s (QCOM) on gemma-4-E2B-it-Q4_0.gguf. The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance, but it no longer dominates.
+After the optimization campaign (lm-head offload + dsp_cache_mode=5 + DSP log removal), three software jitter sources were removed: (a) periodic DSP-side FARF profiler dumps, (b) the CPU-resident lm-head segment (the CPU is the least deterministic execution unit), and (c) redundant per-token weight invalidation. The observed PP distribution tightened substantially: a separate measurement snapshot showed a practical range of ~680-690 tok/s (JZ) and ~390-460 tok/s (QCOM) on gemma-4-E2B-it-Q4_0.gguf. Note these ranges come from a different measurement point than the tables above (which were taken under different thermal conditions, e.g. Table 3A JZ ~704 / QCOM ~549, Table 3B JZ ~661 / QCOM ~430); they are illustrative of the tightened spread, not directly comparable to a single table. The L2 physical-alias hypothesis remains the most plausible explanation for the residual run-to-run variance, but it no longer dominates.
 
 ## 7. Summary
 
-- **JZ exceeds Qualcomm on both PP and TG** (5-run mean, 2026-07-22): PP 686.46 / TG 26.91 (JZ) vs PP 435.14 / TG 24.91 (QCOM), gemma-4-E2B-it-Q4_0.gguf, same Snapdragon 8 Elite device. Both run the same HMX kernels; the difference is architectural.
-- **The single ION mempool's unique advantage is proven in practice**: a ~214 MB repacked lm-head stays resident for the whole session at zero recurring map/fd/lifecycle cost - something the per-buffer ION design cannot express economically. Combined with the Q4_K -> Q4_0 repack (halves lm-head bandwidth to 214 MB/token) and first-touch weight invalidation (~9.2 ms/token saved), TG is 26.91 tok/s.
+- **JZ exceeds Qualcomm on both PP and TG on GQA models** (5-run mean, 2026-07-22): PP 686.46 / TG 26.91 (JZ) vs PP 435.14 / TG 24.91 (QCOM), gemma-4-E2B-it-Q4_0.gguf, same Snapdragon 8 Elite device. Both run the same HMX kernels; the difference is architectural. This advantage is model-type dependent: on MHA legacy models (e.g. qwen1.5) and shallow-GQA PP, Qualcomm wins (see section 7.1 and the companion doc).
+- **The single ION mempool's unique advantage is proven in practice**: a ~214 MB repacked lm-head stays resident for the whole session at zero recurring map/fd/lifecycle cost - something the per-buffer ION design cannot express economically. Combined with the Q4_K -> Q4_0 repack (same data size, enables the DSP tiled matmul / offload) and first-touch weight invalidation (~9.2 ms/token saved), TG is 26.91 tok/s.
 - **User-space cache management is an asset, not a liability**: role-aware invalidation (weight vs activation, bit 0 first-touch) is a policy Qualcomm's uniform per-batch cache maintenance (driver-handled descriptor packet + DSP-side full D-cache flush+invalidate) cannot express. The two-pass defense (DSP-side unmark on dst write + AP-side ever-dst set) resolved the historical bit-0 garble risk; mode=5 passes correctness on gemma4, qwen3, and qwen3-mtp.
 - **PP jitter is a hardware-level L2 cache aliasing effect** that affects both implementations comparably and is not fixable in user space. Three software jitter sources were removed during the optimization campaign, tightening the PP distribution substantially.
 - **Control-plane primitives differ** (`dspqueue` vs. native FastRPC `invoke`), but the data plane and the descriptor-dispatch flow are fundamentally the same. The measured performance difference comes from data-plane policy (weight residency + role-aware cache management), not from the control plane.
 
+### 7.1 JZ and Qualcomm are complementary, not competitive
+
+The two backends should be treated as complementary, not as competitors: each has its own strength areas, and both should be maintained. The direction of the PP/TG gap depends on model type, not on which backend is "better" in general.
+
+- **JZ wins** on GQA models: TG on gemma4 (1.10x) and qwen3 (1.91x), and both PP+TG on deep GQA stacks (gemma4 1.45x PP / 1.10x TG).
+- **Qualcomm wins** on MHA legacy models (qwen1.5: 1.41x PP / 1.30x TG) and on PP for shallow GQA (qwen3: 1.08x). Qualcomm also has a faster AP-side sampling path (~2.5x).
+
+Practical recommendation: keep both backends and document a model-type-to-backend mapping for users - GQA models to JZ, MHA / shallow-PP models to Qualcomm. Choosing the backend per model type yields the best result on any device, which is the point of coexistence.
+
 ## Revision History
+
+### 2026-08-04: Documentation accuracy fixes
+
+Author: DeepSeek-V4-Flash
+
+- Corrected the Q4_K -> Q4_0 repack bandwidth claim: Q4_K and Q4_0 have the same data size (0.5625 B/param), so the repack does not halve per-token bandwidth; its value is enabling the DSP tiled matmul (offload).
+- Clarified the ~9.2 ms/token first-touch saving as a fixed whole-graph total (dominated by the resident lm-head), not a per-layer quantity.
+- Qualified the summary claim to "on GQA models" and added section 7.1 "JZ and Qualcomm are complementary, not competitive" with the model-type-to-backend mapping.
+- Annotated the section 6 PP-jitter range as a separate measurement snapshot not directly comparable to the tables.
+- Fixed the "split batch" wording in section 4 and the date/format inconsistencies in the tables.
 
 ### 2026-07-26: JZ forks independent kernels/ directory
 

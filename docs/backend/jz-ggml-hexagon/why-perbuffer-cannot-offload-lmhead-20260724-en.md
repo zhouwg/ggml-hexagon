@@ -1,10 +1,12 @@
-# Why Qualcomm ggml-hexagon Cannot Offload lm-head to the DSP (2026-07-24)
+# Why Qualcomm ggml-hexagon Cannot Economically Offload lm-head to the DSP (2026-07-24)
+
+> "cannot" here means "currently not economic / not implemented" in the per-buffer design, not an absolute architectural impossibility. Qualcomm could in principle add support by introducing a resident-shared-buffer class (see section 10); the point is that today it does not, and doing so would move toward the single-mempool design.
 
 > Chinese version: [why-perbuffer-cannot-offload-lmhead-20260724-zh.md](why-perbuffer-cannot-offload-lmhead-20260724-zh.md) (authors: MiniMax-M3, Kimi-K3, GLM-5.2)
 
 ## 1. Background: lm-head is the biggest TG bottleneck
 
-TG (token generation) is DRAM-bandwidth-bound in both implementations: every token re-reads all weights from DRAM. The lm-head matrix (262144 x 1536, Q4_K), which maps hidden states to vocabulary space, takes about 30 ms/token on the CPU and is the single largest TG cost.
+TG (token generation) is DRAM-bandwidth-bound in both implementations: every token re-reads all weights from DRAM. The lm-head matrix (for the gemma-4-E2B used in the benchmarks below: 262144 x 1536, Q4_K), which maps hidden states to vocabulary space, takes about 30 ms/token on the CPU and is the single largest TG cost. The exact lm-head shape and type vary by model (e.g. qwen3.5-2B uses Q6_K, see section 9.3); the gemma4 numbers are used as the running example.
 
 JZ ggml-hexagon and Qualcomm ggml-hexagon both previously had a `ne[1] > 32768` guard that kept large quantized weight matrices off the DSP, so lm-head ran on the CPU in both. JZ ggml-hexagon removed the guard and, together with Q4_K -> Q4_0 repack and the first-touch weight invalidation mechanism, offloaded lm-head to the DSP; Qualcomm ggml-hexagon still keeps the guard. This is the direct reason JZ ggml-hexagon's TG (26.91 tok/s) overtakes Qualcomm ggml-hexagon's TG (24.91 tok/s) (multi-run mean, see [ion-mempool-vs-perbuffer-analysis-20260713.md](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md)).
 
@@ -96,7 +98,7 @@ Details:
 
 The global and per-tensor mechanisms govern **DSP-side** cache behavior (role-aware first-touch); the per-batch mechanism governs the **AP-side** cache coherency path (whole-pool ioctl vs per-tensor scans). The three mechanisms differ in scope, are orthogonal, and can be configured independently.
 
-## 5. The 32768 guard is direct evidence of the design tradeoff
+## 5. The 32768 guard is evidence of the design tradeoff
 
 Qualcomm ggml-hexagon keeps an explicit lm-head rejection in [`ggml_hexagon_supported_mul_mat()`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp):
 
@@ -107,7 +109,7 @@ if (src0->ne[1] > 32768) {
 }
 ```
 
-The comment says "refuse the lm-head" outright: this is not a performance optimization, but an admission that the per-buffer design cannot host a 214MB resident weight at an acceptable cost.
+The comment says "refuse the lm-head" outright. This is best read as an indication that the per-buffer design does not currently host a 214MB resident weight at an acceptable cost; note this is an inference from the code and the comment, not a stated design intent. The "for now" wording suggests a known limitation rather than a deliberate permanent choice.
 
 - 32K rows is the "practical ceiling" of the per-buffer API (a single buffer of tens of MB, where fd/mmap cost is still acceptable)
 - the 214MB lm-head far exceeds it; forcing it onto the DSP would be dragged down by per-buffer lifecycle cost
@@ -146,9 +148,11 @@ Multi-run means on the same Snapdragon 8 Elite phone (see [ion-mempool-vs-perbuf
 The PP/TG gap between JZ and Qualcomm is not fixed; it scales with model layer count:
 
 ```
-JZ net advantage = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
-                    └── scales linearly with layers ──┘    └── fixed, does not scale ──┘
+JZ net advantage = per_layer_dsp_saving x n_layers + fixed_lmhead_saving - dspqueue_overlap_advantage
+                    └── scales linearly with layers ──┘   └─ fixed ─┘   └── fixed, does not scale ──┘
 ```
+
+The `fixed_lmhead_saving` term is the session-resident lm-head offload + its ~9.2 ms/token first-touch saving (see section 9.2 for the per-layer vs fixed distinction).
 
 ### 9.1 Two limits on Qualcomm's dspqueue overlap advantage
 
@@ -158,7 +162,15 @@ JZ net advantage = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
 
 ### 9.2 JZ advantage scales with layer count
 
-JZ's per-layer DSP advantage (first-touch cache saving ~9.2ms/token + mempool zero overhead + HMX pipeline) accumulates linearly with layer count. Qualcomm's dspqueue overlap is a fixed advantage that does not scale with layers.
+JZ's per-layer DSP advantage (role-aware first-touch cache saving + mempool zero overhead + HMX pipeline) accumulates linearly with layer count. Qualcomm's dspqueue overlap is a fixed advantage that does not scale with layers.
+
+Note: the ~9.2 ms/token first-touch saving is NOT a per-layer quantity - it is a whole-graph per-token total dominated by the single resident lm-head (per-token weight traffic ~1.9 GB with lm-head resident). It is a fixed saving, independent of layer count, and should not be added into the per-layer term. The per-layer saving (each layer's weights written once, skipped thereafter) is real but much smaller. So the correct breakdown is:
+
+```
+JZ net advantage = per_layer_dsp_saving x n_layers   (per-layer first-touch, grows with layers)
+                 + fixed lm-head saving              (the ~9.2 ms/token, resident lm-head)
+                 - dspqueue_overlap_advantage        (fixed, does not scale)
+```
 
 When `n_layers x per_layer_saving > dspqueue_overlap`, JZ also wins PP. The crossover depends on model structure.
 
@@ -195,3 +207,14 @@ If Qualcomm ggml-hexagon improves in the future:
 - allow buffers to exist independently of the dspqueue lifetime
 
 But this is essentially redesigning per-buffer into "a few buffers + a pool" - in other words, the single ION mempool approach.
+
+## Revision History
+
+### 2026-08-04: Documentation accuracy fixes
+
+Author: DeepSeek-V4-Flash
+
+- Clarified the title "cannot" as "cannot economically / not implemented", not an absolute architectural impossibility (see the note under the title).
+- Clarified the ~9.2 ms/token first-touch saving as a fixed whole-graph total dominated by the resident lm-head, not a per-layer quantity; updated the section 9 formula and section 9.2 breakdown accordingly.
+- Marked the gemma4 lm-head numbers (262144 x 1536, Q4_K) as a running example, not a universal.
+- Softened the section 5 interpretation of the 32768 guard from "an admission" to "an inference from the code and comment".

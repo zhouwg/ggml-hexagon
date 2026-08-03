@@ -1,10 +1,12 @@
-# 为什么高通 ggml-hexagon 无法将 lm-head 卸载到 DSP(2026-07-24)
+# 为什么高通 ggml-hexagon 无法经济地将 lm-head 卸载到 DSP(2026-07-24)
+
+> 这里的"无法"指当前 per-buffer 设计下"不经济 / 尚未实现",并非绝对架构上不可能。高通理论上可通过引入"常驻共享 buffer"类(见第 10 节)来支持;问题在于今天尚未实现,而一旦实现就相当于向 single mempool 设计收敛。
 
 > 英文版:[why-perbuffer-cannot-offload-lmhead-20260724-en.md](why-perbuffer-cannot-offload-lmhead-20260724-en.md)(作者:MiniMax-M3, Kimi-K3, GLM-5.2)
 
 ## 1. 背景:lm-head 是 TG 的最大瓶颈
 
-TG(token 生成)在两个实现中都是内存带宽受限的:每个 token 都要从 DRAM 重读全部权重。lm-head 矩阵(262144 x 1536,Q4\_K)负责把隐藏状态映射到词表空间,在 CPU 上执行约需 30 ms/token,是单一最大的 TG 开销。
+TG(token 生成)在两个实现中都是内存带宽受限的:每个 token 都要从 DRAM 重读全部权重。lm-head 矩阵(以本文基准所用 gemma-4-E2B 为例:262144 x 1536,Q4\_K)负责把隐藏状态映射到词表空间,在 CPU 上执行约需 30 ms/token,是单一最大的 TG 开销。lm-head 的具体形状与类型随模型而异(如 qwen3.5-2B 为 Q6\_K,见第 9.3 节);此处以 gemma4 数字作为贯穿示例。
 
 JZ ggml-hexagon与高通ggml-hexagon此前都设有 `ne[1] > 32768` 的限制,把量化大权重矩阵挡在 DSP 之外,因此 lm-head 在两个实现中都只能跑在 CPU 上。JZ ggml-hexagon移除了这个限制,配合 Q4\_K -> Q4\_0 repack 与 first-touch 权重失效机制,把 lm-head 卸载到了 DSP;高通ggml-hexagon至今仍保留该限制。这正是 JZ ggml-hexagon TG(26.91 tok/s)反超高通ggml-hexagon TG(24.91 tok/s)的直接原因(多轮均值,见 [ion-mempool-vs-perbuffer-analysis-20260713.md](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md))。
 
@@ -96,7 +98,7 @@ JZ ggml-hexagon 的 user-space 缓存优化分三个互相正交的机制,按作
 
 全局机制与 per-tensor 机制关注**DSP 端** cache 行为(role-aware first-touch),per-batch 机制关注**AP 端** cache coherency 路径选择(整池 ioctl vs per-tensor 扫描)。三套机制作用域不同,正交,可独立配置。
 
-## 5. 32768 guard 是设计权衡的直接证据
+## 5. 32768 guard 是设计权衡的证据
 
 高通ggml-hexagon在 [`ggml_hexagon_supported_mul_mat()`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp) 中保留了明确的 lm-head 拒绝逻辑:
 
@@ -107,7 +109,7 @@ if (src0->ne[1] > 32768) {
 }
 ```
 
-注释直接写明 "refuse the lm-head":这不是性能优化,而是承认 per-buffer 设计无法以可接受的成本容纳一个 214MB 常驻权重。
+注释直接写明 "refuse the lm-head"。这更应理解为:per-buffer 设计目前还不能以可接受的成本容纳一个 214MB 常驻权重。需注意这是从代码与注释得出的推断,并非明确的设计意图声明;"for now" 的措辞表明这是已知限制,而非刻意的永久取舍。
 
 - 32K 行是 per-buffer API 的"实用上限"(单 buffer 几十 MB 量级,fd/mmap 成本尚可接受)
 - 214MB lm-head 远超此限;若强行卸载到 DSP,会被 per-buffer 生命周期成本拖垮
@@ -146,9 +148,11 @@ JZ ggml-hexagon 的 single mempool 不是"激进设计":它让 lm-head 卸载到
 JZ 与高通的 PP/TG 差距并非固定值,而是随模型层数线性变化:
 
 ```
-JZ 净优势 = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
-           └── 随层数线性增长 ──┘    └── 固定优势,不随层数增长 ──┘
+JZ 净优势 = per_layer_dsp_saving x n_layers + fixed_lmhead_saving - dspqueue_overlap_advantage
+           └── 随层数线性增长 ──┘   └─ 固定 ─┘   └── 固定优势,不随层数增长 ──┘
 ```
+
+其中 `fixed_lmhead_saving` 指常驻 lm-head 卸载 + 其约 9.2 ms/token 的 first-touch 节省(per-layer 与 fixed 的区别见第 9.2 节)。
 
 ### 9.1 高通 dspqueue overlap 优势的两个限制
 
@@ -158,7 +162,15 @@ JZ 净优势 = per_layer_dsp_saving x n_layers - dspqueue_overlap_advantage
 
 ### 9.2 JZ 优势随层数放大
 
-JZ 的 per-layer DSP 优势(first-touch cache 节省 ~9.2ms/token + mempool 零开销 + HMX pipeline)随层数线性累积。高通的 dspqueue overlap 是固定优势,不随层数放大。
+JZ 的 per-layer DSP 优势(role-aware first-touch cache 节省 + mempool 零开销 + HMX pipeline)随层数线性累积。高通的 dspqueue overlap 是固定优势,不随层数放大。
+
+注意:约 9.2 ms/token 的 first-touch 节省**不是 per-layer 量**——它是含常驻 lm-head 的整图每 token 总量(lm-head 常驻时每 token 权重流量约 1.9GB),由单个常驻 lm-head 主导,是固定节省,与层数无关,不应计入 per-layer 项。per-layer 节省(每层权重只写一次、随后跳过)真实存在但要小得多。正确拆分如下:
+
+```
+JZ 净优势 = per_layer_dsp_saving x n_layers   (per-layer first-touch,随层数增长)
+         + fixed lm-head saving               (约 9.2 ms/token,常驻 lm-head)
+         - dspqueue_overlap_advantage         (固定,不随层数增长)
+```
 
 当 `n_layers x per_layer_saving > dspqueue_overlap` 时,JZ 在 PP 上也反超。反超阈值取决于模型结构。
 
@@ -195,3 +207,14 @@ JZ 的架构优势随模型层数增长。层数越多,JZ 的 per-layer DSP 优�
 - 允许 buffer 独立于 dspqueue 生命周期存在
 
 但这本质上是把 per-buffer 重新设计为"少量 buffer + 池",也就是 single ION mempool 路线。
+
+## 修订历史
+
+### 2026-08-04: 文档准确性修正
+
+作者:DeepSeek-V4-Flash
+
+- 澄清标题"无法"为"当前不经济 / 尚未实现",并非绝对架构上不可能(见标题下注释)。
+- 澄清约 9.2 ms/token 的 first-touch 节省是整图每 token 固定总量(由常驻 lm-head 主导),而非 per-layer 量;据此更新第 9 节公式与第 9.2 节拆分。
+- 将 gemma4 lm-head 数字(262144 x 1536,Q4\_K)标注为贯穿示例,而非通用值。
+- 将第 5 节对 32768 guard 的解读从"承认"弱化为"从代码与注释得出的推断"。
