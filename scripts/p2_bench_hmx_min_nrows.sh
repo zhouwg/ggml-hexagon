@@ -68,7 +68,7 @@ echo "=========================================="
 
 # ---- adb check ----
 adb get-state >/dev/null 2>&1 || { echo "ERROR: no adb device"; exit 1; }
-adb shell "ls /sdcard/gemma-4-E2B-it-Q4_0.gguf /sdcard/Qwen3.5-2B-Q4_0.gguf /sdcard/qwen1_5-1_8b-chat-q4_0.gguf /sdcard/llama-3.2-1B-Q4_0.gguf" >/dev/null \
+adb shell "ls /sdcard/gemma-4-E2B-it-Q4_0.gguf /sdcard/Qwen3.5-2B-Q4_0.gguf /sdcard/qwen1_5-1_8b-chat-q4_0.gguf /sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" >/dev/null \
     || { echo "ERROR: missing models on phone"; exit 1; }
 
 # ---- 1. edit matmul-ops.h ----

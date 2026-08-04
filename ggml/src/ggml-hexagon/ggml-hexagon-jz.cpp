@@ -132,7 +132,7 @@
 
 #define DMA_BUF_IOCTL_SYNC_IOCTL                        0x40086200u
 
-#if !defined (_WINDOWS)
+#if !defined (_WIN32)
 #pragma weak remote_system_request
 #pragma weak remote_session_control
 #pragma weak remote_handle_control
@@ -229,6 +229,7 @@ struct ggml_backend_hexagon_context {
     void * rpc_mempool;
     void * rpc_mempool_dsp_base;                // DSP-side VA from fastrpc_mmap() (NOT from FastRPC pointer translation)
     bool   weights_dirty;                       // set by set_tensor/memset_tensor, cleared by Phase 9
+    bool   dsp_need_weight_inval_reset;         // set by free_buffer on model unload, sent to DSP via 0xFFFC before next batch
     std::vector<ion_pool_region> ion_regions;   // region tracking for mempool free-space management
 
     // FastRPC call statistics
@@ -352,6 +353,17 @@ struct ggml_backend_hexagon_context {
     uint64_t cgraph_cache_misses = 0;
 
     static constexpr size_t CGRAPH_CACHE_MAX = 1024;  // bound distinct cached graphs
+
+    // scratch space for Phase 9/11 cache ranges, reused to avoid per-token heap allocation in hot-path cache maintenance
+    std::vector<std::pair<uint32_t, uint32_t>> scratch_cache_ranges;
+
+    // Phase 6: track mempool offsets for repacked quantized weights (replaces
+    // function-static g_tiled_ion_offsets / s_warned_non_repack that leaked across model reloads)
+    std::unordered_map<const void *, uint32_t> tiled_ion_offsets;
+    std::unordered_set<const void *> warned_non_repack;
+
+    // QKV fusion: one-shot warning state moved from function-static to ctx member
+    bool warned_qkv_name;
 
     ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev);
     ~ggml_backend_hexagon_context();
@@ -953,18 +965,36 @@ static void ggmlhexagon_load_cfg() {
     initialized = true;
 }
 
-static bool ggmlhexagon_check_valid_appcfg() {
-    if (g_hexagon_appcfg.thread_counts > 6) {
+static void ggmlhexagon_check_valid_appcfg() {
+    if (g_hexagon_appcfg.thread_counts < 1 || g_hexagon_appcfg.thread_counts > 6) {
         GGMLHEXAGON_LOG_WARN("invalid thread_counts %d, reset to 6", g_hexagon_appcfg.thread_counts);
         g_hexagon_appcfg.thread_counts = 6;
     }
 
-    if (g_hexagon_appcfg.dump_diag_info > 1) {
+    if (g_hexagon_appcfg.dump_diag_info < 0 || g_hexagon_appcfg.dump_diag_info > 1) {
         GGMLHEXAGON_LOG_WARN("invalid dump_diag_info %d, reset to 0", g_hexagon_appcfg.dump_diag_info);
         g_hexagon_appcfg.dump_diag_info = 0;
     }
 
-    return true;
+    if (g_hexagon_appcfg.dsp_cache_mode < 0 || g_hexagon_appcfg.dsp_cache_mode > 15) {
+        GGMLHEXAGON_LOG_WARN("invalid dsp_cache_mode %d, reset to 5", g_hexagon_appcfg.dsp_cache_mode);
+        g_hexagon_appcfg.dsp_cache_mode = 5;
+    }
+
+    if (g_hexagon_appcfg.ion_sync_mode < 0 || g_hexagon_appcfg.ion_sync_mode > 2) {
+        GGMLHEXAGON_LOG_WARN("invalid ion_sync_mode %d, reset to 1", g_hexagon_appcfg.ion_sync_mode);
+        g_hexagon_appcfg.ion_sync_mode = 1;
+    }
+
+    if (g_hexagon_appcfg.rpc_mmap_mode < 0 || g_hexagon_appcfg.rpc_mmap_mode > 1) {
+        GGMLHEXAGON_LOG_WARN("invalid rpc_mmap_mode %d, reset to 0", g_hexagon_appcfg.rpc_mmap_mode);
+        g_hexagon_appcfg.rpc_mmap_mode = 0;
+    }
+
+    if (g_hexagon_appcfg.fa_select < 0 || g_hexagon_appcfg.fa_select > 2) {
+        GGMLHEXAGON_LOG_WARN("invalid fa_select %d, reset to 2", g_hexagon_appcfg.fa_select);
+        g_hexagon_appcfg.fa_select = 2;
+    }
 }
 
 // Check if a ggml_type is allowed by the enabled_types config filter
@@ -1052,8 +1082,8 @@ static int ion_sync_for_direction(int fd, int direction) {
         int r = ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
         if (r == 0) {
             s.flags = DMA_BUF_SYNC_END | rw;
-            ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
-            return 0;
+            r = ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
+            if (r == 0) return 0;
         }
     }
     {
@@ -1596,11 +1626,12 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     uint8_t * rpc_buffer    = nullptr;
     std::vector<int>        probe_slots;
 
+    if (nullptr == ctx)
+        return 1;
+
     int htp_arch = 0;
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
     if (0 == htp_arch)
-        return 1;
-    if (nullptr == ctx)
         return 2;
 
     /* Probe mempool capacity, find a large contiguous block near the 4 GiB boundary on devices. */
@@ -1628,12 +1659,15 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     ctx->rpc_mempool_capacity = candidate_size * SIZE_IN_MB;
     GGMLHEXAGON_LOG_ALWAYS("rpc memory capacity %ld(%d MiB) for device %d",
                           ctx->rpc_mempool_capacity, ctx->rpc_mempool_capacity / SIZE_IN_MB, ctx->device);
-    GGML_ASSERT(ctx->rpc_mempool_capacity > (8 * SIZE_IN_MB));
+    if (ctx->rpc_mempool_capacity <= (8 * SIZE_IN_MB)) {
+        GGMLHEXAGON_LOG_ERROR("rpc mempool probe failed: no contiguous block > 8MiB found");
+        return 3;
+    }
     ctx->rpc_mempool_len = ctx->rpc_mempool_capacity - (8 * SIZE_IN_MB);
     ctx->rpc_mempool = rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, ctx->rpc_mempool_len);
     if (nullptr == ctx->rpc_mempool) {
         GGMLHEXAGON_LOG_ERROR("alloc rpc memorypool %ld(%d MiB) failed", ctx->rpc_mempool_len, ctx->rpc_mempool_capacity / SIZE_IN_MB);
-        return 3;
+        return 4;
     } else {
         GGMLHEXAGON_LOG_DEBUG("alloc rpc memorypool %p successfully %ld(%d MiB)",
                               ctx->rpc_mempool, ctx->rpc_mempool_len,
@@ -1654,12 +1688,14 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
                                  ctx->rpc_mempool, 0, ctx->rpc_mempool_len,
                                  mmap_flags);
     if (mmap_err != 0) {
-        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(%s) returned %d (fd=%d), continuing...",
+        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(%s) returned %d (fd=%d), aborting backend init",
                              mmap_mode_str, mmap_err, ctx->rpc_mempool_handle);
-    } else {
-        GGMLHEXAGON_LOG_INFO("fastrpc_mmap(%s) OK: fd=%d, size=%dMB",
-                             mmap_mode_str, ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
+        rpcmem_free(ctx->rpc_mempool);
+        ctx->rpc_mempool = nullptr;
+        return 5;
     }
+    GGMLHEXAGON_LOG_INFO("fastrpc_mmap(%s) OK: fd=%d, size=%dMB",
+                         mmap_mode_str, ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
 
     // Register mempool on DSP side via pure-scalar IDL call.
     // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
@@ -1673,11 +1709,14 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
     int64_t dt_reg = ggml_time_us() - t0_reg;
     if (reg_err != AEE_SUCCESS) {
-        GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x", reg_err);
-    } else {
-        GGMLHEXAGON_LOG_ALWAYS("registered mempool base via scalar call: fd=%d, size=%dMB, time=%lld us",
-                             ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB, (long long)dt_reg);
+        GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x, aborting backend init", reg_err);
+        fastrpc_munmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, ctx->rpc_mempool_len);
+        rpcmem_free(ctx->rpc_mempool);
+        ctx->rpc_mempool = nullptr;
+        return 6;
     }
+    GGMLHEXAGON_LOG_ALWAYS("registered mempool base via scalar call: fd=%d, size=%dMB, time=%lld us",
+                         ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB, (long long)dt_reg);
     GGMLHEXAGON_LOG_ALWAYS("mempool layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);
     // Prime the RPC overhead profiler with a few no-op warmup calls to get
     // a meaningful min/max/avg distribution without polluting the pool.
@@ -1691,6 +1730,7 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
 static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
     if (ctx->rpc_mempool) {
         GGMLHEXAGON_LOG_DEBUG("free rpc mempool %p", ctx->rpc_mempool);
+        fastrpc_munmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, ctx->rpc_mempool_len);
         rpcmem_free(ctx->rpc_mempool);
         ctx->rpc_mempool            = nullptr;
         ctx->rpc_mempool_len        = 0;
@@ -1755,15 +1795,18 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
     GGMLHEXAGON_LOG_ALWAYS("enter %s", __FUNCTION__);
     int hexagon_error  = AEE_SUCCESS;
-    GGML_ASSERT(0 != ctx->ggmlop_handle);
-    hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
-    if (AEE_SUCCESS != hexagon_error) {
-        GGMLHEXAGON_LOG_ERROR("error 0x%x: failed to close ggmlop dsp handle", hexagon_error);
+    if (ctx->ggmlop_handle != 0) {
+        hexagon_error = ggml_dsp_close(ctx->ggmlop_handle);
+        if (AEE_SUCCESS != hexagon_error) {
+            GGMLHEXAGON_LOG_ERROR("error 0x%x: failed to close ggmlop dsp handle", hexagon_error);
+        }
+        ctx->ggmlop_handle = 0;
     }
-    ctx->ggmlop_handle = 0;
     ggmlhexagon_deinit_rpcmempool(ctx);
     //probe before domain_id is invalidated so AP-side domain queries still work
-    ggmlhexagon_probe_dspinfo(ctx);
+    if (ctx->domain_id >= 0) {
+        ggmlhexagon_probe_dspinfo(ctx);
+    }
     ggmlhexagon_dump_perf_stats(ctx);
     ctx->domain_id             = -1;
     GGMLHEXAGON_LOG_ALWAYS("leave %s", __FUNCTION__);
@@ -2332,6 +2375,10 @@ static bool is_qkv_mergeable(const ggml_backend_hexagon_context * ctx, const ggm
         return false;
     }
     if (n_q->src[0]->ne[0] != n_k->src[0]->ne[0]) {
+        return false;
+    }
+    // Verify all three outputs share the same sequence/batch dimension (ne[1])
+    if (n_q->ne[1] != n_k->ne[1] || n_q->ne[1] != n_v->ne[1]) {
         return false;
     }
     return true;
@@ -2958,6 +3005,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       rpc_mempool(nullptr),
       rpc_mempool_dsp_base(nullptr),
       weights_dirty(false),
+      dsp_need_weight_inval_reset(false),
+      warned_qkv_name(false),
       rpc_batch_call_count(0),
       cumulative_graph_us(0),
       last_graph_end_us(0),
@@ -3043,6 +3092,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
     int result = ggmlhexagon_init_dsp(this);
     if (0 != result) {
         GGMLHEXAGON_LOG_ERROR("init hexagon dsp failure for device %d", dev_id);
+        throw std::runtime_error("ggml-hexagon: failed to init DSP session");
     }
 }
 
@@ -3630,15 +3680,40 @@ struct ggml_backend_hexagon_buffer_context {
             if (is_ion_buffer) {
                 if (backend_ctx && backend_ctx->rpc_mempool) {
                     {
-                        // Mark the mempool region as free so it can be reused.
+                        // Mark the mempool region as free so it can be reused
                         const char * buf_ptr = (const char *)buffer;
                         const char * pool_base = (const char *)backend_ctx->rpc_mempool;
                         if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
                             size_t buf_offset = (size_t)(buf_ptr - pool_base);
-                            for (auto & r : backend_ctx->ion_regions) {
+                            for (size_t ri = 0; ri < backend_ctx->ion_regions.size(); ri++) {
+                                auto & r = backend_ctx->ion_regions[ri];
                                 if (r.in_use && r.offset == buf_offset) {
                                     r.in_use = false;
-                                    GGMLHEXAGON_LOG_WARN("[FREE] device=%d region offset=%zu size=%zu", backend_ctx->device, r.offset, r.size);
+                                    GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d region offset=%zu size=%zu",
+                                                          backend_ctx->device, r.offset, r.size);
+                                    // Coalesce with adjacent free regions to reduce external fragmentation
+                                    // 1) Merge with next region if free and contiguous
+                                    if (ri + 1 < backend_ctx->ion_regions.size()) {
+                                        auto & next = backend_ctx->ion_regions[ri + 1];
+                                        if (!next.in_use && r.offset + r.size == next.offset) {
+                                            GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-next: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
+                                                                  backend_ctx->device, r.offset, r.size, next.offset, next.size, r.size + next.size);
+                                            r.size += next.size;
+                                            backend_ctx->ion_regions.erase(
+                                                backend_ctx->ion_regions.begin() + ri + 1);
+                                        }
+                                    }
+                                    // 2) Merge with previous region if free and contiguous
+                                    if (ri > 0) {
+                                        auto & prev = backend_ctx->ion_regions[ri - 1];
+                                        if (!prev.in_use && prev.offset + prev.size == r.offset) {
+                                            GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-prev: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
+                                                                  backend_ctx->device, prev.offset, prev.size, r.offset, r.size, prev.size + r.size);
+                                            prev.size += r.size;
+                                            backend_ctx->ion_regions.erase(
+                                                backend_ctx->ion_regions.begin() + ri);
+                                        }
+                                    }
                                     break;
                                 }
                             }
@@ -3646,7 +3721,11 @@ struct ggml_backend_hexagon_buffer_context {
                     }
                 }
             } else {
-                ggml_aligned_free(buffer, 0);
+#if defined(_WIN32)
+                _aligned_free(buffer);
+#else
+                free(buffer);
+#endif
             }
         }
     }
@@ -3667,6 +3746,11 @@ static void ggml_backend_hexagon_buffer_free_buffer(ggml_backend_buffer_t buffer
         bctx->cgraph_cache.clear();
         bctx->mm_params_cache.clear();
         bctx->ever_dst_ptrs.clear();
+        bctx->scratch_cache_ranges.clear();
+        bctx->tiled_ion_offsets.clear();
+        bctx->warned_non_repack.clear();
+        bctx->warned_qkv_name = false;
+        bctx->dsp_need_weight_inval_reset = true;
     }
     delete ctx;
 }
@@ -3681,182 +3765,6 @@ static enum ggml_status ggml_backend_hexagon_buffer_init_tensor(ggml_backend_buf
     GGML_UNUSED(tensor);
     GGML_UNUSED(ctx);
     return GGML_STATUS_SUCCESS;
-}
-
-static void repack_q4_0_q4x4x2(ggml_tensor * t, const void * data, size_t size, void * dst_buf = nullptr) {
-    const int QK_Q4_0x4x2 = 256;
-
-    int64_t nrows = ggml_nrows(t);
-
-    size_t row_size    = ggml_row_size(t->type, t->ne[0]);
-    size_t row_size_pd = ggml_row_size(t->type, hex_round_up((uint32_t)t->ne[0], (uint32_t)QK_Q4_0x4x2));
-    size_t row_size_rp = row_size_pd;
-
-    const size_t total_tensor_size = (size_t)nrows * row_size;
-    const size_t n_bytes_to_copy = size < total_tensor_size ? size : total_tensor_size;
-
-    const int64_t n_full_rows = n_bytes_to_copy / row_size;
-    const size_t  n_rem_bytes = n_bytes_to_copy % row_size;
-
-    uint8_t * out_base = dst_buf ? (uint8_t *)dst_buf : (uint8_t *)t->data;
-
-    void * buf_pd = ggml_aligned_malloc(row_size_pd);
-    GGML_ASSERT(buf_pd != NULL);
-
-    void * buf_rp = ggml_aligned_malloc(row_size_rp);
-    GGML_ASSERT(buf_rp != NULL);
-
-    // src stride: t->nb[1] handles padded (non-contiguous) tensors (e.g. KV cache views);
-    // for contiguous tensors nb[1] == row_size. dst stays contiguous (x4x2 repacked output).
-    const size_t src_stride = t->nb[1];
-
-    for (int64_t i = 0; i < n_full_rows; i++) {
-        const uint8_t * src = (const uint8_t *) data + (i * src_stride);
-        uint8_t *       dst = out_base + (i * row_size);
-
-        memcpy(buf_pd, src, row_size);
-
-        const uint8_t * x = (const uint8_t *) buf_pd;
-        uint8_t * y = (uint8_t *) buf_rp;
-
-        const int qk = QK_Q4_0x4x2;
-        const int nb = t->ne[0] / qk;
-
-        const int dblk_size = 8 * 2;
-        const int qblk_size = qk / 2;
-        const int qrow_size = t->ne[0] / 2;
-        const int q4_blk_sz = QK4_0 / 2 + 2;
-
-        uint8_t * y_q = y + 0;
-        uint8_t * y_d = y + qrow_size;
-
-        for (int ib = 0; ib < nb; ib++) {
-            uint8_t qs[QK_Q4_0x4x2];
-
-            for (int j = 0; j < 8; j++) {
-                const uint8_t * b = x + (ib * 8 + j) * q4_blk_sz + 2;
-                for (int k = 0; k < QK4_0 / 2; k++) {
-                    qs[j * QK4_0 + k + 0]         = (b[k] & 0x0F);
-                    qs[j * QK4_0 + k + QK4_0 / 2] = (b[k] >> 4);
-                }
-            }
-
-            uint8_t * q = y_q + (ib * qblk_size);
-            for (int j = 0; j < qk / 2; j++) {
-                q[j] = (qs[j + 128] << 4) | qs[j];
-            }
-
-            uint16_t * d = (uint16_t *) (y_d + ib * dblk_size);
-            for (int j = 0; j < 8; j++) {
-                const uint16_t * scale = (const uint16_t *)(x + (ib * 8 + j) * q4_blk_sz);
-                d[j] = *scale;
-            }
-        }
-
-        memcpy(dst, buf_rp, row_size);
-    }
-
-    if (n_rem_bytes > 0) {
-        const uint8_t * src = (const uint8_t *) data + (n_full_rows * src_stride);
-        uint8_t *       dst = out_base + (n_full_rows * row_size);
-
-        memset(buf_pd, 0, row_size_pd);
-        memcpy(buf_pd, src, n_rem_bytes);
-
-        const uint8_t * x = (const uint8_t *) buf_pd;
-        uint8_t * y = (uint8_t *) buf_rp;
-
-        const int qk = QK_Q4_0x4x2;
-        const int nb = (t->ne[0] + qk - 1) / qk;
-
-        const int dblk_size = 8 * 2;
-        const int qblk_size = qk / 2;
-        const int qrow_size = t->ne[0] / 2;
-        const int q4_blk_sz = QK4_0 / 2 + 2;
-
-        uint8_t * y_q = y + 0;
-        uint8_t * y_d = y + qrow_size;
-
-        for (int ib = 0; ib < nb; ib++) {
-            uint8_t qs[QK_Q4_0x4x2] = {0};
-
-            for (int j = 0; j < 8 && (size_t)(ib * 8 + j) * q4_blk_sz < row_size_pd; j++) {
-                const uint8_t * b = x + (ib * 8 + j) * q4_blk_sz + 2;
-                for (int k = 0; k < QK4_0 / 2; k++) {
-                    qs[j * QK4_0 + k + 0]         = (b[k] & 0x0F);
-                    qs[j * QK4_0 + k + QK4_0 / 2] = (b[k] >> 4);
-                }
-            }
-
-            uint8_t * q = y_q + (ib * qblk_size);
-            bool partial = (ib == nb - 1);
-            for (int j = 0; j < qk / 2; j++) {
-                if (partial) {
-                    q[j] = (qs[j * 2 + 1] << 4) | qs[j * 2 + 0];
-                } else {
-                    q[j] = (qs[j + 128] << 4) | qs[j];
-                }
-            }
-
-            uint16_t * d = (uint16_t *) (y_d + ib * dblk_size);
-            for (int j = 0; j < 8 && (size_t)(ib * 8 + j) * q4_blk_sz < row_size_pd; j++) {
-                const uint16_t * scale = (const uint16_t *)(x + (ib * 8 + j) * q4_blk_sz);
-                d[j] = *scale;
-            }
-        }
-
-        memcpy(dst, buf_rp, n_rem_bytes);
-    }
-
-    ggml_aligned_free(buf_pd, row_size_pd);
-    ggml_aligned_free(buf_rp, row_size_rp);
-}
-
-// Inverse of repack_q4_0_q4x4x2: convert x4x2 layout back to Q4_0.
-// Used by get_tensor so CPU backends receive canonical Q4_0 bytes.
-static void repack_q4x4x2_q4_0(const ggml_tensor * t, void * data, size_t size) {
-    const int QK_Q4_0x4x2 = 256;
-
-    int64_t nrows = ggml_nrows(t);
-    size_t  row_size = ggml_row_size(t->type, t->ne[0]);
-    size_t  total = (size_t)nrows * row_size;
-    int64_t n_full_rows = (size >= total) ? nrows : (int64_t)(size / row_size);
-
-    const int qk         = QK_Q4_0x4x2;
-    const int nb         = t->ne[0] / qk;
-    const int qblk_size  = qk / 2;          // 128
-    const int dblk_size  = 8 * 2;           // 16
-    const int qrow_size  = t->ne[0] / 2;
-    const int q4_blk_sz  = QK4_0 / 2 + 2;   // 18
-
-    for (int64_t i = 0; i < n_full_rows; i++) {
-        const uint8_t * src = (const uint8_t *) t->data + (i * row_size);
-        uint8_t *       dst = (uint8_t *) data + (i * row_size);
-
-        const uint8_t * x_q = src;
-        const uint8_t * x_d = src + qrow_size;
-
-        for (int ib = 0; ib < nb; ib++) {
-            const uint8_t * q = x_q + (ib * qblk_size);
-
-            uint8_t qs[QK_Q4_0x4x2];
-            for (int j = 0; j < qk / 2; j++) {
-                qs[j]       = q[j] & 0x0F;
-                qs[j + 128] = q[j] >> 4;
-            }
-
-            const uint16_t * d_src = (const uint16_t *)(x_d + ib * dblk_size);
-
-            for (int j = 0; j < 8; j++) {
-                uint8_t * block = dst + (ib * 8 + j) * q4_blk_sz;
-                *(uint16_t *)block = d_src[j];
-                uint8_t * b = block + 2;
-                for (int k = 0; k < QK4_0 / 2; k++) {
-                    b[k] = (qs[j * QK4_0 + k + QK4_0 / 2] << 4) | qs[j * QK4_0 + k];
-                }
-            }
-        }
-    }
 }
 
 // ---- Tiled repack for HVX-quant MUL_MAT ----
@@ -4106,6 +4014,7 @@ static void repack_q4k_as_q8_0_tiled_to_buf(const ggml_tensor * t, const void * 
     }
 }
 
+// Q4_K -> Q4_0 tiled for DSP matmul (lossy conversion, runs once at load).
 static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
@@ -4539,11 +4448,11 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     // lives in the repack buffer (e.g. weights loaded from GGUF). Tensors
     // in the main buffer (e.g. test-backend-ops allocations) stay in
     // canonical GGML format.
-    static int set_tensor_call_count = 0;
+    static uint64_t set_tensor_call_count = 0;
     bool is_repack = ggml_backend_buffer_is_hexagon_repack(buffer);
     if (set_tensor_call_count < 10 || is_repack) {
-        GGMLHEXAGON_LOG_INFO("[SET_TENSOR] #%d name=%s type=%d ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
-                               set_tensor_call_count, tensor->name, (int)tensor->type,
+        GGMLHEXAGON_LOG_INFO("[SET_TENSOR] #%llu name=%s type=%d ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+                               (unsigned long long)set_tensor_call_count, tensor->name, (int)tensor->type,
                                (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
     }
@@ -4597,7 +4506,8 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     // Mark weights dirty so Phase 9 flushes them on the next batch.
     // For repack-buft weights, flush immediately after repack; this moves the
     // cold-state cache-clean cost from the first inference batch to model-load
-    // time and lets Phase 9 skip already-coherent repack weights.
+    // time. Do NOT clear weights_dirty here: non-repack weights (F32/F16/BF16)
+    // that were written earlier in the load sequence still need Phase 9 flush.
     ggml_backend_hexagon_buffer_context * bctx =
         (ggml_backend_hexagon_buffer_context *)buffer->context;
     if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
@@ -4606,14 +4516,11 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
         const char * base = (const char *)hctx->rpc_mempool;
         if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
             if (is_repack) {
-                // stored size can differ from ggml_nbytes (Q4_K is kept as
-                // Q8_0 tiled, roughly 2x the logical size)
                 size_t flush_len = ggml_hexagon_repacked_size(tensor->type, tensor->ne[0], tensor->ne[1],
                                                               tensor->ne[2], tensor->ne[3]);
                 if (flush_len == 0) flush_len = ggml_nbytes(tensor);
                 cpu_dcache_flush_range(hctx, hctx->rpc_mempool_handle,
                                        tensor->data, flush_len);
-                hctx->weights_dirty = false;
             } else {
                 hctx->weights_dirty = true;
             }
@@ -4690,16 +4597,36 @@ static bool ggml_backend_hexagon_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
 static void ggml_backend_hexagon_buffer_clear(ggml_backend_buffer_t buffer, uint8_t value) {
     ggml_backend_hexagon_buffer_context * ctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
     memset(ctx->buffer, value, ctx->buffer_size);
+
+    if (ctx->is_ion_buffer && ctx->backend_ctx) {
+        ggml_backend_hexagon_context * hctx = ctx->backend_ctx;
+        const char * dp   = (const char *)ctx->buffer;
+        const char * base = (const char *)hctx->rpc_mempool;
+        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+            hctx->weights_dirty = true;
+        }
+    }
 }
 
 static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-    GGML_UNUSED(buffer);
     for (size_t copy = 0; copy < n_copies; copy++) {
         memcpy((char *)tensor->data + offset + copy * stride_tensor, (const char *)data + copy * stride_data, size);
+    }
+
+    ggml_backend_hexagon_buffer_context * bctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
+    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
+        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
+        const char * dp   = (const char *)tensor->data + offset;
+        const char * base = (const char *)hctx->rpc_mempool;
+        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+            hctx->weights_dirty = true;
+        }
     }
 }
 
 static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
+    // get_tensor_2d is only used for non-quantized tensor access (views, broadcasting),
+    // so raw memcpy is correct. Quantized weights use get_tensor() for inverse-repack.
     GGML_UNUSED(buffer);
     for (size_t copy = 0; copy < n_copies; copy++) {
         memcpy((char *)data + copy * stride_data, (const char *)tensor->data + offset + copy * stride_tensor, size);
@@ -4740,12 +4667,13 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
     buffer_ctx->backend_ctx = ctx;
     buffer_ctx->is_ion_buffer = true;
 
-    size_t size_page = 0;
+    size_t size_page = 4096;  // default page size if sysconf is unavailable
 #if defined(__ANDROID__) || defined(__linux__)
-    size_page = sysconf(_SC_PAGESIZE);
+    long ps = sysconf(_SC_PAGESIZE);
+    if (ps > 0) size_page = (size_t)ps;
 #endif
     size_t size_aligned = size;
-    if (0 != (size_aligned % size_page)) {
+    if (size_page > 0 && 0 != (size_aligned % size_page)) {
         size_aligned += (size_page - (size_aligned % size_page));
     }
 
@@ -4777,11 +4705,28 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
         buffer_ctx->buffer      = (char *)ctx->rpc_mempool + r.offset;
         buffer_ctx->buffer_size = size_aligned;  // actual requested size, not region size
         r.in_use = true;
-        if (r.offset + size_aligned > ctx->rpc_mempool_usage) {
-            ctx->rpc_mempool_usage = r.offset + size_aligned;
+        // split oversized free region to avoid internal fragmentation
+        // save r before insert; vector insert may invalidate references
+        size_t r_offset = r.offset;
+        size_t r_size   = r.size;
+        if (r_size > size_aligned + 128) {
+            size_t tail_offset = r_offset + size_aligned;
+            size_t tail_size   = r_size - size_aligned;
+            ctx->ion_regions[best_idx].size = size_aligned;
+            ion_pool_region tail;
+            tail.offset = tail_offset;
+            tail.size   = tail_size;
+            tail.in_use = false;
+            ctx->ion_regions.insert(ctx->ion_regions.begin() + best_idx + 1, tail);
+            GGMLHEXAGON_LOG_ALWAYS("[ALLOC] device=%d split region: offset=%zu size=%zu -> used=%zu free=%zu",
+                                  ctx->device, r_offset, r_size, size_aligned, tail_size);
+        }
+        if (r_offset + size_aligned > ctx->rpc_mempool_usage) {
+            ctx->rpc_mempool_usage = r_offset + size_aligned;
         }
         GGMLHEXAGON_LOG_ALWAYS("[ALLOC] device=%d reuse free region: offset=%zu size=%zu (requested=%zu, waste=%zu)",
-                             ctx->device, r.offset, r.size, size_aligned, r.size - size_aligned);
+                             ctx->device, r_offset, ctx->ion_regions[best_idx].size, size_aligned,
+                             ctx->ion_regions[best_idx].size - size_aligned);
         memset(buffer_ctx->buffer, 0, buffer_ctx->buffer_size);
     } else {
         // Allocate new region from bump allocator tail
@@ -4801,7 +4746,16 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
             GGMLHEXAGON_LOG_ALWAYS("device=%d ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to system memory",
                                  ctx->device, size_aligned / SIZE_IN_MB,
                                  (data_limit - ctx->rpc_mempool_usage) / SIZE_IN_MB);
-            buffer_ctx->buffer = ggml_aligned_malloc(size_aligned);
+            // ggml_aligned_malloc() uses 64-byte alignment, but this buffer type
+            // advertises 128-byte alignment (get_alignment returns 128). Use
+            // platform-specific aligned allocation with explicit 128-byte alignment.
+#if defined(_WIN32)
+            buffer_ctx->buffer = _aligned_malloc(size_aligned, 128);
+#else
+            void * ptr = nullptr;
+            if (posix_memalign(&ptr, 128, size_aligned) != 0) ptr = nullptr;
+            buffer_ctx->buffer = ptr;
+#endif
             buffer_ctx->buffer_size = size_aligned;
             buffer_ctx->is_ion_buffer = false;
         }
@@ -4809,6 +4763,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
 
     if (nullptr == buffer_ctx->buffer) {
         GGMLHEXAGON_LOG_ERROR("%s: failed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
+        delete buffer_ctx;
         return nullptr;
     } else {
         GGMLHEXAGON_LOG_ALWAYS("%s: succeed to allocate %d MiB\n", __func__, size / SIZE_IN_MB);
@@ -4990,6 +4945,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // Track temporary mempool regions (mirrors, batch descriptors, repacked weights)
     // for cleanup after Phase 12. Mark them as free (no tail compaction).
+    // Note: indices are valid only because graph_compute_batch is single-threaded
+    // and no other code erases from ion_regions between push_back and final erase.
     std::vector<size_t>         temp_region_indices;
 
     // Storage for cache-miss path; on cache hit we reference cached vectors
@@ -5279,54 +5236,69 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                             auto is_k = [](const ggml_tensor * t) { return t && strstr(t->name, "Kcur"); };
                             auto is_v = [](const ggml_tensor * t) { return t && strstr(t->name, "Vcur"); };
 
-                            const ggml_tensor * n_k;
-                            const ggml_tensor * n_v;
+                            const ggml_tensor * n_k = nullptr;
+                            const ggml_tensor * n_v = nullptr;
                             (void)n_v; // used in GGMLHEXAGON_LOG_DEBUG
-                            const hex_op_desc * op_k;
-                            const hex_op_desc * op_v;
-                            if (is_k(n1)) {
+                            const hex_op_desc * op_k = nullptr;
+                            const hex_op_desc * op_v = nullptr;
+                            bool k_name_match = is_k(n1) && is_v(n2);
+                            bool v_name_match = is_v(n1) && is_k(n2);
+                            bool can_fuse_qkv = true;
+                            if (k_name_match) {
                                 // Q, K, V order (Gemma4, Llama3)
                                 n_k = n1; op_k = &next1;
                                 n_v = n2; op_v = &next2;
-                            } else if (is_v(n1)) {
+                            } else if (v_name_match) {
                                 // Q, V, K order (Qwen3)
                                 n_k = n2; op_k = &next2;
                                 n_v = n1; op_v = &next1;
                             } else {
-                                // Fallback: assume Q, K, V order
-                                n_k = n1; op_k = &next1;
-                                n_v = n2; op_v = &next2;
+                                // K and V weights have identical shapes (verified by
+                                // is_qkv_mergeable), so structural check cannot tell K
+                                // from V. Skip fusion to avoid silent misordering.
+                                if (!ctx->warned_qkv_name) {
+                                    ctx->warned_qkv_name = true;
+                                    GGMLHEXAGON_LOG_ALWAYS(
+                                        "QKV fusion: cannot identify K/V by tensor name "
+                                        "(n1='%s', n2='%s'), skipping fusion. "
+                                        "Expected names containing 'Kcur'/'Vcur'.",
+                                        n1->name ? n1->name : "?",
+                                        n2->name ? n2->name : "?");
+                                }
+                                can_fuse_qkv = false;
                             }
 
-                            struct htp_mm_kernel_params kparams;
-                            ggml_hexagon_precompute_fused_qkv_params(ctx, n_k->src[0], n_k->src[1], &kparams);
-                            if ((size_t)kparams.vtcm_size <= vtcm_budget) {
-                                int32_t wq_idx  = op.src_idx[0];
-                                int32_t x_idx   = op.src_idx[1];
-                                int32_t q_dst   = op.dst_idx[0];
-                                op.htp_opcode   = HTP_OP_MUL_MAT_QKV;
-                                op.src_idx[0]   = op_k->src_idx[0];  // Wk
-                                op.src_idx[1]   = x_idx;             // x (shared)
-                                op.src_idx[2]   = op_v->src_idx[0];  // Wv
-                                op.src_idx[3]   = wq_idx;            // Wq
-                                op.dst_idx[0]   = op_k->dst_idx[0];  // K
-                                op.dst_idx[1]   = op_v->dst_idx[0];  // V
-                                op.dst_idx[2]   = q_dst;             // Q
-                                op.dst_idx[3]   = -1;
-                                memcpy(op.kernel_params, &kparams, sizeof(kparams));
-                                fused_ops.push_back(op);
-                                i += 2;
-                                n_mul_mat_qkv++;
-                                ctx->n_fused_qkv_cum++;
-                                GGMLHEXAGON_LOG_DEBUG("DBG QKV fusion: q=%s k=%s v=%s | Wq[t%d] Wk[t%d] Wv[t%d] x[t%d] | Q[t%d] K[t%d] V[t%d]",
-                                                         n_q->name ? n_q->name : "?",
-                                                         n_k->name ? n_k->name : "?",
-                                                         n_v->name ? n_v->name : "?",
-                                                         wq_idx, op_k->src_idx[0], op_v->src_idx[0], x_idx,
-                                                         q_dst, op_k->dst_idx[0], op_v->dst_idx[0]);
-                                continue;
-                            } else {
-                                GGMLHEXAGON_LOG_INFO("skip QKV fusion: VTCM needed (%d) > budget (%zu)", (int)kparams.vtcm_size, vtcm_budget);
+                            if (can_fuse_qkv) {
+                                struct htp_mm_kernel_params kparams;
+                                ggml_hexagon_precompute_fused_qkv_params(ctx, n_k->src[0], n_k->src[1], &kparams);
+                                if ((size_t)kparams.vtcm_size <= vtcm_budget) {
+                                    int32_t wq_idx  = op.src_idx[0];
+                                    int32_t x_idx   = op.src_idx[1];
+                                    int32_t q_dst   = op.dst_idx[0];
+                                    op.htp_opcode   = HTP_OP_MUL_MAT_QKV;
+                                    op.src_idx[0]   = op_k->src_idx[0];  // Wk
+                                    op.src_idx[1]   = x_idx;             // x (shared)
+                                    op.src_idx[2]   = op_v->src_idx[0];  // Wv
+                                    op.src_idx[3]   = wq_idx;            // Wq
+                                    op.dst_idx[0]   = op_k->dst_idx[0];  // K
+                                    op.dst_idx[1]   = op_v->dst_idx[0];  // V
+                                    op.dst_idx[2]   = q_dst;             // Q
+                                    op.dst_idx[3]   = -1;
+                                    memcpy(op.kernel_params, &kparams, sizeof(kparams));
+                                    fused_ops.push_back(op);
+                                    i += 2;
+                                    n_mul_mat_qkv++;
+                                    ctx->n_fused_qkv_cum++;
+                                    GGMLHEXAGON_LOG_DEBUG("DBG QKV fusion: q=%s k=%s v=%s | Wq[t%d] Wk[t%d] Wv[t%d] x[t%d] | Q[t%d] K[t%d] V[t%d]",
+                                                             n_q->name ? n_q->name : "?",
+                                                             n_k->name ? n_k->name : "?",
+                                                             n_v->name ? n_v->name : "?",
+                                                             wq_idx, op_k->src_idx[0], op_v->src_idx[0], x_idx,
+                                                             q_dst, op_k->dst_idx[0], op_v->dst_idx[0]);
+                                    continue;
+                                } else {
+                                    GGMLHEXAGON_LOG_INFO("skip QKV fusion: VTCM needed (%d) > budget (%zu)", (int)kparams.vtcm_size, vtcm_budget);
+                                }
                             }
                         }
                     }
@@ -5463,12 +5435,30 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     const uint32_t hdr_size      = (uint32_t)sizeof(hex_batch_hdr);                 // ~24 bytes
     const uint32_t ops_region    = (uint32_t)(n_ops * sizeof(hex_op_desc));         // ~96*N
     const uint32_t tens_region   = (uint32_t)(n_tensors * sizeof(hex_tensor_desc)); // ~104*M
-    // align ops/tensors regions
-    const uint32_t ops_offset       = hdr_size;
+    // align ops/tensors regions to HEX_OP_ALIGN (128B) for DSP cache-line/DMA friendliness
+    const uint32_t ops_offset       = (hdr_size + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1);
     const uint32_t tensors_offset   = ops_offset + ((ops_region + HEX_OP_ALIGN - 1) & ~(HEX_OP_ALIGN - 1));
     const uint32_t total_desc_size  = tensors_offset + tens_region;
 
     t_p4 = t_start; t_start = ggml_time_us(); ctx->cum_p4_us += t_start - t_p4;
+
+    // AP-side guard: fail early if batch exceeds DSP static array limits.
+    // Must stay in sync with kernels/entry.c (DSP_OPT_MAX_TENSORS, WEIGHT_INVAL_MAX_PTRS).
+    enum {
+        AP_DSP_MAX_TENSORS   = 4096,   // DSP_OPT_MAX_TENSORS in entry.c
+        AP_DSP_MAX_WEIGHTS   = 4096,   // WEIGHT_INVAL_MAX_PTRS in entry.c
+    };
+    if (n_tensors > AP_DSP_MAX_TENSORS) {
+        GGMLHEXAGON_LOG_ERROR("mempool-batch: n_tensors=%u exceeds DSP limit %u; reduce graph size or split batch",
+                              n_tensors, (uint32_t)AP_DSP_MAX_TENSORS);
+        return GGML_STATUS_FAILED;
+    }
+    if (n_ops > (uint32_t)AP_DSP_MAX_TENSORS * 4) {
+        // n_ops has no direct DSP-side limit; g_pre_dt/g_pre_ht are bounded by n_tensors.
+        // A ratio > 4:1 is unusual enough to warn about.
+        GGMLHEXAGON_LOG_WARN("mempool-batch: n_ops=%u is very large vs n_tensors=%u (ratio %.1f)",
+                             n_ops, n_tensors, n_tensors > 0 ? (double)n_ops / n_tensors : 0.0);
+    }
 
     // ---- Phase 5: handle heap tensors -> mirror into mempool ----
     int64_t t_prev = ggml_time_us();
@@ -5536,8 +5526,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         size_t aligned_offset = (ctx->rpc_mempool_usage + 127u) & ~127u;
 
         if (aligned_offset + mirror_size > data_limit) {
-            GGMLHEXAGON_LOG_WARN("mempool-batch: mempool full for mirror (%zu bytes)", mirror_size);
-            continue;
+            GGMLHEXAGON_LOG_ERROR("mempool-batch: mempool full for mirror (%zu bytes)", mirror_size);
+            std::sort(temp_region_indices.begin(), temp_region_indices.end(), std::greater<size_t>());
+            for (size_t ri : temp_region_indices) {
+                ctx->ion_regions.erase(ctx->ion_regions.begin() + ri);
+            }
+            ctx->rpc_mempool_usage = saved_mempool_usage;
+            return GGML_STATUS_ALLOC_FAILED;
         }
 
         uint32_t moff = (uint32_t)aligned_offset;
@@ -5581,7 +5576,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         m.tensor_idx    = tidx;
         m.original_data = t->data;
         m.mirror_offset = it->second.mirror_offset;
-        m.data_len      = (uint32_t)ggml_nbytes(t);
+        m.data_len      = it->second.max_data_len;  // use full allocated (possibly repacked) size for flush/copy-back
         mirrors.push_back(m);
     }
 
@@ -5591,8 +5586,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     //   weights are already repacked to tile-based layout
     //   by set_tensor during model loading. Phase 6 only tracks mempool
     //   offsets for DSP descriptor updates in Phase 8.
-    std::vector<std::pair<uint32_t, uint32_t>> repacked_ion_weights; // (offset, length)
-    static std::unordered_map<const void *, uint32_t> g_tiled_ion_offsets;
     {
         // Quantized weights (Q4_0 / Q4_1 / Q8_0 / IQ4_NL / MXFP4) are repacked
         // to tile-based (HMX) layout in set_tensor during model loading.
@@ -5601,13 +5594,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // NO repack work here.
         //
         // The only thing Phase 6 still needs to do is record the mempool offset
-        // of each repacked weight in g_tiled_ion_offsets so Phase 10 can build
+        // of each repacked weight in tiled_ion_offsets so Phase 8 can build
         // the DSP descriptor with the correct data_offset. Any quantized weight
         // that somehow lives outside the repack buft is logged as a one-shot
         // warning (should not happen with the current model loader) but its
         // mempool offset is still recorded if we can find one, so the DSP
         // descriptor remains well-formed.
-        static std::unordered_set<const void *> s_warned_non_repack;
         for (uint32_t i = 0; i < n_tensors; i++) {
             ggml_tensor * t = tensor_src[i];
             if (!t || !t->data) continue;
@@ -5621,24 +5613,24 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             if (K % 32 != 0 || K <= 0) continue;
 
             if (!t->buffer || !ggml_backend_buffer_is_hexagon_repack(t->buffer)) {
-                if (s_warned_non_repack.insert(t->data).second) {
+                if (ctx->warned_non_repack.insert(t->data).second) {
                     GGMLHEXAGON_LOG_WARN("tiled: weight %s (data=%p) not in repack buft; "
                                          "assuming set_tensor already repacked it",
                                          t->name, t->data);
                 }
             }
 
-            if (g_tiled_ion_offsets.find(t->data) != g_tiled_ion_offsets.end()) {
+            if (ctx->tiled_ion_offsets.find(t->data) != ctx->tiled_ion_offsets.end()) {
                 continue;  // already recorded on a prior graph_compute call
             }
 
-            // Record the mempool offset for Phase 10. The data is in mempool either
+            // Record the mempool offset for Phase 8. The data is in mempool either
             // directly (repack buft) or via the Phase 5 heap->mempool mirror.
             const char * dp = (const char *)t->data;
             if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                g_tiled_ion_offsets[t->data] = (uint32_t)(dp - ion_base);
+                ctx->tiled_ion_offsets[t->data] = (uint32_t)(dp - ion_base);
             } else if (local_mirror_offset[i] >= 0) {
-                g_tiled_ion_offsets[t->data] = (uint32_t)local_mirror_offset[i];
+                ctx->tiled_ion_offsets[t->data] = (uint32_t)local_mirror_offset[i];
             }
         }
     }
@@ -5652,11 +5644,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     if (batch_offset_aligned + total_desc_size > data_limit) {
         GGMLHEXAGON_LOG_ERROR("mempool-batch: mempool full for batch desc (%zu bytes at offset %zu)",
                               total_desc_size, batch_offset_aligned);
-        // Free temporary mirror regions before returning
+        // free temp mirrors (descending order to keep indices valid), rollback bump
+        std::sort(temp_region_indices.begin(), temp_region_indices.end(), std::greater<size_t>());
         for (size_t ri : temp_region_indices) {
-            ctx->ion_regions[ri].in_use = false;
+            ctx->ion_regions.erase(ctx->ion_regions.begin() + ri);
         }
-        return result;
+        ctx->rpc_mempool_usage = saved_mempool_usage;
+        return GGML_STATUS_ALLOC_FAILED;
     }
 
     uint32_t batch_offset = (uint32_t)batch_offset_aligned;
@@ -5724,8 +5718,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // (repack done in set_tensor during model loading via repack buffer type)
         bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
         if (is_quant_weight) {
-            auto it = g_tiled_ion_offsets.find(t->data);
-            if (it != g_tiled_ion_offsets.end()) {
+            auto it = ctx->tiled_ion_offsets.find(t->data);
+            if (it != ctx->tiled_ion_offsets.end()) {
                 const int32_t ne0_p = (int32_t)hex_round_up((uint32_t)t->ne[0], 32);
                 const int32_t ne1_p = (int32_t)hex_round_up((uint32_t)t->ne[1], 32);
                 td->ne[0] = ne0_p;
@@ -5764,7 +5758,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // between low-offset activations and high-offset weights (~940MB of
         // wasted cache-line writes when only a few MB are actually dirty).
         std::vector<std::pair<uint32_t, uint32_t>> ranges;
-        ranges.reserve(n_tensors + mirrors.size() + repacked_ion_weights.size() + (size_t)cgraph->n_nodes + 4);
+        ranges.reserve(n_tensors + mirrors.size() + (size_t)cgraph->n_nodes + 4);
+
+        // Track data pointers already flushed to avoid duplicate ranges
+        // from the cgraph->nodes loop (which overlaps heavily with tensor_src).
+        std::unordered_set<const void *> flushed_ptrs;
+        flushed_ptrs.reserve(n_tensors + 16);
 
         // Diagnostic counters (per-call, reset every batch) so we can see which
         // source is dominating the flush cost. Logged once per call.
@@ -5790,8 +5789,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             }
             int was_weights_dirty = ctx->weights_dirty ? 1 : 0;
             ctx->weights_dirty = false;
-            GGMLHEXAGON_LOG_WARN("mempool-batch: phase9 skipped (ion_sync_mode=%d) dirty=%d",
+            GGMLHEXAGON_LOG_DEBUG("mempool-batch: phase9 skipped (ion_sync_mode=%d) dirty=%d",
                                   g_hexagon_appcfg.ion_sync_mode, was_weights_dirty);
+            (void)was_weights_dirty;
         } else {
 
             for (uint32_t i = 0; i < n_tensors; i++) {
@@ -5806,6 +5806,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     size_t flush_size = is_quant_weight ? ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]) : ggml_nbytes(t);
                     if (flush_size == 0) flush_size = ggml_nbytes(t);
                     add_range((uint32_t)(dp - ion_base), (uint32_t)flush_size);
+                    flushed_ptrs.insert(t->data);
                     dbg_bytes_tensor += flush_size;
                     dbg_ranges_tensor++;
                 }
@@ -5813,10 +5814,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             for (const auto & m : mirrors) {
                 add_range(m.mirror_offset, m.data_len);
                 dbg_bytes_mirror += m.data_len;
-            }
-            for (const auto & rw : repacked_ion_weights) {
-                add_range(rw.first, rw.second);
-                dbg_bytes_repack_ion += rw.second;
             }
             add_range(batch_offset, total_desc_size);
             dbg_bytes_batch += total_desc_size;
@@ -5833,13 +5830,17 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * t = cgraph->nodes[i];
                 if (!t || !t->data) continue;
-                if (!ctx->weights_dirty &&
-                    t->buffer && ggml_backend_buffer_is_hexagon_repack(t->buffer)) {
+                if (flushed_ptrs.count(t->data)) continue;  // already covered by tensor_src loop
+                bool is_repack_buf = t->buffer && ggml_backend_buffer_is_hexagon_repack(t->buffer);
+                if (!ctx->weights_dirty && is_repack_buf) {
                     continue;  // repack-buft weight, cache already coherent
                 }
                 const char * dp = (const char *)t->data;
                 if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                    size_t sz = ggml_nbytes(t);
+                    bool is_qw = is_repack_buf &&
+                                 t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+                    size_t sz = is_qw ? ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]) : ggml_nbytes(t);
+                    if (sz == 0) sz = ggml_nbytes(t);
                     add_range((uint32_t)(dp - ion_base), (uint32_t)sz);
                     dbg_bytes_cgraph += sz;
                     dbg_ranges_cgraph++;
@@ -5857,7 +5858,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 uint32_t cur_start = ranges[0].first;
                 uint32_t cur_end   = ranges[0].second;
                 for (size_t i = 1; i < ranges.size(); i++) {
-                    if (ranges[i].first <= cur_end + merge_gap) {
+                    if (ranges[i].first <= cur_end || ranges[i].first - cur_end <= merge_gap) {
                         if (ranges[i].second > cur_end) cur_end = ranges[i].second;
                     } else {
                         cpu_dcache_flush_range(ctx, 0,
@@ -5899,6 +5900,30 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     t_p9 = ggml_time_us() - t_prev; t_prev = ggml_time_us();
     ctx->rpc_batch_call_count++;
 
+    // If a model was unloaded since last batch, reset DSP first-touch weight
+    // tracking so new weights at reused ION addresses get properly invalidated.
+    if (ctx->dsp_need_weight_inval_reset) {
+        const uint32_t mode_bits  = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0xFu;
+        const uint32_t trace_bit0 = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
+        const uint32_t trace_bit1 = (g_hexagon_appcfg.dsp_cache_trace_bit1 ? 0x20000u : 0u);
+        const uint32_t reset_bit  = 0x10u;
+        const uint32_t reset_payload = mode_bits | trace_bit0 | trace_bit1 | reset_bit;
+        int rst_err = ggml_dsp_execute_batch(ctx->ggmlop_handle, reset_payload, 0xFFFC);
+        if (AEE_SUCCESS != rst_err) {
+            GGMLHEXAGON_LOG_ERROR("DSP weight_inval reset failed: 0x%x, aborting batch", rst_err);
+            // Free temp regions (mirrors, batch desc) and rollback mempool bump
+            std::sort(temp_region_indices.begin(), temp_region_indices.end(), std::greater<size_t>());
+            for (size_t ri : temp_region_indices) {
+                ctx->ion_regions.erase(ctx->ion_regions.begin() + ri);
+            }
+            ctx->rpc_mempool_usage = saved_mempool_usage;
+            return GGML_STATUS_FAILED;
+        } else {
+            ctx->dsp_need_weight_inval_reset = false;
+            GGMLHEXAGON_LOG_DEBUG("DSP weight_inval array reset (model reload)");
+        }
+    }
+
     int64_t t_p10_pre = ggml_time_us();
     int hexagon_error = ggml_dsp_execute_batch(ctx->ggmlop_handle, batch_offset, total_desc_size);
     int64_t t_p10_post = ggml_time_us();
@@ -5930,34 +5955,61 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
             }
         } else {
-            uint32_t inval_min = ~0u, inval_max = 0;
+            // collect per-dst invalidate ranges (same as Phase 9 flush);
+            // do not use a single min..max sweep - it invalidates holes between outputs
+            // iterate all dst_idx slots (fused ops like QKV write K,V,Q to dst_idx[0..2])
+            // reuse scratch vector to avoid per-token heap alloc
+            auto & inval_ranges = ctx->scratch_cache_ranges;
+            inval_ranges.clear();
+            inval_ranges.reserve(n_ops * 2);
             for (uint32_t oi = 0; oi < n_ops; oi++) {
                 const hex_op_desc & cur_op = hex_ops[oi];
-                uint32_t dst_idx = cur_op.dst_idx[0];
-                if (dst_idx >= n_tensors) continue;
-                ggml_tensor * dst_t = tensor_src[dst_idx];
-                if (!dst_t || !dst_t->data) continue;
+                for (int di = 0; di < 4; di++) {
+                    int32_t dst_idx = cur_op.dst_idx[di];
+                    if (dst_idx < 0) continue;
+                    if ((uint32_t)dst_idx >= n_tensors) continue;
+                    ggml_tensor * dst_t = tensor_src[dst_idx];
+                    if (!dst_t || !dst_t->data) continue;
 
-                uint32_t dst_off = 0xFFFFFFFFu;
-                const char * dp = (const char *)dst_t->data;
-                if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                    dst_off = (uint32_t)(dp - ion_base);
-                } else {
-                    int32_t moff = local_mirror_offset[dst_idx];
-                    if (moff >= 0) dst_off = (uint32_t)moff;
+                    uint32_t dst_off = 0xFFFFFFFFu;
+                    const char * dp = (const char *)dst_t->data;
+                    if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
+                        dst_off = (uint32_t)(dp - ion_base);
+                    } else {
+                        int32_t moff = local_mirror_offset[dst_idx];
+                        if (moff >= 0) dst_off = (uint32_t)moff;
+                    }
+                    if (dst_off == 0xFFFFFFFFu) continue;
+
+                    uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
+                    uint32_t start = dst_off & ~63u;
+                    uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
+                    inval_ranges.push_back({start, end});
                 }
-                if (dst_off == 0xFFFFFFFFu) continue;
-
-                uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
-                uint32_t start = dst_off & ~63u;
-                uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
-                if (start < inval_min) inval_min = start;
-                if (end > inval_max) inval_max = end;
             }
-            if (inval_max > inval_min) {
-                cpu_dcache_inval_range(ctx, 0, (const char *)ctx->rpc_mempool + inval_min, inval_max - inval_min);
-                GGMLHEXAGON_LOG_DEBUG("mempool-batch: phase11 DC CIVAC [0x%x, 0x%x] (%u bytes)",
-                                      inval_min, inval_max, inval_max - inval_min);
+            if (!inval_ranges.empty()) {
+                std::sort(inval_ranges.begin(), inval_ranges.end());
+                const uint32_t merge_gap = 64;
+                uint32_t cur_start = inval_ranges[0].first;
+                uint32_t cur_end   = inval_ranges[0].second;
+                uint32_t total_inval = 0;
+                for (size_t i = 1; i < inval_ranges.size(); i++) {
+                    if (inval_ranges[i].first <= cur_end || inval_ranges[i].first - cur_end <= merge_gap) {
+                        if (inval_ranges[i].second > cur_end) cur_end = inval_ranges[i].second;
+                    } else {
+                        cpu_dcache_inval_range(ctx, 0,
+                            (const char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                        total_inval += cur_end - cur_start;
+                        cur_start = inval_ranges[i].first;
+                        cur_end   = inval_ranges[i].second;
+                    }
+                }
+                cpu_dcache_inval_range(ctx, 0,
+                    (const char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                total_inval += cur_end - cur_start;
+                GGMLHEXAGON_LOG_DEBUG("mempool-batch: phase11 DC CIVAC %zu ranges, %u bytes total",
+                                      inval_ranges.size(), total_inval);
+                (void)total_inval;
             }
             // Also try DMA_BUF_IOCTL_SYNC as extra safeguard
             if (do_ion_sync) {
@@ -5997,15 +6049,16 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             void * orig_data = kv.first;
             uint32_t moff = kv.second.first;
             uint32_t max_len = kv.second.second;
-            memcpy(orig_data, (const char *)ctx->rpc_mempool + moff, max_len);
+            memmove(orig_data, (const char *)ctx->rpc_mempool + moff, max_len);
         }
     }
 
-    // Free temporary mempool regions (mirrors, batch descriptors, repacked weights).
-    // These are only needed during this graph_compute call and can be reused
-    // in the next call. Mark them as free (no tail compaction).
+    // free temp regions (mirrors, batch desc, repacked weights); erase in
+    // descending order so indices stay valid. Dead entries must be removed
+    // to prevent unbounded vector growth and best-fit scan slowdown.
+    std::sort(temp_region_indices.begin(), temp_region_indices.end(), std::greater<size_t>());
     for (size_t ri : temp_region_indices) {
-        ctx->ion_regions[ri].in_use = false;
+        ctx->ion_regions.erase(ctx->ion_regions.begin() + ri);
     }
 
     t_p12 = ggml_time_us() - t_prev;
@@ -6352,9 +6405,7 @@ static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_b
     }
 
     ggmlhexagon_load_cfg();
-    if (!ggmlhexagon_check_valid_appcfg()) {
-        return nullptr;
-    }
+    ggmlhexagon_check_valid_appcfg();
 
     // Find dev_index by matching dev in the registry
     int dev_index = 0;
@@ -6375,7 +6426,13 @@ static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_b
     }
 
     GGMLHEXAGON_LOG_ALWAYS("creating context for dev_index=%d", dev_index);
-    auto * ctx = new ggml_backend_hexagon_context(dev_index, dev);
+    ggml_backend_hexagon_context * ctx = nullptr;
+    try {
+        ctx = new ggml_backend_hexagon_context(dev_index, dev);
+    } catch (const std::exception & e) {
+        GGMLHEXAGON_LOG_ERROR("%s", e.what());
+        return nullptr;
+    }
     GGML_ASSERT(0 != ctx->ggmlop_handle);
     if (nullptr != dev) {
         dev->context = ctx;
@@ -6385,9 +6442,7 @@ static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_b
 
 static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params) {
     ggmlhexagon_load_cfg();
-    if (!ggmlhexagon_check_valid_appcfg()) {
-        return nullptr;
-    }
+    ggmlhexagon_check_valid_appcfg();
 
     // Get the device from registry if not provided
     if (nullptr == dev) {
@@ -6432,12 +6487,20 @@ static ggml_backend_t ggml_backend_hexagon_device_init_backend(ggml_backend_dev_
 
 static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
+    if (nullptr == ctx) {
+        GGMLHEXAGON_LOG_ERROR("get_buffer_type: failed to create context");
+        return nullptr;
+    }
     GGMLHEXAGON_LOG_WARN("get_buffer_type: device=%d domain_id=%d buft=%p", ctx->device, ctx->domain_id, (void*)&ctx->buffer_type);
     return &ctx->buffer_type;
 }
 
 static ggml_backend_buffer_type_t ggml_backend_hexagon_device_get_repack_buffer_type(ggml_backend_dev_t dev) {
     ggml_backend_hexagon_context * ctx = ggml_backend_hexagon_ensure_context(dev);
+    if (nullptr == ctx) {
+        GGMLHEXAGON_LOG_ERROR("get_repack_buffer_type: failed to create context");
+        return nullptr;
+    }
     return &ctx->repack_buffer_type;
 }
 
@@ -6451,6 +6514,10 @@ static ggml_backend_buffer_type_t * ggml_backend_hexagon_device_get_extra_buffer
 static bool ggml_backend_hexagon_device_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft) {
     if (ggml_backend_buft_is_hexagon(buft) || ggml_backend_buft_is_hexagon_repack(buft)) {
         ggml_backend_hexagon_context * dev_ctx  = ggml_backend_hexagon_ensure_context(dev);
+        if (nullptr == dev_ctx) {
+            GGMLHEXAGON_LOG_ERROR("supports_buft: failed to create context");
+            return false;
+        }
         ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
         return buft_ctx->device == dev_ctx->device;
     }
@@ -6487,7 +6554,11 @@ static void ggml_backend_hexagon_set_n_threads(ggml_backend_t backend, int n_thr
     // out param, equals max_hw_threads - 2). Fall back to cfg value if
     // set_n_threads is called before DSP init completes.
     const int cap = (ctx->dsp_thread_counts > 0) ? ctx->dsp_thread_counts : g_hexagon_appcfg.thread_counts;
-    ctx->n_threads = (n_threads < cap) ? n_threads : cap;
+    int new_threads = (n_threads < cap) ? n_threads : cap;
+    if (new_threads != ctx->n_threads) {
+        ctx->n_threads = new_threads;
+        ctx->mm_params_cache.clear(); // VTCM partitioning depends on thread count
+    }
 }
 
 static int ggml_backend_hexagon_get_device_count() {
@@ -6549,9 +6620,7 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
     static bool initialized = false;
 
     ggmlhexagon_load_cfg();
-    if (!ggmlhexagon_check_valid_appcfg()) {
-        return nullptr;
-    }
+    ggmlhexagon_check_valid_appcfg();
 
     {
         static std::mutex mutex;
@@ -6614,9 +6683,7 @@ static const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
 
 static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath) {
     ggmlhexagon_load_cfg();
-    if (!ggmlhexagon_check_valid_appcfg()) {
-        return nullptr;
-    }
+    ggmlhexagon_check_valid_appcfg();
 
     if (nullptr == runtime_libpath) {
         runtime_libpath = g_hexagon_appcfg.runtime_libpath;
