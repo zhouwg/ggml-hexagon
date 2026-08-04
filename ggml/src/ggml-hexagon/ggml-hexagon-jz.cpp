@@ -236,6 +236,10 @@ struct ggml_backend_hexagon_context {
     int64_t  cumulative_graph_us;               // cumulative graph inference duration
     int64_t  last_graph_end_us;                 // wall clock of last graph end (to measure gap)
 
+    // Session-global set of tensor data pointers that were ever a dst of any op
+    // in any cgraph. Used in Phase 2 to identify read-only weights.
+    std::unordered_set<const void *> ever_dst_ptrs;
+
     // Per-graph node statistics
     uint32_t max_nodes_per_graph;               // max node count in a single graph
     uint32_t min_nodes_per_graph;               // min node count in a single graph
@@ -346,6 +350,8 @@ struct ggml_backend_hexagon_context {
     std::unordered_map<uint64_t, cgraph_cache_entry> cgraph_cache;
     uint64_t cgraph_cache_hits   = 0;
     uint64_t cgraph_cache_misses = 0;
+
+    static constexpr size_t CGRAPH_CACHE_MAX = 1024;  // bound distinct cached graphs
 
     ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev);
     ~ggml_backend_hexagon_context();
@@ -1036,10 +1042,10 @@ static int ion_sync_for_direction(int fd, int direction) {
     //   DMA_BUF_SYNC_START = (1 << 2) = 4
     //   DMA_BUF_SYNC_END   = (2 << 2) = 8
     {
-        static const uint64_t DMA_BUF_SYNC_READ  = (1u << 0);
-        static const uint64_t DMA_BUF_SYNC_WRITE = (2u << 0);
-        static const uint64_t DMA_BUF_SYNC_START = (1u << 2);
-        static const uint64_t DMA_BUF_SYNC_END   = (2u << 2);
+        const uint64_t DMA_BUF_SYNC_READ  = (1u << 0);
+        const uint64_t DMA_BUF_SYNC_WRITE = (2u << 0);
+        const uint64_t DMA_BUF_SYNC_START = (1u << 2);
+        const uint64_t DMA_BUF_SYNC_END   = (2u << 2);
         uint64_t rw = (direction == 1) ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ;
         struct { uint64_t flags; } s;
         s.flags = DMA_BUF_SYNC_START | rw;
@@ -1047,24 +1053,16 @@ static int ion_sync_for_direction(int fd, int direction) {
         if (r == 0) {
             s.flags = DMA_BUF_SYNC_END | rw;
             ioctl(fd, DMA_BUF_IOCTL_SYNC_IOCTL, &s);
-            static int logged = 0;
-            if (!logged) { GGMLHEXAGON_LOG_WARN("DMA_BUF_IOCTL_SYNC(%s) OK fd=%d (kernel cache sync)", direction ? "WRITE" : "READ", fd); logged = 1; }
             return 0;
         }
-        static int logged_fail = 0;
-        if (!logged_fail) { GGMLHEXAGON_LOG_WARN("DMA_BUF_IOCTL_SYNC(%s) FAILED fd=%d errno=%d (%s)", direction ? "WRITE" : "READ", fd, errno, strerror(errno)); logged_fail = 1; }
     }
     {
         struct ion_sync_data { int fd; unsigned int flags; unsigned int pad; };
         struct ion_sync_data sync = { fd, (unsigned int)direction, 0 };
         int r = ioctl(fd, _IOWR('I', 7, struct ion_sync_data), &sync);
         if (r == 0) {
-            static int logged = 0;
-            if (!logged) { GGMLHEXAGON_LOG_WARN("ION_IOC_SYNC(%s) fallback OK fd=%d", direction ? "WRITE" : "READ", fd); logged = 1; }
             return 0;
         }
-        static int logged_fail2 = 0;
-        if (!logged_fail2) { GGMLHEXAGON_LOG_WARN("ION_IOC_SYNC(%s) fallback FAILED fd=%d errno=%d (%s)", direction ? "WRITE" : "READ", fd, errno, strerror(errno)); logged_fail2 = 1; }
     }
 #elif defined(_WIN32)
     // WoA: ION allocator and DMA_BUF_IOCTL_SYNC are not available on Windows.
@@ -3662,6 +3660,14 @@ struct ggml_backend_hexagon_buffer_context {
 
 static void ggml_backend_hexagon_buffer_free_buffer(ggml_backend_buffer_t buffer) {
     ggml_backend_hexagon_buffer_context * ctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
+    // Buffers are freed on model unload. Clear the caches keyed by tensor
+    // pointers so a reload that reuses the same addresses does not hit stale entries.
+    struct ggml_backend_hexagon_context * bctx = ctx->backend_ctx;
+    if (bctx) {
+        bctx->cgraph_cache.clear();
+        bctx->mm_params_cache.clear();
+        bctx->ever_dst_ptrs.clear();
+    }
     delete ctx;
 }
 
@@ -5163,10 +5169,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // not a read-only weight: check the session-global ever-dst set, else
         // cross-graph staleness occurs with bit 0 (e.g. qwen3-mtp garble).
         {
-            static std::unordered_set<const void *> g_ever_dst_ptrs;
             for (const auto & op : hex_ops) {
                 uint32_t didx = op.dst_idx[0];
-                if (didx < n_tensors) g_ever_dst_ptrs.insert(tensor_src[didx]->data);
+                if (didx < n_tensors) ctx->ever_dst_ptrs.insert(tensor_src[didx]->data);
             }
             is_weight.assign(n_tensors, 0);
             std::vector<uint8_t> dst_indices(n_tensors, 0);   // indices of tensors that are dst of any op
@@ -5178,10 +5183,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 if (op.opcode == GGML_OP_MUL_MAT) {
                     uint32_t sidx = op.src_idx[0];
                     if (sidx < n_tensors && !dst_indices[sidx] &&
-                        !g_ever_dst_ptrs.count(tensor_src[sidx]->data)) {
+                        !ctx->ever_dst_ptrs.count(tensor_src[sidx]->data)) {
                         is_weight[sidx] = 1;
-                        GGMLHEXAGON_LOG_WARN("weight-cache: tensor[%d] identified as weight (type=%d)",
-                                             sidx, (int)tensor_src[sidx]->type);
+                        GGMLHEXAGON_LOG_DEBUG("weight-cache: tensor[%d] identified as weight (type=%d)",
+                                              sidx, (int)tensor_src[sidx]->type);
                     }
                 }
             }
@@ -5446,6 +5451,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         entry.supported_nodes.assign(supported_nodes.begin(), supported_nodes.end());
         entry.hex_ops.assign(hex_ops.begin(), hex_ops.end());
         entry.is_weight.assign(is_weight.begin(), is_weight.end());
+        // Bound the cache to avoid unbounded growth across many distinct graphs.
+        if (ctx->cgraph_cache.size() > ctx->CGRAPH_CACHE_MAX) {
+            ctx->cgraph_cache.erase(ctx->cgraph_cache.begin());
+        }
     }
 
     t_p3 = t_start; t_start = ggml_time_us(); ctx->cum_p3_us += t_start - t_p3;
