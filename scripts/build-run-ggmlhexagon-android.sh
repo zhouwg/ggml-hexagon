@@ -515,7 +515,8 @@ function build_armcpu()
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=OFF -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cd ${LOCAL_BUILD_DIR}
-    make -j${HOST_CPU_COUNTS}
+    # use cmake --build so it matches whatever generator the cache was configured with
+    cmake --build ${LOCAL_BUILD_DIR} -j${HOST_CPU_COUNTS}
     #remove stale hexagon artifacts from previous hexagon builds to ensure CPU-only runtime
     rm -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
     rm -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so
@@ -1444,14 +1445,15 @@ function show_usage()
     echo "Usage:"
     echo "  $0 help"
     echo "  $0 print_oplist"
-    echo "  $0 update_ggml_libs  (push AP-side libs only from bin/ to device; no DSP skels, no backend switch)"
-    echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device)"
-    echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device)"
 
-    echo "  $0 build        (build JZ's ggml-hexagon backend)"
-    echo "  $0 build_debug  (build JZ's ggml-hexagon backend in debug mode)"
-    echo "  $0 build_qcom   (build Qualcomm's ggml-hexagon backend for performance comparison)"
-    echo "  $0 build_armcpu (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
+    echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device, for build)"
+    echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device, for build_qcom)"
+    echo "  $0 update_ggml_libs (push AP-side libs only from bin/ to device; no DSP skels, for build_armcpu)"
+
+    echo "  $0 build            (build JZ's ggml-hexagon backend)"
+    echo "  $0 build_debug      (build JZ's ggml-hexagon backend in debug mode)"
+    echo "  $0 build_qcom       (build Qualcomm's ggml-hexagon backend for performance comparison)"
+    echo "  $0 build_armcpu     (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
 
     echo "  $0 run_testops"
