@@ -520,6 +520,18 @@ function build_armcpu()
     #remove stale hexagon artifacts from previous hexagon builds to ensure CPU-only runtime
     rm -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
     rm -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so
+    # also clear QCOM skels left in the source dir by a prior build_qcom, else
+    # detect_build_type() falls back to them and misreports hexagon-qcom
+    rm -f ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so
+    # backup CPU-only AP libs for AB switching (symmetric with build/build_qcom)
+    # note: do NOT use "-cpu" suffix - libggml-cpu.so is the CPU backend impl, a
+    # different lib from libggml.so (the core). use "-cpuonly" to avoid collision.
+    mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-cpuonly.so
     show_pwd
 }
 
@@ -785,6 +797,31 @@ function update_qcom_libs()
 }
 
 
+#push CPU-only runtime .so from out/ab-test/ to device, renaming *-cpuonly.so to canonical names
+function update_cpu_libs()
+{
+    local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
+    if [ ! -f ${ab_test_dir}/libggml-cpuonly.so ]; then
+        echo "ERROR: ${ab_test_dir}/libggml-cpuonly.so not found."
+        echo "Run '$0 build_armcpu' first to populate AB test backups."
+        exit 1
+    fi
+    adb push ${ab_test_dir}/libggml-cpuonly.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-cpuonly.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-cpuonly.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-cpuonly.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-bench-impl-cpuonly.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    # libggml-base.so / libggml-cpu.so are shared across builds, device-side kept as-is
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    adb shell "rm -f ${REMOTE_PATH}/libggml-hexagon.so"
+    adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
+    adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
+    echo "cpu" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    echo "CPU-only runtime .so pushed to device."
+}
+
+
 #detect build type from build output: hexagon-jz, hexagon-qcom, or cpu-only
 function detect_build_type()
 {
@@ -814,7 +851,7 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    # AB test mode: if update_jz_libs/update_qcom_libs set the marker,
+    # AB test mode: if update_jz_libs/update_qcom_libs/update_cpu_libs set the marker,
     # skip lib/skel push - user has manually set up the runtime.
     local ab_test_marker="${LOCAL_BUILD_DIR}/.ab_test_runtime"
     if [ -f "${ab_test_marker}" ]; then
@@ -1448,7 +1485,8 @@ function show_usage()
 
     echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device, for build)"
     echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device, for build_qcom)"
-    echo "  $0 update_ggml_libs (push AP-side libs only from bin/ to device; no DSP skels, for build_armcpu)"
+    echo "  $0 update_cpu_libs  (push CPU-only runtime .so from out/ab-test/ to device, for build_armcpu)"
+    echo "  $0 update_ggml_libs (incremental: push AP-side libs from bin/ to device only; keep DSP skels as-is)"
 
     echo "  $0 build            (build JZ's ggml-hexagon backend)"
     echo "  $0 build_debug      (build JZ's ggml-hexagon backend in debug mode)"
@@ -1544,6 +1582,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "update_qcom_libs" ]; then
         update_qcom_libs
+        exit 0
+    elif [ "$1" == "update_cpu_libs" ]; then
+        update_cpu_libs
         exit 0
     elif [ "$1" == "build" ]; then
         build_ggml_hexagon
