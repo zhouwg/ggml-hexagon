@@ -104,7 +104,7 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
 #   qwen3       -> Qwen3.5-2B-Q4_0.gguf
 #   gemma4      -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
-#   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf (5.15 GiB, triggers mirror/eviction for stress testing)
+#   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
 #   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
 #   llama3      -> Llama-3.2-1B-Instruct-Q4_0.gguf
 #   (default)   -> gemma-4-E2B-it-Q4_0.gguf
@@ -653,7 +653,7 @@ function check_prebuilt_models()
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
 
-    # gemma-4-E4B_q4_0-it.gguf (5.15 GiB) is a stress-test model that triggers mirror/eviction in the 4GB ION mempool.
+    # gemma-4-E4B_q4_0-it.gguf (4.9 GiB) is a stress-test model that triggers mirror/eviction in the 4GB ION mempool.
     check_and_download_model gemma-4-E4B_q4_0-it.gguf     https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf
 
     #737 MiB
@@ -1039,7 +1039,7 @@ function run_llamacli_all()
 }
 
 
-# Long-prompt stress test (~5500 tokens) with gemma4-e4b (5.15 GiB) to fill KV cache,
+# Long-prompt stress test (~5500 tokens) with gemma4-e4b (4.9 GiB) to fill KV cache,
 # trigger mirror/eviction in the 4GB ION mempool, and exercise split/coalesce paths.
 function run_stresstest()
 {
@@ -1202,6 +1202,33 @@ function run_abtest()
     echo "=============================================="
     echo "  AB test complete $(date '+%Y-%m-%d %H:%M:%S')"
     echo "=============================================="
+
+    # Restore current build type libs after AB test.
+    # AB test leaves QCOM libs on device (QCOM is the last phase).
+    # Without this, subsequent run_llamabench would skip pushing
+    # libggml-hexagon.so (MD5 matches local JZ build), leaving device
+    # in a mixed state: QCOM AP lib + JZ DSP skels -> error 0x80000406.
+    local restore_type=""
+    local last_bt_file="${LOCAL_BUILD_DIR}/.last_deployed_build_type"
+    if [ -f "${last_bt_file}" ]; then
+        restore_type=$(cat "${last_bt_file}")
+    fi
+    if [ -z "${restore_type}" ]; then
+        restore_type="hexagon-jz"
+    fi
+    echo ""
+    echo "=== [$(date '+%H:%M:%S')] Restoring build type: ${restore_type} ==="
+    case "${restore_type}" in
+        hexagon-jz)
+            update_jz_libs
+            ;;
+        hexagon-qcom)
+            update_qcom_libs
+            ;;
+        cpu-only)
+            update_cpu_libs
+            ;;
+    esac
 }
 
 
@@ -1554,7 +1581,7 @@ function show_usage()
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
     echo "    gemma4        -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB)"
-    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (5.15 GiB, stress test for mirror/eviction)"
+    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, stress test for mirror/eviction)"
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"

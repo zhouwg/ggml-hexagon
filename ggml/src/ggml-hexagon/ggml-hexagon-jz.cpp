@@ -432,7 +432,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.5"},
+        .version                = {"0.99.6"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -527,6 +527,10 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
         va_list args;
         va_start(args, format);
         int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+        if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+            va_end(args);
+            return;
+        }
         int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
@@ -559,6 +563,10 @@ static void ggmlhexagon_log_always_internal(ggml_log_level level, const char * f
         va_list args;
         va_start(args, format);
         int len_prefix = snprintf(s_log_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+        if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+            va_end(args);
+            return;
+        }
         int len = vsnprintf(s_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
@@ -1927,7 +1935,11 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     hexagon_error = ggml_dsp_open(final_uri, &ctx->ggmlop_handle);
     if (AEE_SUCCESS == hexagon_error) {
         GGMLHEXAGON_LOG_ALWAYS("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
-        ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.thread_counts, &ctx->dsp_thread_counts);
+        hexagon_error = ggml_dsp_setclocks(ctx->ggmlop_handle, g_hexagon_appcfg.dump_diag_info, g_hexagon_appcfg.thread_counts, &ctx->dsp_thread_counts);
+        if (AEE_SUCCESS != hexagon_error) {
+            GGMLHEXAGON_LOG_ERROR("ggml_dsp_setclocks failed: 0x%x", hexagon_error);
+            goto bail;
+        }
         // Mirror DSP-side clamp into the global cfg so subsequent log sites
         // (including the dtor, where ctx may be unavailable) reflect the
         // real thread count in effect rather than the user's requested hint.
@@ -5504,7 +5516,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // For quantized weights repacked in-place by set_tensor,
         // the actual data on heap is the repacked (larger) layout.
         // The mirror must copy the full repacked data for DSP access.
-        bool is_quant_weight = t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
+        bool is_quant_weight = is_weight[tidx] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
         if (is_quant_weight) {
             size_t repacked = ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
             if (repacked > 0) t_size = (uint32_t)repacked;
@@ -5930,6 +5942,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     if (AEE_SUCCESS != hexagon_error) {
         GGMLHEXAGON_LOG_WARN("ggml_dsp_execute_batch failed: 0x%x", hexagon_error);
+        result =  GGML_STATUS_FAILED;
     }
 
     // t_p10 captures the entire synchronous invoke (== old p10 minus civac)
@@ -5964,7 +5977,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             inval_ranges.reserve(n_ops * 2);
             for (uint32_t oi = 0; oi < n_ops; oi++) {
                 const hex_op_desc & cur_op = hex_ops[oi];
-                for (int di = 0; di < 4; di++) {
+                for (int di = 0; di < HTP_OP_MAX_OUTPUTS; di++) {
                     int32_t dst_idx = cur_op.dst_idx[di];
                     if (dst_idx < 0) continue;
                     if ((uint32_t)dst_idx >= n_tensors) continue;
@@ -5981,9 +5994,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     }
                     if (dst_off == 0xFFFFFFFFu) continue;
 
-                    uint32_t dst_len = (uint32_t)ggml_nbytes(dst_t);
+                    size_t dst_len = ggml_nbytes(dst_t);
                     uint32_t start = dst_off & ~63u;
-                    uint32_t end   = (dst_off + dst_len + 63u) & ~63u;
+                    // 64-bit arithmetic to avoid overflow when dst_off + dst_len + 63 > UINT32_MAX
+                    uint32_t end = (uint32_t)(((uint64_t)dst_off + (uint64_t)dst_len + 63u) & ~63ull);
                     inval_ranges.push_back({start, end});
                 }
             }
