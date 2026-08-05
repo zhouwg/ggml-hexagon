@@ -267,6 +267,10 @@ static void ggml_log_internal(int level, const char *file, const char *func, int
     va_start(args, format);
     int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ",
                               func, line);
+    if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+        va_end(args);
+        return;
+    }
     int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix,
                         GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
     if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
@@ -277,7 +281,7 @@ static void ggml_log_internal(int level, const char *file, const char *func, int
 #endif // GGMLHEXAGON_DEBUG
 
 static void ggml_log_always(int level, const char *file, const char *func, int line, const char *format, ...) {
-    if (!g_dsp_ctx->dump_diag_info) {
+    if (!g_dsp_ctx || !g_dsp_ctx->dump_diag_info) {
         return;
     }
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
@@ -285,6 +289,10 @@ static void ggml_log_always(int level, const char *file, const char *func, int l
     va_start(args, format);
     int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ",
                               func, line);
+    if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+        va_end(args);
+        return;
+    }
     int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix,
                         GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
     if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
@@ -702,14 +710,14 @@ static int vtcm_release_callback(unsigned int rctx, void * state) {
 // =================================================================================================
 // IDL helper functions
 // =================================================================================================
-static int power_on_hvx_hmx(void) {
+static int power_on_hvx_hmx(struct dsp_context * ctx) {
     HAP_power_request_t req;
 
     /* Set client class */
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_apptype;
     req.apptype = HAP_POWER_COMPUTE_CLIENT_CLASS;
-    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set apptype failed");
         return -1;
     }
@@ -738,7 +746,7 @@ static int power_on_hvx_hmx(void) {
     HAP_set_dcvs_v3_protected_bus_corners(&req, 1);
 #endif
 
-    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set DCVS failed");
         return -2;
     }
@@ -747,7 +755,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_HVX;
     req.hvx.power_up = 1;
-    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HVX failed");
         return -3;
     }
@@ -764,7 +772,7 @@ static int power_on_hvx_hmx(void) {
     req.hmx_v2.max_corner = HAP_DCVS_EXP_VCORNER_MAX;
     req.hmx_v2.perf_mode = HAP_CLK_PERF_HIGH;
     GGMLHEXAGON_LOG_INFO("Setting HMX clock with HMX_v2 for v75+ architecture");
-    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX_v2 failed, continuing without HMX");
         return -4;
     }
@@ -773,7 +781,7 @@ static int power_on_hvx_hmx(void) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_HMX;
     req.hmx.power_up = 1;
-    if (HAP_power_set((void *)&g_dsp_ctx->power_ctx, &req) != 0) {
+    if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX failed, continuing without HMX");
         return -4;
     }
@@ -1416,6 +1424,13 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     const struct htp_tensor * mask = octx->src[3];
     const struct htp_tensor * dst = octx->dst;
     if (!q || !k || !v || !dst) return -1;
+    /* Guard against division by zero in G = q->ne[2]/n_kv_heads and
+     * broadcast_rk2/rk3/rv2/rv3 (all use k/v ne[2],ne[3] as divisors) */
+    if (k->ne[2] == 0 || k->ne[3] == 0 || v->ne[2] == 0 || v->ne[3] == 0) {
+        GGMLHEXAGON_LOG_ERROR("build_fa: zero divisor k[%u,%u] v[%u,%u]",
+                              k->ne[2], k->ne[3], v->ne[2], v->ne[3]);
+        return -1;
+    }
     FARF(ALWAYS, "build_fa: DK=%u DV=%u neq1=%u nek1=%u G=%u ktype=%d vtype=%d hmx=%d",
          q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2]/k->ne[2],
          k->type, v->type, g_dsp_ctx->hmx_available);
@@ -1540,8 +1555,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     ctx->thread_counts      = 4;
     ctx->htp_ctx = (struct htp_context *)calloc(1, sizeof(struct htp_context));
     GGML_ASSERT(NULL != ctx->htp_ctx);
-    g_dsp_ctx = ctx;
-    g_dsp_ctx->thread_prio = qurt_thread_get_priority(qurt_thread_get_id());
+    ctx->thread_prio = qurt_thread_get_priority(qurt_thread_get_id());
     *handle = (remote_handle64)ctx;
 
     // Reset first-touch invalidate bitmap so a fresh session starts with
@@ -1557,9 +1571,9 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     // execute_batch(0xFFFC) right after ggml_dsp_open returns. Until then,
     // every code path that consults dsp_cache_mode sees 0 and behaves like
     // baseline 29c1cf196.
-    g_dsp_ctx->dsp_cache_mode = 0;
-    g_dsp_ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
-    g_dsp_ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
+    ctx->dsp_cache_mode = 0;
+    ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
+    ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
 
     printf("uri %s\n", uri);
 
@@ -1575,16 +1589,16 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     qurt_sysenv_max_hthreads_t mhwt;
     qurt_sysenv_get_max_hw_threads(&mhwt);
     printf("qurt_hardware_thread_counts = %d\n", mhwt.max_hthreads);
-    g_dsp_ctx->max_hw_threads = mhwt.max_hthreads;
-    g_dsp_ctx->thread_counts = mhwt.max_hthreads;
+    ctx->max_hw_threads = mhwt.max_hthreads;
+    ctx->thread_counts = mhwt.max_hthreads;
 
     /* Step 1: Power up HVX and HMX */
-    int power_result = power_on_hvx_hmx();
+    int power_result = power_on_hvx_hmx(ctx);
     if (power_result != 0) {
         printf("power_on_hvx_hmx failed (%d), continuing without HMX\n", power_result);
-        g_dsp_ctx->hmx_available = 0;
+        ctx->hmx_available = 0;
     } else {
-        g_dsp_ctx->hmx_available = 1;
+        ctx->hmx_available = 1;
     }
 
     /* Step 2: Query VTCM size and allocate resources */
@@ -1628,8 +1642,8 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     HAP_compute_res_attr_set_release_callback(&attr, vtcm_release_callback, NULL);  // Enable release callback for cache mode
     HAP_compute_res_attr_set_hmx_param(&attr, 1);
     // Allocate VTCM for scratch pads
-    g_dsp_ctx->compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
-    if (g_dsp_ctx->compute_res_ctx_id == 0) {
+    ctx->compute_res_ctx_id = HAP_compute_res_acquire(&attr, 1000000);
+    if (ctx->compute_res_ctx_id == 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_compute_res_acquire failed, no VTCM available\n");
     } else {
         /* Using VTCM acquired via HAP_compute_res */
@@ -1637,12 +1651,12 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         unsigned int vtcm_ptr_size = 0;
         if (HAP_compute_res_attr_get_vtcm_ptr_v2(&attr, &vtcm_ptr, &vtcm_ptr_size) != 0) {
             GGMLHEXAGON_LOG_INFO("HAP_compute_res_attr_get_vtcm_ptr_v2 failed\n");
-            HAP_compute_res_release(g_dsp_ctx->compute_res_ctx_id);
-            g_dsp_ctx->compute_res_ctx_id = 0;
+            HAP_compute_res_release(ctx->compute_res_ctx_id);
+            ctx->compute_res_ctx_id = 0;
         } else {
-            g_dsp_ctx->vtcm_base = vtcm_ptr;
-            g_dsp_ctx->vtcm_size = vtcm_ptr_size;
-            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", g_dsp_ctx->vtcm_size, g_dsp_ctx->vtcm_base);
+            ctx->vtcm_base = vtcm_ptr;
+            ctx->vtcm_size = vtcm_ptr_size;
+            GGMLHEXAGON_LOG_INFO("allocated VTCM pool via compute_res: %zu bytes at %p\n", ctx->vtcm_size, ctx->vtcm_base);
 
             /* VTCM: acquire once for the whole session (matches
              * htp/main.c htp_packet_callback pattern: acquire once at
@@ -1650,6 +1664,9 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
              * Avoids per-batch HAP_compute_res_acquire/release_cached churn
              * (~8700 calls/session -> 2 calls/session) and the SDK's
              * adsprpc FARF log noise. */
+            /* dsp_vtcm_acquire() uses g_dsp_ctx internally: publish ctx
+             * now that all fields it reads are initialized. */
+            g_dsp_ctx = ctx;
             dsp_vtcm_acquire();
         }
     }
@@ -1658,13 +1675,13 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
      * New Qualcomm API (b2dd28a3b) requires a pre-allocated backing buffer;
      * we memalign it here and track it in dsp_context.hmx_queue_buf for
      * cleanup in ggml_dsp_close. Capacity/stack_size match main.c defaults. */
-    if (g_dsp_ctx->hmx_available && g_dsp_ctx->compute_res_ctx_id != 0) {
-        if (g_dsp_ctx->hmx_queue != NULL) {
+    if (ctx->hmx_available && ctx->compute_res_ctx_id != 0) {
+        if (ctx->hmx_queue != NULL) {
             GGMLHEXAGON_LOG_INFO("hmx_queue already exists, deleting old one\n");
-            hmx_queue_free(g_dsp_ctx->hmx_queue);
-            free(g_dsp_ctx->hmx_queue_buf);
-            g_dsp_ctx->hmx_queue     = NULL;
-            g_dsp_ctx->hmx_queue_buf = NULL;
+            hmx_queue_free(ctx->hmx_queue);
+            free(ctx->hmx_queue_buf);
+            ctx->hmx_queue     = NULL;
+            ctx->hmx_queue_buf = NULL;
         }
         size_t hmx_size  = hmx_queue_sizeof(JZ_HMX_QUEUE_CAPACITY, JZ_HMX_QUEUE_STACK_SIZE);
         size_t hmx_align = hmx_queue_alignof();
@@ -1673,17 +1690,17 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
             // Trace slot mirrors htp/main.c (&ctx->trace[HTP_MAX_NTHREADS]): must be a
             // valid (zeroed) htp_thread_trace, htp_trace_event_start/stop dereference
             // it unconditionally on every HMX descriptor completion.
-            g_dsp_ctx->hmx_queue = hmx_queue_init(hmx_buf, JZ_HMX_QUEUE_CAPACITY,
+            ctx->hmx_queue = hmx_queue_init(hmx_buf, JZ_HMX_QUEUE_CAPACITY,
                                                   JZ_HMX_QUEUE_STACK_SIZE,
-                                                  g_dsp_ctx->compute_res_ctx_id,
-                                                  &g_dsp_ctx->htp_ctx->trace[HTP_MAX_NTHREADS]);
-            if (g_dsp_ctx->hmx_queue) {
-                g_dsp_ctx->hmx_queue_buf = hmx_buf;
+                                                  ctx->compute_res_ctx_id,
+                                                  &ctx->htp_ctx->trace[HTP_MAX_NTHREADS]);
+            if (ctx->hmx_queue) {
+                ctx->hmx_queue_buf = hmx_buf;
                 GGMLHEXAGON_LOG_INFO("async HMX queue created (capacity %u, rctx %u)\n",
-                                     hmx_queue_capacity(g_dsp_ctx->hmx_queue), g_dsp_ctx->compute_res_ctx_id);
+                                     hmx_queue_capacity(ctx->hmx_queue), ctx->compute_res_ctx_id);
             } else {
                 free(hmx_buf);
-                g_dsp_ctx->hmx_queue_buf = NULL;
+                ctx->hmx_queue_buf = NULL;
                 GGMLHEXAGON_LOG_INFO("hmx_queue_init failed, HMX path will run synchronously\n");
             }
         } else {
@@ -1691,7 +1708,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         }
     } else {
         GGMLHEXAGON_LOG_INFO("HMX not available (hmx=%d, rctx=%u), skipping hmx_queue creation\n",
-                             g_dsp_ctx->hmx_available, g_dsp_ctx->compute_res_ctx_id);
+                             ctx->hmx_available, ctx->compute_res_ctx_id);
     }
 
     /* Step 5: probe DSP memory for information only (no allocation) */
@@ -1725,6 +1742,10 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         }
     }
 
+    /* Publish ctx to g_dsp_ctx for VTCM-failure path. In the success path,
+     * g_dsp_ctx was already set before dsp_vtcm_acquire(); this assignment
+     * is a no-op there. */
+    g_dsp_ctx = ctx;
     return 0;
 }
 
@@ -1801,6 +1822,9 @@ int ggml_dsp_close(remote_handle64 handle) {
 }
 
 AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requested_thread_counts, int32 * actual_thread_counts) {
+    if (!g_dsp_ctx) {
+        return AEE_EBADPARM;
+    }
     /* Reserve 2 hw thread slots: one for the hmx_queue thread, one for
      * FastRPC listener/system activity. An op needs requested_thread_counts+1
      * co-resident threads; oversubscribing deadlocks because QuRT does
@@ -1974,6 +1998,9 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
 
 AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
     (void)h;
+    if (!g_dsp_ctx) {
+        return AEE_EBADPARM;
+    }
     int32_t fd = (int32_t)ion_fd;
     uint64_t size = ((uint64_t)size_hi << 32) | (uint64_t)size_lo;
 
@@ -2032,6 +2059,9 @@ static void dsp_queues_suspend(void) {
  * ION-based op-batch execution: FastRPC only passes 2 scalars (offset, size) - all data is in the mempool.
  */
 AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
+    if (!g_dsp_ctx) {
+        return AEE_EBADPARM;
+    }
     if (g_dsp_ctx->ion_dsp_base == NULL) {
         GGMLHEXAGON_LOG_ERROR("ION base not registered");
         return AEE_EBADPARM;
@@ -2133,6 +2163,26 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const hex_op_desc * ops = (const hex_op_desc *)((const char *)hdr + hdr->ops_offset);
     const hex_tensor_desc * tens = (const hex_tensor_desc *)((const char *)hdr + hdr->tensors_offset);
 
+    /* Validate per-op src_idx/dst_idx against n_tensors to prevent
+     * OOB access into g_pre_dt/g_pre_ht/g_batch_tensor_needs_inval. */
+    for (uint32_t i = 0; i < hdr->n_ops; i++) {
+        const hex_op_desc * op = &ops[i];
+        for (int s = 0; s < HTP_OP_MAX_INPUTS; s++) {
+            if (op->src_idx[s] >= 0 && (uint32_t)op->src_idx[s] >= hdr->n_tensors) {
+                GGMLHEXAGON_LOG_ERROR("op %u: src_idx[%d]=%d exceeds n_tensors=%u",
+                                      i, s, op->src_idx[s], hdr->n_tensors);
+                return AEE_EBADPARM;
+            }
+        }
+        for (int d = 0; d < HTP_OP_MAX_OUTPUTS; d++) {
+            if (op->dst_idx[d] >= 0 && (uint32_t)op->dst_idx[d] >= hdr->n_tensors) {
+                GGMLHEXAGON_LOG_ERROR("op %u: dst_idx[%d]=%d exceeds n_tensors=%u",
+                                      i, d, op->dst_idx[d], hdr->n_tensors);
+                return AEE_EBADPARM;
+            }
+        }
+    }
+
     /* VTCM is acquired once in ggml_dsp_open and held for the whole
      * session (matches htp/main.c htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
@@ -2181,7 +2231,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         for (uint32_t oi = 0; oi < hdr->n_ops; oi++) {
             for (int s = 0; s < HTP_OP_MAX_INPUTS; s++) {
                 const int32_t si = ops[oi].src_idx[s];
-                if (si >= 0) {
+                if (si >= 0 && (uint32_t)si < hdr->n_tensors) {
                     g_tensor_last_use_op[si] = oi;
                 }
             }
@@ -2432,7 +2482,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     __asm__ __volatile__("" ::: "memory");
     if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
         uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx[0]].data_offset;
-        if (g_dsp_ctx->ion_dsp_size > last_off + 4)
+        if (last_off < g_dsp_ctx->ion_dsp_size && g_dsp_ctx->ion_dsp_size - last_off > 4)
             (void) *(volatile const int *)(base + last_off);
     }
     __asm__ __volatile__("" ::: "memory");

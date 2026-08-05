@@ -432,7 +432,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.5"},
+        .version                = {"0.99.6"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -527,6 +527,10 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
         va_list args;
         va_start(args, format);
         int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+        if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+            va_end(args);
+            return;
+        }
         int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
@@ -559,6 +563,10 @@ static void ggmlhexagon_log_always_internal(ggml_log_level level, const char * f
         va_list args;
         va_start(args, format);
         int len_prefix = snprintf(s_log_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+        if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+            va_end(args);
+            return;
+        }
         int len = vsnprintf(s_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
@@ -5930,6 +5938,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     if (AEE_SUCCESS != hexagon_error) {
         GGMLHEXAGON_LOG_WARN("ggml_dsp_execute_batch failed: 0x%x", hexagon_error);
+        result =  GGML_STATUS_FAILED;
     }
 
     // t_p10 captures the entire synchronous invoke (== old p10 minus civac)
