@@ -1232,6 +1232,43 @@ function run_abtest()
 }
 
 
+function run_abtest_all()
+{
+    # Run AB test across all 5 supported models.
+    # Usage: run_abtest_all [rounds]
+    #   rounds: default 3
+    #
+    # Example:
+    #   $0 run_abtest_all
+    #   $0 run_abtest_all 5
+    #   $0 run_abtest_all 2>&1 | tee log_abtest_all_$(date +%Y%m%d-%H%M%S).txt
+
+    local rounds=3
+    if [ $# -ge 1 ]; then
+        rounds=$1
+    fi
+
+    local all_models="qwen3 gemma4 gemma4-e4b qwen1 llama3"
+    local total=5
+    local idx=0
+
+    for model_alias in ${all_models}; do
+        idx=$((idx + 1))
+        echo ""
+        echo "##############################################"
+        echo "  AB test ${idx}/${total}: ${model_alias}"
+        echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "##############################################"
+        run_abtest ${rounds} ${model_alias}
+    done
+
+    echo ""
+    echo "##############################################"
+    echo "  All AB tests complete $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "##############################################"
+}
+
+
 function run_ubatchtest()
 {
     # Update ubatch-size values for a given model.
@@ -1577,6 +1614,13 @@ function show_usage()
     echo "      $0 run_abtest 2>&1 | tee log_abtest_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
+    echo "  $0 run_abtest_all [rounds]"
+    echo "    Batch AB test across all 5 models (qwen3, gemma4, gemma4-e4b, qwen1, llama3)."
+    echo "    rounds: default 3"
+    echo "    Log capture example:"
+    echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
     echo "  $0 run_llamacli   [model_alias]"
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
@@ -1689,6 +1733,9 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_abtest" ]; then
         run_abtest
         exit 0
+    elif [ "$1" == "run_abtest_all" ]; then
+        run_abtest_all
+        exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest
         exit 0
@@ -1727,6 +1774,9 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_abtest" ]; then
         run_abtest "$2"
+        exit 0
+    elif [ "$1" == "run_abtest_all" ]; then
+        run_abtest_all "$2"
         exit 0
     else
         show_usage
