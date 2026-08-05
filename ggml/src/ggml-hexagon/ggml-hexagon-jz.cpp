@@ -1962,7 +1962,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // See the dsp_cache_mode and dsp_cache_trace_bit{0,1} comments in hexagon_appcfg_t.
         //
         // Note: must run AFTER ggmlhexagon_init_rpcmempool(). The DSP-side
-        // 0xFFFC handler in entry.c asserts ion_dsp_base != NULL; without the
+        // 0xFFFC handler in entry.c asserts mempool_dsp_base != NULL; without the
         // mempool registered first it returns AEE_EBADPARM (0x8000040e) and
         // the bitmask is silently dropped.
         {
