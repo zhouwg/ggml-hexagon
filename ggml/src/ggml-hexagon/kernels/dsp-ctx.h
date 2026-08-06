@@ -17,9 +17,9 @@
 extern "C" {
 #endif
 
-#ifndef NDEBUG
-#define HEX_OP_PROF                     1
-#else
+/* Op-level profiling is always disabled
+ * Compile with -DHEX_OP_PROF=1 to enable */
+#ifndef HEX_OP_PROF
 #define HEX_OP_PROF                     0
 #endif
 
