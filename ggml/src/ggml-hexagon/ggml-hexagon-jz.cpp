@@ -255,6 +255,7 @@ struct ggml_backend_hexagon_context {
     uint32_t max_n_ops_per_call;                // max hex_ops.size() across all graph_compute calls
     int64_t  min_p10_us;                        // shortest single FastRPC call
     int64_t  max_p10_us;                        // longest single FastRPC call
+    uint32_t max_layer_idx_seen;                // largest layer suffix in tensor names (ffn_gate-N etc), n_layer = max + 1
 
     // Per-call AP-side overhead (graph_dur - p10). Tracks how much time each
     // graph_compute_batch call spends outside of pure DSP execution
@@ -301,6 +302,16 @@ struct ggml_backend_hexagon_context {
     uint64_t n_fused_qkv_cum     = 0;           // 3x MUL_MAT -> HTP_OP_MUL_MAT_QKV fusions
     uint64_t n_fused_ffn_cum     = 0;           // 2x MUL_MAT -> HTP_OP_MUL_MAT_FFN fusions
     uint64_t n_fused_mm_add_cum  = 0;           // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
+    // Fusion candidates rejected by the HMX gate (would fuse if
+    // force_opfusion_in_pp=1, or with a future HMX-aware fused kernel).
+    // n_qkv_skip_cum_hmx  : QKV candidates (i.e. 3 consecutive MUL_MATs).
+    // n_pair_skip_cum_hmx : all (MUL_MAT, next MUL_MAT) pairs in the graph
+    //                       (broader than FFN-specific gate+up; includes output proj + next,
+    //                       and any adjacent MUL_MAT pair).
+    // n_mm_add_skip_cum_hmx: MUL_MAT+ADD fusion candidates (not yet gated by HMX).
+    uint64_t n_qkv_skip_cum_hmx  = 0;
+    uint64_t n_pair_skip_cum_hmx  = 0;
+    uint64_t n_mm_add_skip_cum_hmx = 0;
 
     // HMX eligibility diagnostic counters (why MUL_MATs fall back to HVX)
     uint64_t n_hmx_basic_pass          = 0;     // passed basic HMX eligibility
@@ -377,6 +388,11 @@ struct hexagon_appcfg_t {
     int ion_sync_mode;          // 0=both(DC CVAC+ion_sync), 1=ion_sync only(default), 2=DC CVAC only
     int rpc_mmap_mode;          // 0=FASTRPC_MAP_FD_DELAYED (default), 1=FASTRPC_MAP_FD (eager pinning)
     int enable_opfusion;        // 1=enable QKV/FFN op fusion (default), 0=disable (for debugging)
+    int force_opfusion_in_pp;   // 0=HMX gate excludes PP MUL_MATs from fusion (default),
+                                //   1=force QKV/FFN/mm_add fusion even when MUL_MAT is HMX-eligible.
+                                //   Off by default to preserve HMX speedup; flip to 1 to measure
+                                //   whether HVX-fused path beats 3x HMX path in PP by saving
+                                //   cache-invalidation overhead.
     int fa_select;              // flash attention: 2=HMX->HVX->CPU, 1=HVX->CPU, 0=CPU (default 2)
     int dsp_cache_mode;         // DSP-side entry.c cache optimization bitmask, pushed to DSP at init via
                                 //   execute_batch(0xFFFC) special mode. All four bits
@@ -411,6 +427,11 @@ struct hexagon_appcfg_t {
     std::string enabled_types;  // comma-separated list of weight types to offload for MUL_MAT (empty = all supported types)
 };
 
+// designated initializers are a C++20 extension; suppress to keep readability in C++17 builds
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc++20-designator"
+#endif
 static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dump_debug_info        = 0,
         .thread_counts          = 6,
@@ -419,6 +440,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .ion_sync_mode          = 1,
         .rpc_mmap_mode          = 0,
         .enable_opfusion        = 1,
+        .force_opfusion_in_pp   = 0,
         .fa_select              = 2,
         .dsp_cache_mode         = 5,
         .dsp_cache_trace_bit0   = 0,
@@ -467,6 +489,9 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
                 .vtcm_size_in_mb   = 8,
                 .soc_desc          = "Qualcomm SnapDragon 8 Elite Gen5"},
 };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // Owning pointer to the reg context. The framework's ~ggml_backend_registry()
 // does not delete reg->context (see FIXME in ggml-backend-reg.cpp), so we rely
@@ -615,6 +640,8 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(DSP):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
+    GGMLHEXAGON_LOG_VERBOSE("enable_opfusion:                  %d", g_hexagon_appcfg.enable_opfusion);
+    GGMLHEXAGON_LOG_VERBOSE("force_opfusion_in_pp:             %d", g_hexagon_appcfg.force_opfusion_in_pp);
     if (NULL != ctx) {
         GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hmx:                 %d", ctx->has_hmx);
     }
@@ -640,6 +667,8 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
                              ctx->socinfo.vtcm_size_in_mb,
                              (int)ctx->has_hvx, (int)ctx->has_hmx);
+    GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
+                             ctx->max_layer_idx_seen + 1);
     GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
                              (unsigned long long)ctx->rpc_batch_call_count,
                              (long long)ctx->cum_p10_us, (long long)ctx->cumulative_graph_us,
@@ -697,12 +726,15 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
         const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
         GGMLHEXAGON_LOG_ALWAYS("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
-                               "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
+                               "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%) "
+                               "qkv_skip_hmx=%llu pair_skip_hmx=%llu",
                                (unsigned long long)ctx->n_mul_mat_total_cum,
                                (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
                                (unsigned long long)ctx->n_fused_qkv_cum, qkv_pct,
                                (unsigned long long)ctx->n_fused_ffn_cum, ffn_pct,
-                               (unsigned long long)ctx->n_fused_mm_add_cum, add_pct);
+                               (unsigned long long)ctx->n_fused_mm_add_cum, add_pct,
+                               (unsigned long long)ctx->n_qkv_skip_cum_hmx,
+                               (unsigned long long)ctx->n_pair_skip_cum_hmx);
     }
 
     // HMX eligibility diagnostic: why MUL_MATs fall back to HVX
@@ -936,6 +968,7 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "ion_sync_mode", g_hexagon_appcfg.ion_sync_mode, 1);
     hexagoncfg_instance.get_intvalue("cdsp", "rpc_mmap_mode", g_hexagon_appcfg.rpc_mmap_mode, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "enable_opfusion", g_hexagon_appcfg.enable_opfusion, 1);
+    hexagoncfg_instance.get_intvalue("cdsp", "force_opfusion_in_pp", g_hexagon_appcfg.force_opfusion_in_pp, 0);
     hexagoncfg_instance.get_intvalue("cdsp", "fa_select", g_hexagon_appcfg.fa_select, 2);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_mode", g_hexagon_appcfg.dsp_cache_mode, 5);
     hexagoncfg_instance.get_intvalue("cdsp", "dsp_cache_trace_bit0", g_hexagon_appcfg.dsp_cache_trace_bit0, 0);
@@ -2352,7 +2385,12 @@ static bool mm_is_hmx_eligible(const ggml_backend_hexagon_context * ctx, const g
 static bool is_mergeable_mul_mat(const ggml_backend_hexagon_context * ctx, const ggml_tensor * t) {
     if (!t || t->op != GGML_OP_MUL_MAT)   return false;
     if (t->src[1]->type != GGML_TYPE_F32) return false;
-    return ggml_is_quantized(t->src[0]->type) && !mm_is_hmx_eligible(ctx, t);
+    if (!ggml_is_quantized(t->src[0]->type)) return false;
+    // force_opfusion_in_pp: experimental opt-in to bypass the HMX gate so QKV/FFN/mm_add
+    // fusion can fire in PP. Off by default; measure to see if HVX-fused path beats
+    // 3x HMX path by saving cache-invalidation overhead.
+    if (g_hexagon_appcfg.force_opfusion_in_pp) return true;
+    return !mm_is_hmx_eligible(ctx, t);
 }
 
 static bool is_mergeable_mul_mat_pair(const ggml_backend_hexagon_context * ctx, const ggml_tensor * n1, const ggml_tensor * n2) {
@@ -3018,7 +3056,6 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       rpc_mempool_dsp_base(nullptr),
       weights_dirty(false),
       dsp_need_weight_inval_reset(false),
-      warned_qkv_name(false),
       rpc_batch_call_count(0),
       cumulative_graph_us(0),
       last_graph_end_us(0),
@@ -3033,6 +3070,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       max_n_ops_per_call(0),
       min_p10_us(0),
       max_p10_us(0),
+      max_layer_idx_seen(0),
       min_rpc_overhead_us(0),
       max_rpc_overhead_us(0),
       sum_rpc_overhead_us(0),
@@ -3056,6 +3094,9 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       n_fused_qkv_cum(0),
       n_fused_ffn_cum(0),
       n_fused_mm_add_cum(0),
+      n_qkv_skip_cum_hmx(0),
+      n_pair_skip_cum_hmx(0),
+      n_mm_add_skip_cum_hmx(0),
       n_hmx_basic_pass(0),
       n_hmx_basic_fail_ne01(0),
       n_hmx_basic_fail_ne00(0),
@@ -3068,7 +3109,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       buffer_type{},
       has_vtcm(false),
       has_hvx(false),
-      has_hmx(false) {
+      has_hmx(false),
+      warned_qkv_name(false) {
     snprintf(name, sizeof(name), "Hexagon-cDSP%d", dev_id);
     snprintf(desc, sizeof(desc), "Qualcomm NPU(CDSP%d)", dev_id);
     snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
@@ -4469,6 +4511,39 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
     }
     set_tensor_call_count++;
+    // Track max layer index from the last contiguous digit run in tensor name.
+    // Supports multiple naming conventions:
+    //   ffn_gate-12          (qwen3, dash separator)
+    //   blk.23.ffn.weight    (gemma/llama, dot separator)
+    //   model.layers.5.x     (transformers, dot separator)
+    // One-time cost per tensor during model load, never in graph_compute hot path.
+    if (tensor->name[0] != '\0') {
+        const char * name = tensor->name;
+        size_t name_len = strlen(name);
+        // find end of last contiguous digit run
+        const char * digit_end = nullptr;
+        for (size_t i = name_len; i > 0; --i) {
+            if (name[i - 1] >= '0' && name[i - 1] <= '9') {
+                digit_end = name + i;
+                break;
+            }
+        }
+        if (digit_end) {
+            // walk back to find start of digit run
+            const char * digit_start = digit_end;
+            while (digit_start > name && *(digit_start - 1) >= '0' && *(digit_start - 1) <= '9') {
+                --digit_start;
+            }
+            char * parse_end = nullptr;
+            long idx = strtol(digit_start, &parse_end, 10);
+            if (parse_end == digit_end && idx >= 0) {
+                ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *) buffer->buft->context;
+                if ((uint32_t)idx > ctx->max_layer_idx_seen) {
+                    ctx->max_layer_idx_seen = (uint32_t)idx;
+                }
+            }
+        }
+    }
     if (is_repack) {
         switch (tensor->type) {
             case GGML_TYPE_Q4_0:
@@ -5196,14 +5271,34 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         size_t n_mm_add_skip_not_adjacent = 0;  // MUL_MAT not followed by ADD
         size_t n_mm_add_skip_vtcm         = 0;  // MUL_MAT+ADD candidate but VTCM budget exceeded
 
+        // Per-batch first-occurrence flags: limit LOG_ALWAYS spam to one
+        // detailed entry per skip reason per batch. The counters above track totals.
+        bool qkv_skip_eof_logged    = false;  // i + 2 >= hex_ops.size()
+        bool qkv_skip_not_mm_logged = false;  // next1/next2 not MUL_MAT
+        bool qkv_skip_merge_logged  = false;  // is_qkv_mergeable returned false
+        bool ffn_skip_eof_logged    = false;  // i + 1 >= hex_ops.size()
+        bool ffn_skip_not_mm_logged = false;  // next not MUL_MAT
+        bool ffn_skip_merge_logged  = false;  // is_mergeable_mul_mat_pair returned false
+
         const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
         // QKV/FFN fusion prerequisites:
         //   - dispatches via DSP execute_op, which provides
         //     op_matmul_qkv / op_matmul_ffn as dedicated fused kernels (in kernels/*.c).
         // htp_arch>=V73 is required because op_matmul_qkv/ffn use HMX instructions.
         bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73 && g_hexagon_appcfg.enable_opfusion);
+        /* Per-batch layer counter: each QKV fusion starts a new "layer" in the
+         * transformer. The QKV op gets layer_idx = n_qkv_seen (its count);
+         * post-QKV ops get layer_idx = n_qkv_seen - 1 (most recent QKV's layer);
+         * pre-QKV ops (e.g. embedding) get layer_idx = 0. MHA models with no
+         * QKV fusion leave n_qkv_seen == 0, so all ops get layer_idx = 0
+         * (degenerate single-bucket output, see OP-PROF-LAYER). */
+        uint32_t n_qkv_seen = 0;
         for (size_t i = 0; i < hex_ops.size(); i++) {
             hex_op_desc op = hex_ops[i];
+            /* Default layer_idx for non-QKV ops in this iteration. QKV branch
+             * (below) overwrites it. */
+            op.layer_idx = (uint16_t)((n_qkv_seen == 0) ? 0 : (n_qkv_seen - 1));
+            op.reserved  = 0;
 
             // RMS_NORM + MUL -> RMS_NORM_MUL
             if (op.opcode == GGML_OP_RMS_NORM && i + 1 < hex_ops.size()) {
@@ -5247,7 +5342,6 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                             // Models name their Q/K/V projection outputs as Qcur-* / Kcur-* /Vcur-*.
                             auto is_k = [](const ggml_tensor * t) { return t && strstr(t->name, "Kcur"); };
                             auto is_v = [](const ggml_tensor * t) { return t && strstr(t->name, "Vcur"); };
-
                             const ggml_tensor * n_k = nullptr;
                             const ggml_tensor * n_v = nullptr;
                             (void)n_v; // used in GGMLHEXAGON_LOG_DEBUG
@@ -5274,8 +5368,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                         "QKV fusion: cannot identify K/V by tensor name "
                                         "(n1='%s', n2='%s'), skipping fusion. "
                                         "Expected names containing 'Kcur'/'Vcur'.",
-                                        n1->name ? n1->name : "?",
-                                        n2->name ? n2->name : "?");
+                                        n1->name[0] ? n1->name : "?",
+                                        n2->name[0] ? n2->name : "?");
                                 }
                                 can_fuse_qkv = false;
                             }
@@ -5297,9 +5391,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                     op.dst_idx[2]   = q_dst;             // Q
                                     op.dst_idx[3]   = -1;
                                     memcpy(op.kernel_params, &kparams, sizeof(kparams));
+                                    op.layer_idx = (uint16_t) n_qkv_seen;  /* QKV marks layer start */
+                                    op.reserved  = 0;
                                     fused_ops.push_back(op);
                                     i += 2;
                                     n_mul_mat_qkv++;
+                                    n_qkv_seen++;
                                     ctx->n_fused_qkv_cum++;
                                     GGMLHEXAGON_LOG_DEBUG("DBG QKV fusion: q=%s k=%s v=%s | Wq[t%d] Wk[t%d] Wv[t%d] x[t%d] | Q[t%d] K[t%d] V[t%d]",
                                                              n_q->name ? n_q->name : "?",
@@ -5309,11 +5406,37 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                                              q_dst, op_k->dst_idx[0], op_v->dst_idx[0]);
                                     continue;
                                 } else {
-                                    GGMLHEXAGON_LOG_INFO("skip QKV fusion: VTCM needed (%d) > budget (%zu)", (int)kparams.vtcm_size, vtcm_budget);
+                                    GGMLHEXAGON_LOG_ALWAYS("skip QKV fusion: VTCM needed (%d) > budget (%zu)",
+                                                           (int)kparams.vtcm_size, vtcm_budget);
                                 }
+                            } else if (!qkv_skip_merge_logged) {
+                                qkv_skip_merge_logged = true;
+                                GGMLHEXAGON_LOG_ALWAYS(
+                                    "QKV skip: name match failed | q='%s' k='%s' v='%s' | i=%zu/%zu",
+                                    n_q && n_q->name[0] ? n_q->name : "?",
+                                    n1 && n1->name[0] ? n1->name : "?",
+                                    n2 && n2->name[0] ? n2->name : "?",
+                                    i, hex_ops.size());
+                            }
+                        } else {
+                            ctx->n_qkv_skip_cum_hmx++;        // every QKV candidate rejected (counter is independent of log spam control)
+                            if (!qkv_skip_not_mm_logged) {
+                                qkv_skip_not_mm_logged = true;
+                                GGMLHEXAGON_LOG_ALWAYS(
+                                    "QKV skip: is_qkv_mergeable=false (HMX gate) | q='%s' k='%s' v='%s' | i=%zu/%zu",
+                                    n_q && n_q->name[0] ? n_q->name : "?",
+                                    n1 && n1->name[0] ? n1->name : "?",
+                                    n2 && n2->name[0] ? n2->name : "?",
+                                    i, hex_ops.size());
                             }
                         }
                     }
+                } else if (!qkv_skip_eof_logged) {
+                    qkv_skip_eof_logged = true;
+                    GGMLHEXAGON_LOG_ALWAYS(
+                        "QKV skip: i+2 >= size | cur='%s' | i=%zu size=%zu",
+                        tensor_src[op.dst_idx[0]] && tensor_src[op.dst_idx[0]]->name[0] ? tensor_src[op.dst_idx[0]]->name : "?",
+                        i, hex_ops.size());
                 }
 
                 // FFN fusion: 2 MUL_MAT (gate,up) -> HTP_OP_MUL_MAT_FFN.
@@ -5350,11 +5473,34 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                                          op.dst_idx[0], next.dst_idx[0]);
                                 continue;
                             } else {
-                                GGMLHEXAGON_LOG_DEBUG("skip FFN fusion: VTCM needed (%d) > budget (%zu)",
-                                                      (int)kparams.vtcm_size, vtcm_budget);
+                                GGMLHEXAGON_LOG_ALWAYS("skip FFN fusion: VTCM needed (%d) > budget (%zu)",
+                                                       (int)kparams.vtcm_size, vtcm_budget);
+                            }
+                        } else {
+                            ctx->n_pair_skip_cum_hmx++;        // every (MUL_MAT, next MUL_MAT) pair rejected by HMX gate (counter is independent of log spam control)
+                            if (!ffn_skip_merge_logged) {
+                                ffn_skip_merge_logged = true;
+                                GGMLHEXAGON_LOG_ALWAYS(
+                                "FFN skip: is_mergeable_mul_mat_pair=false | gate='%s' up='%s' | i=%zu/%zu",
+                                n_gate && n_gate->name[0] ? n_gate->name : "?",
+                                n_up && n_up->name[0] ? n_up->name : "?",
+                                    i, hex_ops.size());
                             }
                         }
+                    } else if (!ffn_skip_not_mm_logged) {
+                        ffn_skip_not_mm_logged = true;
+                        GGMLHEXAGON_LOG_ALWAYS(
+                            "FFN skip: next not MUL_MAT | cur='%s' next.op=%d | i=%zu/%zu",
+                            tensor_src[op.dst_idx[0]] && tensor_src[op.dst_idx[0]]->name[0] ? tensor_src[op.dst_idx[0]]->name : "?",
+                            (int) next.opcode,
+                            i, hex_ops.size());
                     }
+                } else if (!ffn_skip_eof_logged) {
+                    ffn_skip_eof_logged = true;
+                    GGMLHEXAGON_LOG_ALWAYS(
+                        "FFN skip: i+1 >= size | cur='%s' | i=%zu size=%zu",
+                        tensor_src[op.dst_idx[0]] && tensor_src[op.dst_idx[0]]->name[0] ? tensor_src[op.dst_idx[0]]->name : "?",
+                        i, hex_ops.size());
                 }
             }
 

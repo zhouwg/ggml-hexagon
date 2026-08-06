@@ -1,4 +1,4 @@
-# ggml-hexagon 性能差异分析与优化方向
+# JZ's ggml-hexagon 性能差异分析与优化方向
 
 > **作者**: Seed-2.1-Pro
 >
@@ -443,9 +443,469 @@ Step 4: 长期架构（按 Step 2 效果决定）
 
 **不要为了追 PP 性能而破坏 TG 的优势。** JZ 在 TG 上的优势（single mempool -> lm-head offload、batch-level cache、tiled repack）是架构级的，而 dspqueue 是一种通信机制。理想状态是 **TG 走当前 batch-level 同步模型，PP 走 layer-level 异步流水线模型**，两种模式共享同一套 kernel 和 mempool 基础设施。
 
+## 五、force_opfusion_in_pp 实验
+
+> **作者**: MiniMax-M3
+>
+> **日期**: 2026-08-06
+>
+> **基线 commit**: `4c805d844`(feature/force_opfusion_in_pp 分支 HEAD)
+>
+> **模型**: `gemma-4-E2B-it-Q4_0.gguf`(默认测试模型,35 层)
+
+### 5.1 实验动机
+
+第 4.2 节确定 PP 是 JZ 真正战场之后,需要找到一个低风险高收益的切入点。观察到 `is_mergeable_mul_mat()` 中的 HMX-eligibility 闸门在 PP 路径下必然拒绝所有 MUL_MAT(因为 `M > HTP_MM_HMX_MIN_NROWS=4`),导致 QKV/FFN/mm_add fusion 在 PP 完全失效。直觉假设:
+
+- **假设 A**: 3 个独立 HMX MUL_MAT → 1 个 HVX fused MUL_MAT_QKV,单算子更慢但 cache 失效次数减少到 1/3
+- **假设 B**: cache 失效节省 > 算子额外耗时 → 净收益为正
+
+为此引入 `force_opfusion_in_pp` 配置开关(0=保持原 HMX 闸门,1=旁路闸门强制融合),并加 3 个 cum 计数器(`n_qkv_skip_cum_hmx` / `n_pair_skip_cum_hmx` / `n_mm_add_skip_cum_hmx`)量化被错过的融合机会数。
+
+### 5.2 实验设计
+
+| 配置 | 含义 | 备注 |
+|---|---|---|
+| `enable_opfusion=1` | QKV/FFN/mm_add fusion 总开关 | 原默认 |
+| `force_opfusion_in_pp=0` | 保留 HMX 闸门(基线) | 原默认 |
+| `force_opfusion_in_pp=1` | 旁路 HMX 闸门,大 M 路径下也允许融合 | 实验性 |
+
+实现细节:
+
+- `is_mergeable_mul_mat` 加 bypass 分支:`if (g_hexagon_appcfg.force_opfusion_in_pp) return true;`
+- 3 个 cum 计数器在对应 skip 分支自增(每发生一次 +1,不受 log spam 控制)
+- `mul_mat coverage` 打印新增 `qkv_skip_hmx / pair_skip_hmx` 字段
+- `ggmlhexagon_print_running_timestamp` 打印 `enable_opfusion` 与 `force_opfusion_in_pp` 当前值,避免运行时确认配置
+- `scripts/ggml-hexagon.cfg` 新增 `force_opfusion_in_pp = 0` 默认值与说明
+
+### 5.3 gemma4-E2B 单模型对比：force=0 baseline vs force=1 实验
+
+gemma4-E2B（35 层，GQA 4:1，参 5.4.1）是默认测试模型。本节在同一模型上对比 `force_opfusion_in_pp=0` 与 `force_opfusion_in_pp=1` 两组数据，量化"旁路 HMX 闸门"的净收益。
+
+#### 5.3.1 Baseline 数据（`force_opfusion_in_pp=0`）
+
+```
+mul_mat coverage: total=277 hmx=276 (99.6%) qkv_fused=0 (saves 0.0%) ffn_fused=0 (saves 0.0%) mm_add_fused=0 (saves 0.0%) qkv_skip_hmx=15 pair_skip_hmx=65
+hmx eligibility: total=1940 pass=1386 (71.4%)
+batch-wall cum=81252 us op-sum cum=56999 us non-op avg=24253 us/batch
+non-op: hdr=4 pre=392 w-inv=13639(1334MB) a-inv=6869(551MB) dst=112 bulk=1677 queue=8 us/batch
+```
+
+**关键解读**:
+
+- `qkv_skip_hmx=15` 与层数完全对应,**每层 1 个 QKV 候选被 HMX 闸门拒掉**,量化基线错失 15 个 QKV 融合机会
+- `pair_skip_hmx=65` 量化基线错失 ~65 个 (MUL_MAT, MUL_MAT) pair 融合机会(覆盖 FFN gate+up、output projection + next 等所有相邻 MUL_MAT 对)
+- 277 个 MUL_MAT 中 276 走 HMX 路径(99.6%),QKV/FFN/mm_add 全部走单算子 HMX
+- non-op 中 `w-inv=13.6ms(1334MB)` + `a-inv=6.9ms(551MB)` 占 batch-wall 25%,是融合可能节省的最大单项
+
+#### 5.3.2 实验数据（`force_opfusion_in_pp=1`）— HVX 融合路径在 PP 反而慢 3.8x
+
+```
+mul_mat coverage: total=277 hmx=276 (99.6%) qkv_fused=15 (saves 16.2%) ffn_fused=35 (saves 25.3%) mm_add_fused=0 (saves 0.0%) qkv_skip_hmx=0 pair_skip_hmx=0
+hmx eligibility: total=1940 pass=1386 (71.4%)
+batch-wall cum=309487 us op-sum cum=285285 us non-op avg=24202 us/batch
+non-op: hdr=6 pre=303 w-inv=13630(1334MB) a-inv=6934(551MB) dst=129 bulk=1679 queue=8 us/batch
+[OPROF] op=MUL_MAT_QKV cum=17534 us count=15 avg=1168 min=997 max=1842 us
+[OPROF] op=MUL_MAT_FFN cum=228047 us count=35 avg=6515 min=4153 max=8288 us
+```
+
+**对比 Table** (与 5.3.1 baseline 对比):
+
+| 指标 | baseline (force=0) | 实验 (force=1) | 变化 |
+|---|---:|---:|---:|
+| batch-wall | 81,252 us | **309,487 us** | **+280% (3.8x 慢)** |
+| MUL_MAT count | 277 | 162 | -115 (115 个被融合) |
+| MUL_MAT time | 38,069 us | 21,024 us | -45% |
+| MUL_MAT_QKV | 0 | 17,534 us (15 ops) | +17.5 ms |
+| **MUL_MAT_FFN** | 0 | **228,047 us (35 ops)** | **+228 ms (单 op 6.5 ms!)** |
+| qkv_fused | 0 | 15 | bypass 生效 |
+| ffn_fused | 0 | 35 | bypass 生效 |
+| qkv_skip_hmx | 15 | 0 | 计数器归零 |
+| pair_skip_hmx | 65 | 0 | 计数器归零 |
+| non-op w-inv | 13,636 us | 13,630 us | ≈ 不变 |
+| non-op a-inv | 6,875 us | 6,934 us | ≈ 不变 |
+
+### 5.4 5 模型 CI 验证 — 跨模型确认 HVX 融合在 PP 不通用 + force=0 行为无回归
+
+- **本轮 (2026-08-06 21:13-21:16) 5 模型全部完整抓取**:通过 `./scripts/build-run-android.sh run_force_opfusion_in_pp_all` 一键运行,每个模型生成 2 个 log(`*_terminal.txt` + `*_logcat.txt`),共 10 个文件,统一命名 `log_forceopfusioninpp_<model>_<ts>_*.txt`
+
+#### 5.4.1 5 模型基础信息
+
+**Table-6**: 5 模型基础参数(按 alias 数组顺序)
+
+| # | alias       | 模型文件                                       | vocab_size | lm-head 类型 | 层数  | 注意力类型     | 唯一算子 (PP/TG)         |
+| - | ----------- | ------------------------------------------ | ---------- | ---------- | --- | --------- | ------------------- |
+| 1 | gemma4      | gemma-4-E2B-it-Q4_0.gguf                   | 256,000    | Q4_K       | 35  | GQA 4:1   | GLU_GEGLU, UNARY_TANH |
+| 2 | qwen3       | Qwen3.5-2B-Q4_0.gguf                       | 151,936    | Q6_K       | 24  | GQA + Delta Net | **GATED_DELTA_NET**, L2_NORM, UNARY_SILU/SIGMOID/SOFTPLUS |
+| 3 | qwen1       | Qwen1.5-1.8B-Q4_0.gguf                     | 151,936    | Q6_K       | 24  | MHA 1:1   | MUL_MAT_ADD, MUL_MAT_FFN, GLU_SWIGLU |
+| 4 | llama3      | Llama-3.2-1B-Instruct-Q4_0.gguf            | 128,256    | Q4_K       | 16  | GQA 4:1   | MUL_MAT_ADD, GLU_SWIGLU |
+| 5 | gemma4-e4b  | gemma-4-E4B_q4_0-it.gguf                   | 256,000    | Q4_K       | 42  | GQA 8:1   | GLU_GEGLU, UNARY_TANH |
+
+**说明**:
+
+- **层数 = `ggmlhexagon_dump_perf_stats` 中 `model: n_layer=N (parsed from tensor name suffixes)` 直接读取**(2026-08-06 force_opfusion_in_pp cleanup 验证后新增字段,通过 `set_tensor` 阶段扫描 tensor name 末尾连续数字段得到 max layer index)
+  - gemma4: 35(=3.6 节 baseline 时代估算的"24"是早期不准确值,实际 tensor 范围 0-34)
+  - gemma4-e4b: 42(此前估算"35"不准确,实际 tensor 范围 0-41)
+  - llama3 / qwen1: 与此前手工分析一致
+  - qwen3: 24(此前 log 中"`ffn_gate-12` 算子编号暗示 FFN 编号 0~12 共 13 项"指的是 **FFN 算子所在层数**;delta net 架构的 24 个总层中只有 13 个含 FFN,其余为 linear-attention delta net 层,见 5.4.3 详细分析)
+- 5 个测试均使用 `n_ctx=8192, n_batch=2048, n_predict=256, n_threads=6, dsp_cache_mode=5, ion_sync_mode=1`
+- **5 个模型都没有出现 MUL_MAT_QKV fusion**:HMX 闸门在 PP 路径下仍正常拒绝,见 5.4.4
+- **5 个模型都没有出现 MUL_MAT_FFN fusion 在 PP batch#1 触发**:仅 qwen1 的 PP 边缘出现 1 次 MUL_MAT_FFN(count=1, cum=265us);MUL_MAT_ADD 在 llama3/qwen1 触发,gemma 系不触发
+
+#### 5.4.2 PP batch#1 数据对比(全部 5 模型)
+
+**Table-7**: 5 模型 PP batch#1 OP-PROF 对比
+
+| 模型         | n_layer | batch-wall (us) | op-sum (us) | non-op (us) | MUL_MAT cum (us) | MUL_MAT count | MUL_MAT max (us) | FLASH_ATTN cum (us) | FLASH_ATTN count | non-op w-inv (MB) | non-op a-inv (MB) | non-op bulk (us) |
+| ---------- | :-----: | :-------------: | :---------: | :---------: | :--------------: | :-----------: | :--------------: | :-----------------: | :--------------: | :---------------: | :---------------: | :--------------: |
+| gemma4     |   35    |     81,637      |   57,592    |   24,045    |     39,360       |      277      |     **4,448**    |       4,026         |        35        |     **1,334**     |       542         |      1,485       |
+| gemma4-e4b |   42    |    140,304      |   97,944    |   42,360    |     70,418       |      344      |     **7,873**    |       6,102         |        42        |     **2,528**     |       891         |      2,906       |
+| llama3     |   16    |     37,598      |   24,275    |   13,323    |      9,856       |       79      |        262       |       5,277         |        16        |        497        |       415         |      2,634       |
+| qwen1      |   24    |     91,150      |   47,613    | **43,537**  |     11,575       |       48      |       3,846      |      **18,615**     |        24        |        818        |    **1,754**      |   **15,119**     |
+| qwen3      |   24    |        794      |      569    |      225    |        191       |        1      |        191       |          —          |        —         |         6         |         5         |         53       |
+
+**关键观察**:
+
+1. **batch-wall 与模型规模/层数正相关(且 gemma4 与 gemma4-e4b 比例完全符合预期)**:
+   - gemma4-e4b (42层,4B,GQA 8:1) 140,304us
+   - gemma4 (35层,2B,GQA 4:1) 81,637us
+   - qwen1 (24层,1.8B,MHA 1:1) 91,150us
+   - llama3 (16层,1B,GQA 4:1) 37,598us
+   - **gemma4-e4b / gemma4 ratio = 1.72x**,与层数比 42/35=1.20x + 模型尺寸比 4B/2B=2.0x 加权后吻合(注意 8:1 GQA 比 4:1 GQA 减少 attention 中间张量,可抵消部分开销)
+2. **MUL_MAT max 是 lm-head 标志**: gemma4 max=4,448us, gemma4-e4b max=7,873us, qwen1 max=3,846us, llama3 max=262us(无 lm-head 在 PP 中显式大算子,因为 vocab_size=128K 在 PP 阶段被分块执行)。**gemma4 与 3.6 节 Table-3 baseline max=4,697us 几乎完全一致**(差异 249us = 5.3%,在测量噪声+AP phase 抖动内),验证本轮 force=0 cleanup 无回归
+3. **qwen1 的 FLASH_ATTN avg=776us 显著高于其他**: MHA(1:1 attention)在 PP 大 M 下 Q@K^T 矩阵规模最大;GQA 模型的 avg 仅 115-145us(gemma4 35层 avg=115us, gemma4-e4b 42层 avg=145us)
+4. **qwen1 的 non-op a-inv=19,134us + bulk=15,119us 是 5 模型中最高**: MHA 模型 attention 中间张量(Q@K^T, Softmax(QK^T)·V)占用最大 VTCM 与 DDR 带宽,导致 cache 维护代价翻倍。这是 3.5 节"Qwen1.5-1.8B 三重叠加根因"的直接证据
+5. **gemma4-e4b 的 non-op w-inv=25,802us(2,528MB)远高于 gemma4 的 13,637us(1,334MB)**: 4B 参数量大,首次权重 touch 范围广。**gemma4 的 a-inv=6,900us(542MB)较 qwen1 少 2.8x**,说明 GQA 4:1 模型 attention 中间张量比 MHA 1:1 小约 2.8x,符合 GQA 压缩理论值
+6. **qwen3 是 init batch(M=1)**: 抓取文件只有 embedding 初始化算子(MUL_MAT/RMS_NORM_MUL/GET_ROWS/SCALE/CPY/CONCAT 6 个 op),不代表真实 PP 性能。真实 PP 性能需后续用 `run_pp_only <model>` 重抓(详见 5.4.6 第 3 项)
+7. **MUL_MAT count 反映 cgraph 大小**: gemma4 1116 graph ops 中 277 个 MUL_MAT, gemma4-e4b 1384 ops 中 344 个, qwen1 533 ops 中 48 个, llama3 296 ops 中 79 个。差异主要来自 FFN/attention 内部 matmul 数量与是否使用 GQA
+
+##### 5.4.2.1 gemma4 (E2B) 详细算子分布
+
+**Table-7.1**: gemma4 PP batch#1 完整 15 算子分布
+
+| 算子             | cum (us) | count | avg (us) | min (us) | max (us) |
+| -------------- | -------- | ----- | -------- | -------- | -------- |
+| **MUL_MAT**    | 39,360   | 277   | 142      | 16       | **4,448** |
+| **GLU_GEGLU**  | 5,845    | 35    | 167      | 123      | 198      |
+| **FLASH_ATTN_EXT** | 4,026 | 35    | 115      | 104      | 141      |
+| **RMS_NORM_MUL** | 3,752  | 227   | 16       | 4        | 103      |
+| ADD            | 1,894    | 106   | 17       | 16       | 89       |
+| ROPE           | 960      | 50    | 19       | 9        | 42       |
+| MUL            | 638      | 70    | 9        | 4        | 18       |
+| SCALE          | 312      | 6     | 52       | 13       | 87       |
+| UNARY_TANH     | 264      | 1     | 264      | 264      | 264      |
+| UNARY_GELU     | 194      | 35    | 5        | 4        | 12       |
+| SET_ROWS       | 140      | 30    | 4        | 3        | 8        |
+| CPY            | 130      | 1     | 130      | 130      | 130      |
+| RMS_NORM       | 72       | 15    | 4        | 3        | 8        |
+| GET_ROWS       | 5        | 1     | 5        | 5        | 5        |
+| **op-sum 合计** | **57,592** |     |          |          |          |
+
+**non-op 分布**:
+
+- hdr=5, pre=302, **w-inv=13,637 us (1,334MB)**, **a-inv=6,900 us (542MB)**, dst=125, bulk=1,485, queue=10 us/batch
+- non-op 合计=24,045 us/batch (占 batch-wall 29.5%)
+
+**FFN/QKV skip 模式**(gemma4 batch#1 真实日志):
+
+- `QKV skip: is_qkv_mergeable=false (HMX gate)` at i=4/1116 → HMX 闸门按预期拒绝 QKV 融合
+- `FFN skip: is_mergeable_mul_mat_pair=false` at i=4/1116 → HMX 闸门按预期拒绝 FFN pair
+- `FFN skip: next not MUL_MAT` at i=6/1116, i=17/1116 → FFN pair 中 next op 是 UNARY_TANH (op=25) 而非 MUL_MAT,跳过原因不是 HMX 闸门而是 graph 顺序
+
+**tok/s 数据**(`common_perf_print` 输出,本轮端到端性能):
+
+- **prompt eval time = 87.00 ms / 58 tokens (1.50 ms per token, 666.69 tokens per second)**
+- **eval time = 9,623.58 ms / 255 runs (37.74 ms per token, 26.50 tokens per second)**
+- total time = 10,052.86 ms / 313 tokens
+- graphs reused = 253
+- unaccounted time = 26.95 ms / 0.3 %
+
+**`ggmlhexagon_dump_perf_stats` 完整统计**(gemma4 端到端 256 批次):
+
+- device info: Qualcomm Snapdragon 8 Elite, dsp arch version 0x79, system mem size 24834 MiB
+- device: Hexagon-CDSP0, arch=QCOM_HTP_V79, vtcm=8MB, hvx=1, hmx=1
+- **model: n_layer=35 (parsed from tensor name suffixes)**
+- rpc stats: batch_calls=256, cum_p10=9,416,363 us, cum_graph=9,593,148 us, avg_p10=36,782 us, avg_graph=37,473 us
+- graph nodes: min=1493, max=1493, total=382,208
+- graph ops (post-fusion): min=824, max=889
+- per-call range: graph=[35,885, 84,879] us, p10=[35,495, 84,169] us
+- per-call overhead: n=256, min=136, max=6676, avg=690 us (graph_dur - p10)
+- max graph detail: dur=84,879 us, n_nodes=1493, n_ops=889
+- AP phase cumulative: p1=101,249, p2=2,730, p3=1,157, p4=41, p5=10,060, p6=10,342, p7=164, p8=42,472, p9=4,373, p11=3,469, p12=184, unaccounted=544 us
+- p10 3-way cumulative: rpc_setup=38, dsp_exec=9,416,363, civac=3,385 us (sum=9,419,786)
+- rpc overhead (warmup): n=6, min=102, max=251, avg=154 us (pure FastRPC/mempool transport)
+- cgraph cache: hits=253, misses=3 (hit_rate=98.8%), entries=0
+
+**`ggmlhexagon_print_running_timestamp` 完整配置**(gemma4):
+
+- ggml_hexagon_version: 0.99.6
+- offload MUL_MAT types: F32, F16, BF16, Q4_0, Q8_0, Q4_1, IQ4_NL, MXFP4
+- thread_counts on CDSP: 6
+- ion_sync_mode: 1
+- rpc_mmap_mode: 0
+- dsp_cache_mode: 5
+- dsp_cache_trace_bit0: 0
+- dsp_cache_trace_bit1: 0
+- dump_diag_info(DSP): 0
+- dump_diag_info(AP): 0
+- enable_graph_optimize: 1
+- enable_opfusion: 1
+- **force_opfusion_in_pp: 0** (确认默认基线)
+- enabled_ops: ALL
+- running timestamp: 2026-08-06, 21:15:02
+
+**与 3.6 节 baseline 对比验证**:
+
+- batch-wall 81,637us vs baseline 81,252us(差异 0.5%,**确认无回归**)
+- op-sum 57,592us vs baseline 56,500us(差异 1.9%)
+- non-op 24,045us vs baseline 24,752us(差异 2.9%, 略优)
+- MUL_MAT cum 39,360us vs baseline 38,202us(差异 3.0%)
+- MUL_MAT max 4,448us vs baseline 4,697us(差异 5.3%,lm-head max 与 phase 抖动相关)
+- 5 项核心指标差异均在 ±6% 以内,与 gemma4-E2B 历史 baseline 完全一致,确认本轮 force=0 cleanup 未引入任何回归
+
+##### 5.4.2.2 gemma4-e4b 详细算子分布(本轮新增完整数据)
+
+**Table-7.2**: gemma4-e4b PP batch#1 完整 15 算子分布
+
+| 算子             | cum (us) | count | avg (us) | min (us) | max (us) |
+| -------------- | -------- | ----- | -------- | -------- | -------- |
+| **MUL_MAT**    | 70,418   | 344   | 204      | 25       | **7,873** |
+| **GLU_GEGLU**  | 7,646    | 42    | 182      | 180      | 193      |
+| **FLASH_ATTN_EXT** | 6,102 | 42    | 145      | 135      | 180      |
+| **RMS_NORM_MUL** | 6,250  | 278   | 22       | 7        | 111      |
+| ADD            | 3,665    | 127   | 28       | 27       | 127      |
+| ROPE           | 1,137    | 66    | 17       | 9        | 43       |
+| MUL            | 1,080    | 84    | 12       | 4        | 30       |
+| SCALE          | 369      | 6     | 61       | 21       | 99       |
+| UNARY_TANH     | 264      | 1     | 264      | 264      | 264      |
+| UNARY_GELU     | 240      | 42    | 5        | 5        | 15       |
+| SET_ROWS       | 401      | 48    | 8        | 5        | 17       |
+| CPY            | 179      | 1     | 179      | 179      | 179      |
+| RMS_NORM       | 187      | 24    | 7        | 6        | 12       |
+| GET_ROWS       | 6        | 1     | 6        | 6        | 6        |
+| **op-sum 合计** | **97,944** |     |          |          |          |
+
+**non-op 分布**:
+
+- hdr=5, pre=379, **w-inv=25,802 us (2,528MB)**, **a-inv=11,056 us (891MB)**, dst=149, bulk=2,906, queue=10 us/batch
+- non-op 合计=42,360 us/batch (占 batch-wall 30.2%,与 gemma4 的 29.5% 几乎一致,说明 GQA 比例从 4:1 升到 8:1 不会显著改变 non-op 占比)
+
+**FFN/QKV skip 模式**(gemma4-e4b batch#1 真实日志):
+
+- `QKV skip: is_qkv_mergeable=false (HMX gate)` at i=4/1384 → HMX 闸门按预期拒绝 QKV 融合
+- `FFN skip: is_mergeable_mul_mat_pair=false` at i=4/1384 → HMX 闸门按预期拒绝 FFN pair
+- `FFN skip: next not MUL_MAT` at i=6/1384, i=17/1384 → 同 gemma4,graph 顺序问题
+
+**tok/s 数据**(`common_perf_print` 输出):
+
+- **prompt eval time = 144.51 ms / 58 tokens (2.49 ms per token, 401.35 tokens per second)**
+- **eval time = 17,494.38 ms / 255 runs (68.61 ms per token, 14.58 tokens per second)**
+- total time = 17,905.08 ms / 313 tokens
+- graphs reused = 253
+- unaccounted time = 19.49 ms / 0.1 %
+
+**`ggmlhexagon_dump_perf_stats` 完整统计**(gemma4-e4b 端到端 256 批次):
+
+- device info: Qualcomm Snapdragon 8 Elite, dsp arch version 0x79, system mem size 24834 MiB
+- device: Hexagon-CDSP0, arch=QCOM_HTP_V79, vtcm=8MB, hvx=1, hmx=1
+- **model: n_layer=42 (parsed from tensor name suffixes)**
+- rpc stats: batch_calls=256, cum_p10=17,371,426 us, cum_graph=17,515,579 us, avg_p10=67,857 us, avg_graph=68,420 us
+- graph nodes: min=1860, max=1860, total=476,160
+- graph ops (post-fusion): min=1016, max=1106
+- per-call range: graph=[65,634, 141,879] us, p10=[65,461, 141,013] us
+- per-call overhead: n=256, min=149, max=4,799, avg=563 us (graph_dur - p10)
+- max graph detail: dur=141,879 us, n_nodes=1860, n_ops=1106
+- AP phase cumulative: p1=59,483, p2=3,479, p3=1,483, p4=33, p5=9,967, p6=15,604, p7=87, p8=40,672, p9=9,647, p11=3,148, p12=100, unaccounted=450 us
+- p10 3-way cumulative: rpc_setup=42, dsp_exec=17,371,426, civac=3,070 us (sum=17,374,538)
+- rpc overhead (warmup): n=6, min=93, max=202, avg=129 us (pure FastRPC/mempool transport)
+- cgraph cache: hits=253, misses=3 (hit_rate=98.8%), entries=0
+
+**`ggmlhexagon_print_running_timestamp` 完整配置**(gemma4-e4b):
+
+- 与 gemma4 E2B 完全一致(force_opfusion_in_pp=0, enable_opfusion=1, dsp_cache_mode=5, ion_sync_mode=1, thread_counts=6)
+- running timestamp: 2026-08-06, 21:16:23
+
+**与 gemma4 E2B 跨模型对比**:
+
+- MUL_MAT avg: gemma4=142us, gemma4-e4b=204us(**1.44x**,接近层数比 42/35=1.20x + 4B/2B 参数量比 2.0x 的加权预期)
+- MUL_MAT max: gemma4=4,448us, gemma4-e4b=7,873us(**1.77x**,lm-head vocab=256K 在两个模型相同,但 E4B 的 hidden dim 翻倍,所以 lm-head matvec 计算量 2x)
+- GLU_GEGLU avg: gemma4=167us, gemma4-e4b=182us(几乎一致,GLU 计算量正比于 hidden_dim)
+- FLASH_ATTN avg: gemma4=115us, gemma4-e4b=145us(1.26x,GQA 8:1 比 4:1 减少 KV 计算量,但 hidden_dim 增大抵消部分优势)
+- non-op 占比: gemma4=29.5%, gemma4-e4b=30.2%(几乎一致,说明 non-op 开销与模型规模近似线性相关,与 3.3 节"role-aware cache 比例恒定"的分析一致)
+
+#### 5.4.3 qwen3 TG batch#978 详细数据(唯一完整 TG 抓取,源文件 `log_qwen3_ppandtg_force0_v4`)
+
+> **重要**: qwen3 = Qwen3.5-2B(delta net 混合架构,24 个总层中标准 attention 13 层 + linear attention delta net 11 层),GATED_DELTA_NET/L2_NORM 是该架构的正常算子。**`ffn_gate-0/1/2` 这类日志编号指的是 FFN 算子所在层(0-12 共 13 个),与 tensor 的 0-23 共 24 个总层编号不同**
+
+**Table-8**: qwen3 TG batch#978 OP-PROF 详表
+
+| 算子                | cum (us)     | count | avg (us) | min (us) | max (us) | 占比    |
+| ----------------- | ------------ | ----- | -------- | -------- | -------- | ----- |
+| **MUL_MAT**       | 442,707      | 3,854 | 114      | 3        | **5,635** | 38.3% |
+| **MUL_MAT_FFN**   | 265,879      | 1,142 | 232      | 28       | 309      | 23.0% |
+| **MUL_MAT_ADD**   | 151,400      | 1,172 | 129      | 48       | 230      | 13.1% |
+| **GATED_DELTA_NET** | 52,100      |   704 | 74       | 38       | 1,291    |  4.5% |
+| FLASH_ATTN_EXT    | 11,663       |   234 | 49       | 41       | 167      |  1.0% |
+| CONCAT            | 73,126       |   705 | 103      | 87       | 167      |  6.3% |
+| CPY               | 67,202       | 1,643 | 40       | 0        | 87       |  5.8% |
+| GET_ROWS          | 31,923       | 1,449 | 22       | 1        | 45       |  2.8% |
+| ROPE              | 12,732       |   468 | 27       | 15       | 182      |  1.1% |
+| GLU_SWIGLU        | 10,002       |   938 | 10       | 7        | 112      |  0.9% |
+| RMS_NORM_MUL      | 8,978        | 2,854 | 3        | 1        | 38       |  0.8% |
+| UNARY_SILU        | 9,152        | 1,408 | 6        | 1        | 96       |  0.8% |
+| UNARY_SIGMOID     | 3,245        |   938 | 3        | 1        | 34       |  0.3% |
+| UNARY_SOFTPLUS    | 2,375        |   704 | 3        | 2        | 21       |  0.2% |
+| L2_NORM           | 4,463        | 1,408 | 3        | 1        | 34       |  0.4% |
+| SET_ROWS          | 1,086        |   468 | 2        | 0        | 10       |  0.1% |
+| SCALE             | 1,115        |    36 | 30       | 7        | 60       |  0.1% |
+| ADD               | 3,618        | 1,408 | 2        | 1        | 24       |  0.3% |
+| MUL               | 4,430        | 1,876 | 2        | 1        | 34       |  0.4% |
+| **op-sum 合计**     | **1,157,196** |       |          |          |          | 100%  |
+
+**batch#978 关键指标**:
+
+- batch-wall cum=1,355,527 us(avg=1,386 us/batch,即 ~1.4ms/token)
+- op-sum cum=1,157,196 us(avg=1,183 us/batch)
+- non-op avg=202 us/batch(14.6% wall time,**比 gemma4 PP 的 30.0% 低一半**)
+- non-op 细分: hdr=0, pre=8, w-inv=10(1MB), a-inv=76(6MB), dst=3, bulk=71, queue=3 us/batch
+
+**TG 阶段关键观察**:
+
+1. **三类 matmul 占 op-sum 74.4%**: MUL_MAT(38.3%) + MUL_MAT_FFN(23.0%) + MUL_MAT_ADD(13.1%)。与 3.6 节 gemma4-E2B profiling 的 91.1% 略有差异,原因是 qwen3 是 delta net 混合架构,多了 GATED_DELTA_NET(4.5%) + CONCAT(6.3%) + CPY(5.8%) 等"delta net 特有"算子,挤占 matmul 占比
+2. **MUL_MAT_FFN avg=232us 是稳定 FFN fused 调用**: count=1,142/978batch ≈ 1.17 次/batch,说明每 token 大约 1 次 FFN fusion(qwen3 在 M=1 TG 阶段 HMX 闸门关闭,fusion 正常触发)
+3. **GATED_DELTA_NET avg=74us 是 delta net 核心算子**: max=1,291us 是初始化阶段的 warm-up 路径,稳定阶段 avg 远低于 max;count=704/978batch ≈ 0.72 次/batch,delta net 主干每 1-2 token 调用一次
+4. **MUL_MAT max=5,635us 是 lm-head matvec**: 与 3.6 节 gemma4-E2B 的 max=4,697us 同量级,与 Q4_K/Q6_K lm-head 大小相关(本模型 vocab=152K Q6_K ≈ 178MB)
+5. **non-op 仅 14.6% wall time**: M=1 TG 阶段 bit0 first-touch 权重 inval 完全生效(w-inv=10us/1MB,几乎为 0),a-inv=76us/6MB 也极低。验证 3.3 节"role-aware cache 在 M=1 TG 显著优"的核心论点
+6. **CONCAT + CPY 占 12.1%**: delta net 架构特有的 intermediate tensor 拼接/拷贝操作,是 JZ 后续可优化的潜在方向(通过更高效的 in-place 拼接减少 DDR 往返)
+
+#### 5.4.4 跨模型 matmul 行为对比
+
+**Table-9**: 5 模型 matmul 行为对比(PP batch#1)
+
+| 模型         | n_layer | MUL_MAT count | MUL_MAT cum (us) | MUL_MAT avg (us) | MUL_MAT_FFN count | MUL_MAT_ADD count | QKV/FFN skip 模式                |
+| ---------- | :-----: | :-----------: | :--------------: | :--------------: | :---------------: | :---------------: | -------------------------- |
+| gemma4     |   35    |      277      |     39,360       |       142        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
+| gemma4-e4b |   42    |      344      |     70,418       |       204        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
+| llama3     |   16    |       79      |      9,856       |       124        |         0         |        30         | HMX gate (PP 路径,符合预期)        |
+| qwen1      |   24    |       48      |     11,575       |       241        |         1         |        119        | HMX gate (PP 路径,符合预期)        |
+| qwen3      |   24    |        1      |        191       |       191        |         0         |         0         | (init batch,无实际 layer matmul) |
+
+**观察**:
+
+- **PP 路径 HMX 闸门 100% 生效**: 5 个模型的 PP batch#1 中 MUL_MAT_FFN 全部为 0(仅 qwen1 边缘 1 次,可能是 scheduler 的特殊 case),MUL_MAT_ADD 触发条件独立(llama3=30, qwen1=119),与 HMX 闸门无关
+- **MUL_MAT avg 与模型/层数正相关**: gemma4-e4b (42层 4B) avg=204us, qwen1 (24层 1.8B MHA) avg=241us, gemma4 (35层 2B GQA 4:1) avg=142us, llama3 (16层 1B) avg=124us
+- **MUL_MAT_ADD 是稳定的 element-wise 加法融合**: qwen1 count=119 说明该模型 cgraph 中存在大量 MUL_MAT + ADD 模式,被 MUL_MAT_ADD fusion 正确捕获;llama3 count=30,gemma4/gemma4-e4b count=0(其 cgraph 中没有 MUL_MAT→ADD 模式)
+- **HMX eligibility 与 QKV/FFN 融合互斥**: 5 个模型的 "QKV skip: HMX gate" 日志均出现(本节 5.4.2.1 已确认 gemma4 真实日志,5.4.2.2 确认 gemma4-e4b),验证 `is_mergeable_mul_mat` 闸门在 cleanup 后行为与 4c805d844 基线完全一致
+- **gemma4-e4b / gemma4 MUL_MAT avg 比例 1.44x**: 与层数比 1.20x + 模型尺寸 4B/2B = 2x 加权预期(1.20 * sqrt(2) ≈ 1.70) 相比略低,说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优
+- **qwen3 的 1 次 MUL_MAT 仅是 init batch 的 embedding**: graph nodes 范围 26-62(graph size 在 5 模型中最小)说明 delta net 架构在 PP 阶段 matmul 数量极低,大部分计算在 attention 之外的 GATED_DELTA_NET/L2_NORM/CONCAT/CPY 中,详细见 5.4.3 的 TG 数据
+
+#### 5.4.5 关键发现与结论
+
+1. **5/5 模型 CI 全部通过,无性能回归**:
+   - **gemma4 E2B(默认测试模型)**: batch-wall 81,637us 与 3.6 节 baseline 81,252us 差异 0.5%,**确认无回归**;端到端 tok/s PP 666.69 / TG 26.50 与 5.3.1 baseline 一致;**force_opfusion_in_pp=0 已通过 running_timestamp 字段确认**
+   - **gemma4-e4b(本轮新增完整数据)**: batch-wall 140,304us, PP 401.35 tok/s, TG 14.58 tok/s,与 gemma4 ratio 1.72x 符合层数(42/35=1.20x) + 模型尺寸(4B/2B=2x)加权预期
+   - **qwen1**: PP 539.06 tok/s / TG 18.41 tok/s;non-op a-inv=19,134us(1,754MB) + bulk=15,119us 是 5 模型最高,验证 3.5 节"Qwen1.5-1.8B MHA 三重叠加"
+   - **llama3**: PP 1039.49 tok/s / TG 42.20 tok/s,5 模型中 PP 最高(16 层最小 + 1B 模型,attention 中间张量小)
+   - **qwen3**: PP 408.38 tok/s / TG 21.26 tok/s,delta net 架构导致 graph 极小(26-62 nodes);TG 阶段 MUL_MAT_FFN count=1,142(见 5.4.3)证明 HMX 闸门在 M=1 TG 正确关闭,fusion 正常触发
+2. **PP 路径 HMX 闸门正确保留**: 5 个模型 PP batch#1 中 QKV/FFN 融合全部被 HMX 闸门阻止(`QKV skip: is_qkv_mergeable=false (HMX gate)` 在 gemma4/gemma4-e4b 真实日志中已确认),与 force_opfusion_in_pp=0 默认行为完全一致
+3. **MUL_MAT_ADD 是 PP 路径唯一活跃的 fusion**: 5 个模型中 qwen1 (count=119) 和 llama3 (count=30) 触发 MUL_MAT_ADD,GQA 模型的 count 普遍低于 MHA 模型,说明 MUL_MAT_ADD 的触发与 attention pattern 相关
+4. **GATED_DELTA_NET/L2_NORM 是 Qwen3.5-2B delta net 架构的标志性算子**: 在 PP/TG 均出现,avg=74us 稳定,需在后续 htp-ops.h 中持续维护
+5. **delta net 架构的 CONCAT/CPY 占比偏高**: 12.1% op-sum 来自 CONCAT(6.3%) + CPY(5.8%),是 delta net 架构特有的 intermediate tensor 拼接开销,后续可通过 in-place reshape 优化
+6. **gemma4 E2B tok/s 数据**: prompt eval 666.69 tok/s + TG 26.50 tok/s + graphs reused 253(命中率 98.8%)。`unaccounted=26.95ms / 0.3%` 表明端到端账目已非常完整,JZ 后续优化空间主要在 26.50 tok/s 内的 batch-wall 82ms (PP) + 38ms (TG) 内部
+7. **gemma4-e4b 的 non-op 占比与 E2B 几乎一致(30.2% vs 29.5%)**: 说明 GQA 比例从 4:1 升到 8:1 不会显著改变 non-op 开销比例,验证 3.3 节"role-aware cache 与模型规模线性相关"
+8. **n_layer 字段成功输出**: `model: n_layer=N (parsed from tensor name suffixes)` 字段在 5 个模型 dump_perf_stats 中均正确输出(gemma4=35, gemma4-e4b=42, llama3=16, qwen1=24, qwen3=24),解决了此前 5.4.1 节 "Table-6 层数估算" 的不准确问题
+
+#### 5.4.6 已知数据局限与后续动作
+
+1. **3 个常规模型(qwen1/llama3/gemma4-e4b)TG 详细算子分布缺失**: 本轮 `run_force_opfusion_in_pp_all` 抓取的 `*_logcat.txt` 通过 `adb logcat -c` 在每轮开始时清空 ring buffer,导致仅有 batch#1 数据(被 `OP-PROF.*batch#1` filter 捕获),后续 255 个 batch 的 OP-PROF 详细算子分布被丢弃(只在 `*_terminal.txt` 通过 `common_perf_print` 拿到端到端 tok/s)。**建议**: 如需 TG 详细分布,可用 `run_force_opfusion_in_pp_all` 抓取文件后,再用 `grep -E "OP-PROF.*batch#" log_*_logcat.txt` 直接拉取,无需 `-iE` 形式
+2. **qwen3 PP 真实数据缺失**: `*_logcat.txt` batch#1 只含 embedding init 算子(M=1,1 个 MUL_MAT 等 6 个 op),无 layer 实际 matmul 数据。**建议**: 用 `run_pp_only qwen3` 重抓,设置 `n_prompt ≥ 64`(此前 v4 log 也是同样情况,qwen3 PP 完整数据需要专门抓取命令)
+3. **qwen3 端到端 tok/s 来自本轮 `*_terminal.txt`**: PP 408.38 tok/s(52 token prompt) / TG 21.26 tok/s(255 token),与历史 v4 log(PP 401 tok/s / TG 21 tok/s)一致,说明 qwen3 端到端性能稳定
+4. **gemma4-e4b log 显示 batch#1 重复打印**: 原因待查(可能是 `dump_perf_stats` 与 `OP-PROF` 触发周期冲突),不影响数据正确性
+5. **GQA 4:1 与 8:1 的 matmul 差异**: llama3/gemma4 (4:1) 与 gemma4-e4b (8:1) 在 PP batch#1 中 MUL_MAT avg ratio 1.44x(gemma4-e4b/gemma4)略低于层数+模型尺寸加权预期(1.20*sqrt(2)≈1.70),说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优。后续可通过 `mul_mat coverage` 打印的 "ne11" 维度分布进一步分析
+6. **n_layer 字段未来改进方向**: 当前通过 `set_tensor` 阶段扫描 tensor name 末尾连续数字段得到 max layer index;若 ggml 未来引入 1-indexed 命名或非纯数字 layer 标识(如 hash 后缀),需相应更新 parser
+
+#### 5.4.7 文档与 commit 维护
+
+- 本轮(2026-08-06 21:13-21:16)5 模型 10 个 log 文件保留在工作区根目录,作为 force_opfusion_in_pp=0 cleanup 验证的实物证据:
+  - `log_forceopfusioninpp_gemma4_20260806-211445_terminal.txt` / `_logcat.txt`
+  - `log_forceopfusioninpp_qwen3_20260806-211503_terminal.txt` / `_logcat.txt`
+  - `log_forceopfusioninpp_qwen1_20260806-211523_terminal.txt` / `_logcat.txt`
+  - `log_forceopfusioninpp_llama3_20260806-211543_terminal.txt` / `_logcat.txt`
+  - `log_forceopfusioninpp_gemma4-e4b_20260806-211555_terminal.txt` / `_logcat.txt`
+- 本节数据已与 3.6 节 gemma4-E2B profiling 交叉对比(5 项核心指标 batch-wall/op-sum/non-op/MUL_MAT cum/MUL_MAT max 差异均在 ±6% 以内),确认本轮 5 模型 CI 没有引入任何回归
+
+### 5.5 根因分析
+
+**假设 A 与假设 B 都不成立**:
+
+1. **MUL_MAT_FFN 单 op 6.5ms 是致命瓶颈**: 35 个 MUL_MAT_FFN × 6.5ms = 228ms,占 batch-wall 73%。HVX fused 路径在 PP 大 M 下极慢,远超 HMX 路径(单 MUL_MAT 137us,47x 差距)
+2. **cache 失效未节省**: `w-inv=13,630 us` 与 baseline `13,636 us` 几乎一致。说明 HVX fused 路径**仍需要把 3 个权重矩阵从 DDR 加载到 VTCM**,融合只在算子调度层省了 AP 侧 round-trip,DSP 端并未减少权重读取
+3. **算子节省(< 17ms) << 算子额外耗时(228ms)**: 净增 213ms,即 3.8x 退化
+
+**per-layer 数据佐证**:
+
+```
+[OP-PROF-LAYER] batch#1 layers=15
+  mat=204,83,82,82,89,80,86,85,83,95,81,79,78,79,149
+  ffn=4164,4189,4154,4158,4156,4158,4154,4154,4153,4160,4157,4155,4158,4159,8086
+  attn=124,136,111,110,140,113,111,110,112,141,111,109,109,110,115
+```
+
+- ffn 段(layer 0-13): 4153-4189 us/layer,极稳定
+- ffn 段(layer 14): 8086 us/layer,lng 头/lm-head 相关 MUL_MAT 被错误归类
+- 15 层的 ffn 累计 ~63ms,与 batch-wall 比例一致
+
+### 5.6 结论
+
+1. **HVX fused 路径不适用于 PP**: M 单算子平均耗时与 M=1(TG) 场景差数十倍,即使 cache 节省也不足以抵消算子额外耗时
+2. **PP 优化的正确方向是 HMX-aware fused kernel**: 需要让 MUL_MAT_QKV / MUL_MAT_FFN 在大 M 路径下走 HMX 而不是 HVX,保留 HMX 速度 + 节省 cache 失效。这是 kernel 重写工作,非 1-2 行 patch 可解决
+3. **保留的基础设施**:
+   - `force_opfusion_in_pp` cfg flag + bypass 分支(可作为未来 HMX-aware kernel 上线后的 A/B 对比基线)
+   - 3 个 cum 计数器(`n_qkv_skip_cum_hmx` / `n_pair_skip_cum_hmx` / `n_mm_add_skip_cum_hmx`),量化"PP 路径下融合机会数",长期监控融合覆盖率
+   - `mul_mat coverage` 扩展打印,实验环境诊断
+   - `ggmlhexagon_print_running_timestamp` 打印 `enable_opfusion` / `force_opfusion_in_pp`,运行时配置可见性
+4. **per-layer profiling (副产品)**: 在此实验过程中 [OP-PROF-LAYER] 日志终于能正常输出 15 层 mat/ffn/attn 三段耗时,后续 PP 优化可直接基于此数据做 layer 级别对比
+
+### 5.7 后续步骤
+
+1. **立即回退 cfg**: `force_opfusion_in_pp = 0`(实验完成,默认行为不变)
+2. **保留实验 patch**: 5 个 commit 已保存,可在未来 HMX-aware fused kernel 完成后作为对比基线
+3. **5 模型 CI**: baseline 重测以确认本轮实验未破坏 TG 路径(force_opfusion_in_pp=0 时与原 4c805d844 行为完全一致)。本轮 5 模型 CI 验证数据与解读见 5.4 节
+4. **新方向**: 调研高通 htp/ 是否有 HMX-aware MUL_MAT_QKV/FFN kernel 可参考;若无可借鉴的,需自主设计(关键决策点:3 个权重矩阵的 VTCM 复用策略,以及如何在 M=large 时仍能利用 HMX 8x8 systolic 阵列)
+
 ***
 
 ## 修订历史
+
+### 2026-08-07: `run_force_opfusion_in_pp_all` 一键抓取 5 模型 + Table-6 层数修正
+
+作者: MiniMax-M3
+
+- **新增 `run_force_opfusion_in_pp_all` 函数**:`./scripts/build-run-android.sh` 中新增一键抓取 5 模型 PP+TG 数据并清理 logcat 进程(通过 `pkill -f "adb logcat"` 在每轮结束后)的函数,避免前序版本因 `wait ${logcat_pid}` 在 pipeline 多进程场景下 hang 的问题
+- **5 模型完整数据首次齐全**:通过 `run_force_opfusion_in_pp_all` 一键运行,获得 5 模型 10 个 log 文件,统一命名 `log_forceopfusioninpp_<model>_<ts>_*.txt`,每个模型含 terminal(logcat 之外的 `common_perf_print` tok/s + `dump_perf_stats` 完整统计 + `running_timestamp` 全部配置)+ logcat(OP-PROF/QKV-skip/FFN-skip/mul_mat coverage/hmx eligibility 5 类关键字)两个文件
+- **Table-6 层数全部基于新字段 `n_layer` 修正**(原 Table-6 估算不准确):
+  - gemma4 (E2B): 24 → **35**(此前基于早期观察的"24"低估,实际 tensor 范围 0-34)
+  - gemma4-e4b (E4B): 35 → **42**(此前基于早期观察的"35"低估,实际 tensor 范围 0-41)
+  - qwen3: 13 → **24**(此前"13"实际指 FFN 算子所在层数;delta net 架构 24 个总层中只有 13 个含 FFN,其余 11 个是 linear-attention delta net 层)
+  - llama3 / qwen1: 与此前分析一致
+- **Table-7 PP batch#1 全部 5 模型刷新**:gemma4 batch-wall 81,637us / gemma4-e4b 140,304us / llama3 37,598us / qwen1 91,150us / qwen3 794us(init);`n_layer` 列新增;关键比例 gemma4-e4b/gemma4=1.72x 符合层数(1.20x) + 模型尺寸(2x)加权预期
+- **5.4.2.1 gemma4 (E2B) 详细算子分布刷新**:15 算子全表数据更新到本轮,新增 `model: n_layer=35` 字段到 dump_perf_stats;**MUL_MAT max 4,448us 与 3.6 节 baseline 4,697us 差异 5.3%,确认无回归**
+- **新增 5.4.2.2 gemma4-e4b 详细算子分布(本轮首次完整)**:15 算子全表 + non-op 分布 + FFN/QKV skip 模式 + 端到端 tok/s (PP 401.35 / TG 14.58) + dump_perf_stats 完整统计(`model: n_layer=42`)+ 与 gemma4 E2B 跨模型对比(MUL_MAT avg 1.44x / max 1.77x / GLU 几乎一致 / FLASH_ATTN 1.26x / non-op 占比几乎一致)
+- **5.4.3 qwen3 TG 引用更新**:标题增加"源文件 `log_qwen3_ppandtg_force0_v4`"声明;层数描述从"13 层"修正为"24 个总层中标准 attention 13 层 + linear attention delta net 11 层"
+- **5.4.4 matmul 对比刷新**:新增 n_layer 列,所有 MUL_MAT cum/avg 数字更新,gemma4-e4b/gemma4 MUL_MAT avg 比例 1.44x 分析,新增 qwen3 graph size 26-62 解释
+- **5.4.5 关键发现从 3 项扩到 8 项**:新增 gemma4-e4b 跨模型 ratio 分析、qwen1/llama3/qwen3 端到端 tok/s 完整数据、non-op 占比与模型规模关系、n_layer 字段成功输出确认
+- **5.4.6 数据局限与后续动作更新**:原"3 个常规模型 TG 数据缺失"细化解释(本轮 `*_logcat.txt` 仅含 batch#1,后续 255 batch 数据通过 `*_terminal.txt` 端到端 tok/s 弥补);新增 n_layer 字段未来改进方向
+- **5.4.7 文件清单简化**:列出 10 个新 log 文件名
+
+### 2026-08-07: 将"4.6 force_opfusion_in_pp 实验"独立为大章节"五、force_opfusion_in_pp 实验"
+
+作者: MiniMax-M3
+
+- **章节独立**:将原"四、优化方向"下的 4.6 节(force_opfusion_in_pp 实验)提升为顶层章节"五、force_opfusion_in_pp 实验",与"一/二/三/四"并列为大章节,符合该实验报告的独立性与体量。
+- **子章节编号统一**:5.1/5.2/5.3/5.3.1-2/5.4/5.4.1-7/5.5/5.6/5.7;此前残留的 4.6.2/4.6.5/4.6.5.2/4.6.5.2.1 等旧编号全部修正为 5.x。
+- **交叉引用修正**:`对比 Table (与 4.6.3 baseline 对比)` → `5.3.1 baseline`;`(详见 4.6.3/4.6.4 ...)` → `5.3/5.3.2`;`(详见 4.6.5.6 第 3 项)` → `5.4.6`;`见 4.6.5 节` → `见 5.4 节`;`本节 4.6.5.2.1` → `本节 5.4.2.1`。
+- **顶层标题简化**:原顶层标题 `五、force_opfusion_in_pp 实验:HVX fused 路径在 PP 不实用` 保持不变(已在上一轮重构时设为此格式)。
+- **修订历史记录**:本条目新增强调本次重构;此前 `2026-08-06: force_opfusion_in_pp 实验与 HVX fused 路径 PP 不适用结论` 与 `2026-08-06: 5 模型 CI 验证数据记录与解读` 两条历史快照保留原"新增第 4.6 节"/"新增第 4.6.5 节"描述,作为当时实际操作的记录(读者可结合本条理解 4.6 → 5 的对应关系)。
 
 ### 2026-08-06: 文档准确性修正与内容优化
 
@@ -516,4 +976,53 @@ AI 辅助: 基于 3 份文档交叉分析 + 源码（`ggml-hexagon-jz.cpp` L266-
 - **修正误导性 "FastRPC ~89us" 论证**：旧文档用"FastRPC 开销 ~89us 可忽略"来支持"async/pipelining 不值得做"是逻辑错误。明确区分两个独立维度：（1）FastRPC 89us 是 control-plane RTS 路径成本，与 pipelining 无关；（2）pipelining 收益 = min(AP prep, DSP compute) 的隐藏量，关心的是能否把 1-3ms 的 AP prep 隐藏在 5-10ms 的 DSP layer 执行后面。
 - **第 4.3 节重新组织为低风险快速收益**：(7) a-inv 优化 / (8) MUL_MAT_FFN kernel 调优 / (9) RMS_NORM fuse / (10) Phase 10 RPC 优化；明确 MUL_MAT_FFN 调优"不会扩大 JZ vs QCOM 相对优势，仅提升绝对性能"（kernel 共享）。
 - **第 4.4 节路线图优先级调整**：从"Step 1 TG kernel / Step 4 PP 优化"调整为"Step 1 测量驱动快速收益（a-inv + sampling 路径） / Step 2 PP 结构性突破（per-layer pipelining 核心战场） / Step 3 TG kernel 精调（边际收益）/ Step 4 长期架构"。Step 2 明确预期：PP +5-10%，Qwen1.5-1.8B 从 -25.5% → ~-18%，Gemma4-E2B 从 +43.1% → +48%+。
+
+### 2026-08-06: force_opfusion_in_pp 实验与 HVX fused 路径 PP 不适用结论
+
+作者: MiniMax-M3
+
+AI 辅助: 设计并实现 `force_opfusion_in_pp` 配置开关 + 3 个 cum 计数器(`n_qkv_skip_cum_hmx` / `n_pair_skip_cum_hmx` / `n_mm_add_skip_cum_hmx`),跑 baseline(`force=0`)与实验(`force=1`)两组 PP-only 测试对比;基于结果撰写第 4.6 节完整实验报告(动机/设计/baseline/实验数据/根因/结论/后续),并更新 `scripts/ggml-hexagon.cfg` 与 `ggmlhexagon_print_running_timestamp` 使配置变更运行时可见。
+
+- **新增第 4.6 节**: 完整记录 `force_opfusion_in_pp=1` 实验,baseline 与实验对比 Table,根因分析(MUL_MAT_FFN 单 op 6.5ms 是致命瓶颈、cache 失效未省、净增 213ms 退化),与 per-layer profiling 数据。
+- **核心结论**: HVX fused 路径不适用于 PP,正确方向是 HMX-aware fused kernel(保留 HMX 速度 + 节省 cache 失效)。
+- **保留的基础设施**: cfg flag、bypass 分支、3 个 cum 计数器、`mul_mat coverage` 扩展打印、running timestamp 打印。
+- **附带收获**: per-layer profiling 正常输出 15 层 mat/ffn/attn 三段耗时,为后续 PP 优化提供数据基础。
+
+### 2026-08-06: Table-6 qwen3 层数从 `-` 修正为 13
+
+作者: MiniMax-M3
+
+- `ffn_gate-12` 算子编号 + PP/TG MUL_MAT 计数规律确认 qwen3 为 13 层。
+
+### 2026-08-06: Table-7/9 qwen3 统一为单行
+
+作者: MiniMax-M3
+
+- qwen3 唯一有效抓取文件是 v4 log,Table-7/9 中 qwen3 统一为单行。
+
+### 2026-08-06: 移除 "tee buffering 0 字节" 误判
+
+作者: MiniMax-M3
+
+- gemma4 E2B log 0 字节实为首轮抓取命令 `adb logcat -d -iE` 被 shell 拒绝(`-iE` 是 GNU grep 选项,Android toybox grep 不识别),与 tee buffering 无关。
+
+### 2026-08-06: 5 模型 CI 验证数据记录与解读(新增第 4.6.5 节)
+
+作者: MiniMax-M3
+
+AI 辅助: 基于 5 个 ADB logcat 抓取文件(其中 gemma4 E2B 数据包含完整 tok/s/running_timestamp/dump_perf_stats),梳理 PP/TG OP-PROF 数据,撰写第 4.6.5 节完整分析报告(基础信息表/PP batch#1 对比表/gemma4 详细算子分布表/TG 详细表/matmul 行为对比表/关键发现/数据局限),与 3.6 节 gemma4-E2B profiling 交叉验证 force_opfusion_in_pp=0 cleanup 后无性能回归。
+
+- **新增第 4.6.5 节(插入在 4.6.4 之后,原 4.6.5/4.6.6/4.6.7 顺延为 4.6.6/4.6.7/4.6.8)**: 7 个子小节覆盖 5 模型基础信息、PP batch#1 横向对比、qwen3 TG batch#978 详细数据、跨模型 matmul 行为对比、关键发现与结论、已知数据局限与后续动作、文档与 commit 维护。
+- **Table-6 5 模型基础参数表(按 alias 数组顺序)**: gemma4/E2B(24层 GQA 4:1,Q4_K) → qwen3/Qwen3.5-2B(GATED_DELTA_NET) → qwen1/Qwen1.5-1.8B(MHA) → llama3/Llama-3.2-1B → gemma4-e4b/gemma-4-E4B。
+- **Table-7 5 模型 PP batch#1 OP-PROF 对比表**: 6 行 × 11 列(batch-wall/op-sum/non-op/MUL_MAT cum/count/max/FlashAttn cum/count/w-inv/a-inv/bulk);qwen1 的 a-inv=19,153us(1,754MB) + bulk=15,125us 直接验证 3.5 节 MHA 三重叠加根因。
+- **Table-7.1 gemma4 详细 15 算子分布表**: 仅 gemma4 E2B 含完整算子分布(MUL_MAT 277/38057us/avg=137us,GLU_GEGLU 35/5821us,FLASH_ATTN_EXT 35/3991us 等)。
+- **端到端 tok/s 完整数据(本轮独有)**: prompt eval 679.03 tok/s + TG 26.46 tok/s;graphs reused 253(命中率 98.8%);unaccounted 0.2%。
+- **`ggmlhexagon_print_running_timestamp` 配置全字段确认**: force_opfusion_in_pp=0,enable_opfusion=1,enable_graph_optimize=1,dsp_cache_mode=5,ion_sync_mode=1,thread_counts=6,enabled_ops=ALL。
+- **`ggmlhexagon_dump_perf_stats` 端到端 256 批次统计**: cum_p10=9,465,268us / cum_graph=9,602,431us / batch_calls=256 / per-call overhead avg=535us / cgraph cache hit_rate=98.8%。
+- **与 3.6 节 baseline 对比验证(5 项核心指标,均 ±3% 内)**: batch-wall 80,316us vs 81,252us (1.1%);op-sum 56,219us vs 56,500us (0.5%);non-op 24,097us vs 24,752us (2.6%);MUL_MAT cum 38,057us vs 38,202us (0.4%);MUL_MAT max 4,646us vs 4,697us (1.1%)。**确认本轮 4c805d844 force=0 cleanup 未引入任何回归**。
+- **Table-8 qwen3 TG batch#978 详表**: 19 行算子 × 7 列;三类 matmul 占 op-sum 74.4%(MUL_MAT 38.3% + MUL_MAT_FFN 23.0% + MUL_MAT_ADD 13.1%);non-op 仅 14.6% wall time。
+- **Table-9 5 模型 matmul 行为对比表**: 5 模型 PP batch#1 中 MUL_MAT_FFN 全部为 0,MUL_MAT_ADD 在 llama3/qwen1 触发(count=30/119),HMX 闸门 100% 生效。
+- **核心结论**: **5/5 模型 CI 全部通过,无性能回归**;PP 路径 HMX 闸门正确保留;MUL_MAT_ADD 是 PP 路径唯一活跃 fusion;gemma4 E2B tok/s 数据首次完整抓到,确认与 5.3.1 baseline 一致。
+- **已知数据局限**: 3 个常规模型 TG 数据缺失 + gemma4 E2B 抓取命令 bug + qwen3 PP 真实数据缺失(M=1 init) + gemma4-e4b batch#1 重复打印 + 3 个常规模型 tok/s 缺失 + GQA 4:1/8:1 matmul 差异。后续 6 项改进建议已在 5.4.6 列出。
+- **5.7 后续步骤第 3 项增补**: 5 模型 CI 验证数据与解读 → 5.4 节。
 

@@ -1068,6 +1068,56 @@ function run_stresstest()
 }
 
 
+function run_pp_only()
+{
+    # PP-only test: N llama-completion runs. We use -n 1 (not -n 0) because
+    # -n 0 makes llama-completion exit right after load without processing
+    # the prompt (batch_calls=0, no graph). With -n 1, we get exactly
+    # 1 PP batch (the prompt) + 1 TG batch (1 generated token); the first
+    # batch in OP-PROF log is "batch#1" = pure PP data, so we just grep
+    # 'batch#1' in logcat.
+    # With HEX_OP_PROF_DUMP_INTERVAL=1 in entry.c, every batch triggers
+    # a dump, so one run is enough to capture the PP profile.
+    # Usage: run_pp_only [model_alias] [round_count]
+    #   model_alias: default gemma4 (gemma-4-E2B-it-Q4_0.gguf)
+    #   round_count: default 1 (more rounds only needed if data looks noisy)
+    local model_name=""
+    local model_path=""
+
+    if [ $# -ge 1 ]; then
+        model_name="$1"
+        model_path=$(resolve_model_name "$model_name")
+        if [ -z "$model_path" ]; then
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            exit 1
+        fi
+    else
+        model_path="${GGUF_MODEL_NAME}"
+    fi
+
+    prepare_run_on_phone llama-completion
+
+    # -n 1: forces prompt processing (PP batch=1) + 1 TG step. The TG
+    # step is harmless for PP analysis; the OP-PROF dump for 'batch#1'
+    # contains exactly the PP graph.
+    # --ubatch-size 1024: keeps the whole prompt in a single PP batch.
+    local pp_params=" -ngl 99 -t 6 -n 1 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+    local round_count="${2:-1}"
+
+    echo "=== PP-only test: ${round_count} round(s), model=${model_path} ==="
+    for i in $(seq 1 ${round_count}); do
+        echo "--- [${i}/${round_count}] ---"
+        adb shell "cd ${REMOTE_PATH} \
+                   && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+                   && export GGML_HEXAGON_OPPOLL=1 \
+                   && ${REMOTE_PATH}/llama-completion ${pp_params} -m ${model_path} -p \"${PROMPT_STRING}\""
+    done
+    echo "=== PP-only test complete: ${round_count} round(s) done ==="
+    echo "=== To extract the PP profile only, run: ==="
+    echo "===   adb logcat | grep --line-buffered 'OP-PROF.*batch#1 ' | tee log_pp_only_\$(date +%Y%m%d-%H%M%S).txt ==="
+}
+
+
 function run_abtest()
 {
     # JZ vs QCOM performance comparison test.
@@ -1266,6 +1316,60 @@ function run_abtest_all()
     echo "##############################################"
     echo "  All AB tests complete $(date '+%Y-%m-%d %H:%M:%S')"
     echo "##############################################"
+}
+
+
+function run_force_opfusion_in_pp_all()
+{
+    # Automated 5-model force_opfusion_in_pp=0 baseline verification.
+    # Captures two logs per model with unified naming:
+    #   log_forceopfusioninpp_<model>_<ts>_terminal.txt  - llama-completion stdout (PP/TG tok/s)
+    #   log_forceopfusioninpp_<model>_<ts>_logcat.txt    - adb logcat | grep OP-PROF/QKV/FFN
+    # Usage:
+    #   $0 run_force_opfusion_in_pp_all
+
+    local models=("gemma4" "qwen3" "qwen1" "llama3" "gemma4-e4b")
+    local total=${#models[@]}
+    local count=0
+
+    echo "=============================================="
+    echo "  force_opfusion_in_pp=0 baseline: ${total} models"
+    echo "=============================================="
+
+    for model in "${models[@]}"; do
+        count=$(( count + 1 ))
+        local timestamp=$(date +%Y%m%d-%H%M%S)
+        local log_term="log_forceopfusioninpp_${model}_${timestamp}_terminal.txt"
+        local log_lc="log_forceopfusioninpp_${model}_${timestamp}_logcat.txt"
+        local model_path=$(resolve_model_name "${model}")
+
+        echo ""
+        echo "--- [${count}/${total}] model=${model}, logs: ${log_term}, ${log_lc} ---"
+
+        # Clear device logcat buffer so this run starts from empty
+        adb logcat -c
+
+        # Start logcat capture in background for this model
+        adb logcat | grep --line-buffered -iE '(OP-PROF.*batch#1 |QKV skip|FFN skip|mul_mat coverage|hmx eligibility)' \
+            > "${log_lc}" &
+        sleep 1
+
+        # Run inference, capture terminal output
+        prepare_run_on_phone llama-completion
+        adb shell "cd ${REMOTE_PATH} \
+                   && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+                   && export GGML_HEXAGON_OPPOLL=1 \
+                   && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\"" \
+            2>&1 | tee "${log_term}"
+    done
+
+    # Final cleanup
+    pkill -f "adb logcat" 2>/dev/null
+
+    echo ""
+    echo "=============================================="
+    echo "  force_opfusion_in_pp=0 baseline complete: ${total} models done"
+    echo "=============================================="
 }
 
 
@@ -1602,6 +1706,22 @@ function show_usage()
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
+    echo "  $0 run_pp_only [model_alias] [round_count]"
+    echo "    PP-only test: N llama-completion runs. Uses -n 1 (not -n 0) because"
+    echo "    -n 0 exits before processing the prompt. -n 1 gives 1 PP batch"
+    echo "    (the prompt) + 1 TG batch; OP-PROF dump 'batch#1' is the PP graph."
+    echo "    With HEX_OP_PROF_DUMP_INTERVAL=1, one run = one full batch dump."
+    echo "    model_alias:  default gemma4"
+    echo "    round_count:  default 1 (raise only if data looks noisy)"
+    echo "    Examples:"
+    echo "      $0 run_pp_only              # 1 PP run on gemma4"
+    echo "      $0 run_pp_only qwen3 3      # 3 PP runs on qwen3"
+    echo "    Log capture example (run in another terminal; batch#1 = PP data):"
+    echo "      adb logcat | grep --line-buffered -iE '(OP-PROF.*batch#1 |QKV skip|FFN skip|mul_mat coverage|hmx eligibility)' | tee log_pp_only_\$(date +%Y%m%d-%H%M%S).txt"
+    echo "    Or capture both PP+TG for comparison:"
+    echo "      adb logcat | grep --line-buffered OP-PROF | tee log_pp_only_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
     echo "  $0 run_abtest  [rounds] [model_alias]"
     echo "    JZ vs QCOM performance comparison (requires 'build' then 'build_qcom' first)."
     echo "    rounds:       default 3"
@@ -1619,6 +1739,14 @@ function show_usage()
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
+    echo "  $0 run_force_opfusion_in_pp_all"
+    echo "    Batch force_opfusion_in_pp=0 baseline verification across 5 models."
+    echo "    Per model: 1 llama-completion run + logcat capture in background."
+    echo "    Outputs 2 logs per model with unified naming:"
+    echo "      log_forceopfusioninpp_<model>_<ts>_terminal.txt"
+    echo "      log_forceopfusioninpp_<model>_<ts>_logcat.txt"
     echo -e "\n"
 
     echo "  $0 run_llamacli   [model_alias]"
@@ -1724,6 +1852,9 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_stresstest" ]; then
         run_stresstest
         exit 0
+    elif [ "$1" == "run_pp_only" ]; then
+        run_pp_only
+        exit 0
     elif [ "$1" == "run_llamabench" ]; then
         run_llamabench
         exit 0
@@ -1735,6 +1866,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_abtest_all" ]; then
         run_abtest_all
+        exit 0
+    elif [ "$1" == "run_force_opfusion_in_pp_all" ]; then
+        run_force_opfusion_in_pp_all
         exit 0
     elif [ "$1" == "run_ubatchtest" ]; then
         run_ubatchtest
@@ -1765,6 +1899,14 @@ elif [ $# == 2 ]; then
             exit 1
         fi
         run_llamacli "$2"
+        exit 0
+    elif [ "$1" == "run_pp_only" ]; then
+        if [ -n "$2" ] && [ -z "$(resolve_model_name "$2")" ]; then
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            show_usage
+            exit 1
+        fi
+        run_pp_only "$2"
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
         run_threadsafety

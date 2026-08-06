@@ -17,10 +17,12 @@
 extern "C" {
 #endif
 
-/* Op-level profiling is always disabled
- * Compile with -DHEX_OP_PROF=1 to enable */
+/* Op-level profiling: enabled by default since 2026-08-06 (per-layer
+ * instrumentation extension for PP optimization analysis). Set
+ * -DHEX_OP_PROF=0 to disable (e.g. for upstream PR submission where
+ * profiling cost must be zero). */
 #ifndef HEX_OP_PROF
-#define HEX_OP_PROF                     0
+#define HEX_OP_PROF                     1
 #endif
 
 /* Alignment requirements */
@@ -58,6 +60,12 @@ extern "C" {
 
 #ifndef HEX_OP_PROF_BUCKETS
 #define HEX_OP_PROF_BUCKETS             64
+#endif
+
+#ifndef HEX_OP_PROF_MAX_LAYERS
+/* Per-layer accumulator dimension. 64 covers Gemma3-27B (62 layers);
+ * bump to 96/128 for 70B+ models. */
+#define HEX_OP_PROF_MAX_LAYERS          64
 #endif
 
 // Forward declarations for types used in dsp_context.
@@ -129,6 +137,12 @@ typedef struct hex_op_desc {
     int32_t src_idx[6];      /* indices into tensor table (-1 = none); mirrors htp_op_desc.src[6] */
     int32_t dst_idx[4];      /* multi-output support (e.g. QKV fusion), -1 = unused */
     int32_t htp_opcode;      /* Direct HTP opcode for fused ops (0 = use ggml_op_to_htp_op) */
+    /* Per-layer index assigned by AP in Phase 3 (cum_p3) by counting QKV
+     * fusions: 0 = layer 0 or pre-QKV prelude, 1 = layer 1, ..., 0xFFFE
+     * = post-LM-head, 0xFFFF = unknown. Old AP code writing 240-byte
+     * struct leaves these 4 bytes zero; DSP treats 0 as layer 0. */
+    uint16_t layer_idx;
+    uint16_t reserved;       /* keep struct 4-byte aligned (was 240B, now 244B) */
 } hex_op_desc;
 
 /* Batch header - entry point for DSP to find everything */
@@ -255,6 +269,12 @@ struct dsp_context {
     uint64_t op_prof_count  [HEX_OP_PROF_BUCKETS];
     uint64_t op_prof_min_us[HEX_OP_PROF_BUCKETS];
     uint64_t op_prof_max_us[HEX_OP_PROF_BUCKETS];
+    /* Per-layer per-op profiling (extends op_prof_dur_us with layer axis).
+     * Memory: 64 ops * 64 layers * 8B = 32 KB. */
+    uint32_t cur_layer_idx;                                          /* current op's layer (0..N-1) */
+    uint32_t max_layer_seen;                                         /* largest layer_idx in this batch */
+    uint64_t layer_op_dur_us[HEX_OP_PROF_BUCKETS][HEX_OP_PROF_MAX_LAYERS];
+    uint64_t layer_op_count  [HEX_OP_PROF_BUCKETS][HEX_OP_PROF_MAX_LAYERS];
     uint32_t op_prof_batch_count;
     uint64_t op_prof_batch_wall_us;
     uint64_t nonop_hdr_inval_us;

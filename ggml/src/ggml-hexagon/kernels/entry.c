@@ -38,7 +38,11 @@
 
 #define DEFAULT_VTCM_SIZE               (8 * 1024 * 1024)
 
-#define HEX_OP_PROF_DUMP_INTERVAL       25
+// HEX_OP_PROF dump interval: dump cumulative op stats every N batches.
+//   1 = every batch (used for PP-only tests where 1 run == 1 batch == 1 dump).
+//       Single run is enough to capture full profiling data.
+//   25 (or higher) = recommended for long TG sessions to avoid logcat spam.
+#define HEX_OP_PROF_DUMP_INTERVAL       1
 
 // Queue capacity/stack sizes: mirror htp/main.c defaults with JZ_ prefix.
 #define JZ_HMX_QUEUE_CAPACITY           16
@@ -815,6 +819,9 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
 static int execute_op(struct htp_ops_context * octx) {
 #if HEX_OP_PROF
     const uint64_t t0 = ggml_time_us();
+    const uint32_t li = (octx->layer_idx < HEX_OP_PROF_MAX_LAYERS)
+                        ? (uint32_t) octx->layer_idx
+                        : 0xFFFFFFFFu;   /* sentinel: skip per-layer aggregation */
 #endif
     const unsigned int op = (unsigned int) octx->op;
     int ret;
@@ -838,6 +845,11 @@ static int execute_op(struct htp_ops_context * octx) {
             g_dsp_ctx->op_prof_count  [op] += 1;
             if (dt > g_dsp_ctx->op_prof_max_us[op]) g_dsp_ctx->op_prof_max_us[op] = dt;
             if (dt < g_dsp_ctx->op_prof_min_us[op]) g_dsp_ctx->op_prof_min_us[op] = dt;
+            if (li != 0xFFFFFFFFu) {
+                g_dsp_ctx->layer_op_dur_us[op][li] += dt;
+                g_dsp_ctx->layer_op_count  [op][li] += 1;
+                if (li > g_dsp_ctx->max_layer_seen) g_dsp_ctx->max_layer_seen = li;
+            }
         }
     }
 #endif
@@ -977,6 +989,8 @@ static void build_htp_octx(
     // unconditionally on some paths. Avoid full-struct memset which
     // is wasted on fields we immediately overwrite.
     octx->flags = 0;
+    octx->layer_idx     = 0xFFFFu;   /* default: unknown, set by dispatch loop */
+    octx->layer_idx_pad = 0;
     octx->src0_spad.src = NULL;
     octx->src1_spad.src = NULL;
     octx->src2_spad.src = NULL;
@@ -2042,6 +2056,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     /* Normal batch execution */
 #if HEX_OP_PROF
     const int64_t prof_batch_t0 = ggml_time_us();
+    g_dsp_ctx->max_layer_seen = 0;   /* reset per-layer high-water mark */
 #endif
     /* Invalidate DSP cache for the batch descriptor before reading.
      * ION is non-coherent: AP reuses the mempool and writes a new batch
@@ -2242,6 +2257,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 
         build_htp_octx(&octx, htp_op, op->params, op->kernel_params,
                        op->src_idx, op->dst_idx);
+        octx.layer_idx = op->layer_idx;   /* plumb from hex_op_desc */
 
         if (htp_op == HTP_OP_MUL_MAT) {
             const int32_t kp_kernel_type = octx.kernel_params[0];
@@ -2442,6 +2458,31 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
              (unsigned long long) (g_dsp_ctx->nonop_dst_track_us / nbc),
              (unsigned long long) (g_dsp_ctx->nonop_bulk_flush_us / nbc),
              (unsigned long long) (g_dsp_ctx->nonop_queue_us / nbc));
+        /* Per-layer breakdown (PP analysis). Compact CSV: layers=K then
+         * per-layer avg us for MUL_MAT / MUL_MAT_FFN / FLASH_ATTN_EXT.
+         * Skipped when no layer info is set (TG-only, layer_idx==0xFFFF). */
+        if (g_dsp_ctx->max_layer_seen > 0) {
+            unsigned int L = g_dsp_ctx->max_layer_seen + 1;
+            if (L > HEX_OP_PROF_MAX_LAYERS) L = HEX_OP_PROF_MAX_LAYERS;
+            char line[1024];
+            int pos = snprintf(line, sizeof(line), "[OP-PROF-LAYER] %s layers=%u", tag, L);
+            const struct { enum htp_op_code op; const char * tag; } ops[] = {
+                { HTP_OP_MUL_MAT,        "mat"     },
+                { HTP_OP_MUL_MAT_FFN,    "ffn"     },
+                { HTP_OP_FLASH_ATTN_EXT, "attn"    },
+            };
+            for (size_t k = 0; k < sizeof(ops)/sizeof(ops[0]); k++) {
+                if ((size_t)ops[k].op >= HEX_OP_PROF_BUCKETS) continue;
+                pos += snprintf(line + pos, sizeof(line) - pos, " %s=", ops[k].tag);
+                for (unsigned int l = 0; l < L && pos < (int)sizeof(line) - 32; l++) {
+                    const uint64_t cnt = g_dsp_ctx->layer_op_count[ops[k].op][l];
+                    const uint64_t sum = g_dsp_ctx->layer_op_dur_us[ops[k].op][l];
+                    pos += snprintf(line + pos, sizeof(line) - pos, "%s%llu", l ? "," : "",
+                                    cnt ? (unsigned long long)(sum / cnt) : 0);
+                }
+            }
+            FARF(ERROR, "%s", line);
+        }
     }
 #endif
 

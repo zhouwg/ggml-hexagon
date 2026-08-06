@@ -42,6 +42,10 @@ struct htp_context;
 // TODO: fold this into the main context
 struct htp_ops_context {
     struct htp_context * ctx;
+    /* Per-layer index copied from hex_op_desc.layer_idx; 0xFFFF = unknown.
+     * Used by HEX_OP_PROF per-layer accumulators in execute_op. */
+    uint16_t layer_idx;
+    uint16_t layer_idx_pad;        /* keep 4-byte alignment for the next field */
 
     enum htp_op_code    op; // FIXME: rename to opcode
     int32_t             op_params[HTP_OP_MAX_PARAMS];

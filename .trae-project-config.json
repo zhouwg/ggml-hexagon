@@ -289,6 +289,49 @@
       "command": "adb logcat | grep CDSP0",
       "note": "Use this to debug DSP-side issues, including DSP crashes, memory issues, and HMX/HVX instruction errors"
     },
-    "workflow": "After running a test, always check the relevant log to understand what happened. If UT fails, check ut_program_log first. If DSP crashes or produces incorrect results, check dsp_log."
+    "workflow": "After running a test, always check the relevant log to understand what happened. If UT fails, check ut_program_log first. If DSP crashes or produces incorrect output, check dsp_log."
+  },
+  "force_opfusion_in_pp_experiment": {
+    "description": "Experiment on 2026-08-06 (commit 4c805d844) testing whether bypassing the HMX eligibility gate in is_mergeable_mul_mat enables QKV/FFN/mm_add fusion in PP path. Branch: feature/force_opfusion_in_pp.",
+    "motivation": "Observe that in PP path, M > HTP_MM_HMX_MIN_NROWS=4 forces mm_is_hmx_eligible=true, which makes is_mergeable_mul_mat return false, blocking all QKV/FFN/mm_add fusion. Hypothesis: HVX fused path is slower per-op but saves cache invalidation (w-inv/a-inv).",
+    "implementation": {
+      "config_flag": "force_opfusion_in_pp (0=keep HMX gate [default], 1=bypass gate [experimental])",
+      "cfg_file": "scripts/ggml-hexagon.cfg",
+      "counters": [
+        "n_qkv_skip_cum_hmx  - QKV fusion candidates rejected by HMX gate",
+        "n_pair_skip_cum_hmx - all (MUL_MAT, next MUL_MAT) pair candidates rejected (broader than FFN)",
+        "n_mm_add_skip_cum_hmx - MUL_MAT+ADD fusion candidates (not yet gated by HMX)"
+      ],
+      "running_timestamp_print": "ggmlhexagon_print_running_timestamp now prints enable_opfusion and force_opfusion_in_pp"
+    },
+    "baseline_force_0": {
+      "batch_wall_us": 81252,
+      "qkv_fused": 0,
+      "ffn_fused": 0,
+      "qkv_skip_hmx": 15,
+      "pair_skip_hmx": 65,
+      "w_inv_us": 13639,
+      "a_inv_us": 6869
+    },
+    "experiment_force_1": {
+      "batch_wall_us": 309487,
+      "qkv_fused": 15,
+      "ffn_fused": 35,
+      "qkv_skip_hmx": 0,
+      "pair_skip_hmx": 0,
+      "w_inv_us": 13630,
+      "a_inv_us": 6934,
+      "MUL_MAT_FFN_per_op_us": 6515,
+      "MUL_MAT_FFN_total_us": 228047
+    },
+    "conclusion": "3.8x regression in PP. Root cause: MUL_MAT_FFN in HVX fused path takes 6.5ms/op (47x slower than HMX 137us/op), and cache invalidation did NOT decrease (w-inv/a-inv identical between baseline and experiment). HVX fused path is NOT viable for PP. Correct direction is HMX-aware MUL_MAT_QKV/MUL_MAT_FFN kernel that retains HMX speed + saves cache invalidation.",
+    "retained_infrastructure": [
+      "force_opfusion_in_pp cfg flag + bypass branch in is_mergeable_mul_mat (kept as A/B baseline for future HMX-aware kernel)",
+      "3 cum counters (quantify fusion opportunity loss in PP)",
+      "mul_mat coverage extended print",
+      "ggmlhexagon_print_running_timestamp prints enable_opfusion/force_opfusion_in_pp"
+    ],
+    "byproduct": "per-layer profiling (OP-PROF-LAYER) now outputs 15-layer mat/ffn/attn timing breakdown. Use as data baseline for future PP optimization.",
+    "documentation": "docs/backend/jz-ggml-hexagon/jz-ggmlhexagon-pp-tg-optimization-analysis-zh.md section 5"
   }
 }
