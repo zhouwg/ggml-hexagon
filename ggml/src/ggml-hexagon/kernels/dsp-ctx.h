@@ -216,10 +216,11 @@ struct dsp_context {
     // When non-zero, INVAL_SRC_IF_NEEDED emits one [DSP-CACHE-TRACE-BIT1] log
     // line per bit 1 decision (SKIP if prior_dst_contains_src, INVAL otherwise)
     // with the same op/src/ptr/len fields as the bit 0 trace. Default 0 (off)
-    // so production perf is unaffected. Set to 1 only when diagnosing why
-    // dsp_cache_mode 5/6/7 garble on the new matmul pipeline (upstream commit
-    // 81ff7abe5). Pair with dsp_cache_trace_bit0 to localize the stale-L2-read
-    // culprit to a specific bit/op combination.
+    // so production perf is unaffected. Set to 1 to measure bit 1 SKIP rate
+    // (how often INVAL_SRC_IF_NEEDED takes the prior-dst skip path). Currently
+    // a no-op: PRIOR_DST_MAX_LEN=64 (entry.c) excludes all real-world cgraph
+    // intermediate tensors (>= 256B). Pair with dsp_cache_trace_bit0 to
+    // cross-check L2 staleness between weight and activation domains.
     uint32_t dsp_cache_trace_bit1;
 
     // htp_context for calling Qualcomm's execute_op.
