@@ -3327,7 +3327,8 @@ static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context * ctx, const 
     const ggml_tensor * src0 = op->src[0];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
-    if (!ggml_is_contiguous(src0))
+    // Accept non-contiguous views (Qwen3Next per-head reshape)
+    if (src0->nb[0] != sizeof(float))
         return false;
     return true;
 }
@@ -3562,6 +3563,65 @@ static bool hexagon_validate_im2col(ggml_backend_hexagon_context * ctx, const gg
     return true;
 }
 
+// Qwen3.5-2B delta net: offload conv1d to avoid cgraph split
+static bool hexagon_validate_ssm_conv(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+    GGML_UNUSED(ctx);
+    const ggml_tensor * src0 = op->src[0];
+    const ggml_tensor * src1 = op->src[1];
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+    if (src0->ne[3] != 1 || src1->ne[2] != 1 || src1->ne[3] != 1 || dst->ne[3] != 1) {
+        return false;
+    }
+
+    const int d_conv  = src1->ne[0];
+    const int d_inner = src0->ne[1];
+    const int n_t     = dst->ne[1];
+    const int n_s     = dst->ne[2];
+
+    if (src0->ne[0] != d_conv - 1 + n_t || src0->ne[1] != d_inner || src0->ne[2] != n_s) {
+        return false;
+    }
+    if (src1->ne[0] != d_conv || src1->ne[1] != d_inner) {
+        return false;
+    }
+    if (dst->ne[0] != d_inner || dst->ne[1] != n_t || dst->ne[2] != n_s) {
+        return false;
+    }
+    if (src0->nb[0] != sizeof(float) || src1->nb[0] != sizeof(float) || dst->nb[0] != sizeof(float)) {
+        return false;
+    }
+    if (src0->nb[1] != src0->ne[0] * sizeof(float) || src1->nb[1] != src1->ne[0] * sizeof(float)) {
+        return false;
+    }
+
+    return true;
+}
+
+// Qwen3.5-2B delta net: offload solve_tri to avoid cgraph split
+static bool hexagon_validate_solve_tri(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+    GGML_UNUSED(ctx);
+    const ggml_tensor * src0 = op->src[0]; // A
+    const ggml_tensor * src1 = op->src[1]; // B
+    const ggml_tensor * dst  = op;         // X
+    if (!src0 || !src1) return false;
+    if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
+        return false;
+    }
+    if (src0->ne[0] != src0->ne[1]) return false;          // A must be square
+    if (src0->ne[1] != src1->ne[1]) return false;          // A.rows == B.rows
+    if (src0->ne[2] != src1->ne[2] || src0->ne[3] != src1->ne[3]) return false;
+    if (dst->ne[0] != src1->ne[0] || dst->ne[1] != src1->ne[1] ||
+        dst->ne[2] != src1->ne[2] || dst->ne[3] != src1->ne[3]) {
+        return false;
+    }
+    return true;
+}
+
 static bool hexagon_validate_tri(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     if (op->src[0]->type != GGML_TYPE_F32)
@@ -3662,6 +3722,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_GET_ROWS]       = hexagon_validate_get_rows;
     s_op_validators[GGML_OP_SET_ROWS]       = hexagon_validate_set_rows;
     s_op_validators[GGML_OP_SUM_ROWS]       = hexagon_validate_sum_rows;
+    s_op_validators[GGML_OP_SSM_CONV]       = hexagon_validate_ssm_conv;
     s_op_validators[GGML_OP_CONT]           = hexagon_validate_cont;
     s_op_validators[GGML_OP_CONCAT]         = hexagon_validate_concat;
     s_op_validators[GGML_OP_REPEAT]         = hexagon_validate_repeat;
@@ -3673,6 +3734,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_IM2COL]         = hexagon_validate_im2col;
     s_op_validators[GGML_OP_GATED_DELTA_NET]= hexagon_validate_gated_delta_net;
     s_op_validators[GGML_OP_TRI]            = hexagon_validate_tri;
+    s_op_validators[GGML_OP_SOLVE_TRI]      = hexagon_validate_solve_tri;
     s_op_validators[GGML_OP_FILL]           = hexagon_validate_fill;
     s_op_validators[GGML_OP_FLASH_ATTN_EXT] = hexagon_validate_flash_attn;
 }

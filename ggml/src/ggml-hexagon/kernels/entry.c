@@ -908,6 +908,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_GET_ROWS: *htp_op = HTP_OP_GET_ROWS;   return 0;
         case GGML_OP_SET_ROWS: *htp_op = HTP_OP_SET_ROWS;   return 0;
         case GGML_OP_SUM_ROWS: *htp_op = HTP_OP_SUM_ROWS;   return 0;
+        case GGML_OP_SSM_CONV: *htp_op = HTP_OP_SSM_CONV;   return 0;
         case GGML_OP_CONT:    *htp_op = HTP_OP_CPY;         return 0;
         case GGML_OP_REPEAT:  *htp_op = HTP_OP_REPEAT;       return 0;
         case GGML_OP_NORM:    *htp_op = HTP_OP_NORM;        return 0;
@@ -922,6 +923,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_FILL:    *htp_op = HTP_OP_FILL;        return 0;
         case GGML_OP_DIAG:    *htp_op = HTP_OP_DIAG;        return 0;
         case GGML_OP_TRI:     *htp_op = HTP_OP_TRI;         return 0;
+        case GGML_OP_SOLVE_TRI: *htp_op = HTP_OP_SOLVE_TRI; return 0;
         case GGML_OP_UNARY: {
             if (!op_params) {
                 FARF(ERROR, "ggml_op_to_htp_op: UNARY missing op_params");
