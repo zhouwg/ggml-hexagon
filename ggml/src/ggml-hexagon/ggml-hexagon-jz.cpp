@@ -255,6 +255,7 @@ struct ggml_backend_hexagon_context {
     uint32_t max_n_ops_per_call;                // max hex_ops.size() across all graph_compute calls
     int64_t  min_p10_us;                        // shortest single FastRPC call
     int64_t  max_p10_us;                        // longest single FastRPC call
+    uint32_t max_layer_idx_seen;                // largest layer suffix in tensor names (ffn_gate-N etc), n_layer = max + 1
 
     // Per-call AP-side overhead (graph_dur - p10). Tracks how much time each
     // graph_compute_batch call spends outside of pure DSP execution
@@ -411,6 +412,11 @@ struct hexagon_appcfg_t {
     std::string enabled_types;  // comma-separated list of weight types to offload for MUL_MAT (empty = all supported types)
 };
 
+// designated initializers are a C++20 extension; suppress to keep readability in C++17 builds
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc++20-designator"
+#endif
 static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dump_debug_info        = 0,
         .thread_counts          = 6,
@@ -467,6 +473,9 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
                 .vtcm_size_in_mb   = 8,
                 .soc_desc          = "Qualcomm SnapDragon 8 Elite Gen5"},
 };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // Owning pointer to the reg context. The framework's ~ggml_backend_registry()
 // does not delete reg->context (see FIXME in ggml-backend-reg.cpp), so we rely
@@ -640,6 +649,8 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
                              ctx->socinfo.vtcm_size_in_mb,
                              (int)ctx->has_hvx, (int)ctx->has_hmx);
+    GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
+                             ctx->max_layer_idx_seen + 1);
     GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
                              (unsigned long long)ctx->rpc_batch_call_count,
                              (long long)ctx->cum_p10_us, (long long)ctx->cumulative_graph_us,
@@ -3018,7 +3029,6 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       rpc_mempool_dsp_base(nullptr),
       weights_dirty(false),
       dsp_need_weight_inval_reset(false),
-      warned_qkv_name(false),
       rpc_batch_call_count(0),
       cumulative_graph_us(0),
       last_graph_end_us(0),
@@ -3033,6 +3043,7 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       max_n_ops_per_call(0),
       min_p10_us(0),
       max_p10_us(0),
+      max_layer_idx_seen(0),
       min_rpc_overhead_us(0),
       max_rpc_overhead_us(0),
       sum_rpc_overhead_us(0),
@@ -3068,7 +3079,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       buffer_type{},
       has_vtcm(false),
       has_hvx(false),
-      has_hmx(false) {
+      has_hmx(false),
+      warned_qkv_name(false) {
     snprintf(name, sizeof(name), "Hexagon-cDSP%d", dev_id);
     snprintf(desc, sizeof(desc), "Qualcomm NPU(CDSP%d)", dev_id);
     snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
@@ -4469,6 +4481,39 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
     }
     set_tensor_call_count++;
+    // Track max layer index from the last contiguous digit run in tensor name.
+    // Supports multiple naming conventions:
+    //   ffn_gate-12          (qwen3, dash separator)
+    //   blk.23.ffn.weight    (gemma/llama, dot separator)
+    //   model.layers.5.x     (transformers, dot separator)
+    // One-time cost per tensor during model load, never in graph_compute hot path.
+    if (tensor->name[0] != '\0') {
+        const char * name = tensor->name;
+        size_t name_len = strlen(name);
+        // find end of last contiguous digit run
+        const char * digit_end = nullptr;
+        for (size_t i = name_len; i > 0; --i) {
+            if (name[i - 1] >= '0' && name[i - 1] <= '9') {
+                digit_end = name + i;
+                break;
+            }
+        }
+        if (digit_end) {
+            // walk back to find start of digit run
+            const char * digit_start = digit_end;
+            while (digit_start > name && *(digit_start - 1) >= '0' && *(digit_start - 1) <= '9') {
+                --digit_start;
+            }
+            char * parse_end = nullptr;
+            long idx = strtol(digit_start, &parse_end, 10);
+            if (parse_end == digit_end && idx >= 0) {
+                ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *) buffer->buft->context;
+                if ((uint32_t)idx > ctx->max_layer_idx_seen) {
+                    ctx->max_layer_idx_seen = (uint32_t)idx;
+                }
+            }
+        }
+    }
     if (is_repack) {
         switch (tensor->type) {
             case GGML_TYPE_Q4_0:
@@ -5274,8 +5319,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                         "QKV fusion: cannot identify K/V by tensor name "
                                         "(n1='%s', n2='%s'), skipping fusion. "
                                         "Expected names containing 'Kcur'/'Vcur'.",
-                                        n1->name ? n1->name : "?",
-                                        n2->name ? n2->name : "?");
+                                        n1->name[0] ? n1->name : "?",
+                                        n2->name[0] ? n2->name : "?");
                                 }
                                 can_fuse_qkv = false;
                             }
