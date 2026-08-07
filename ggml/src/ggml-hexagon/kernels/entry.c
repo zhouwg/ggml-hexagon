@@ -38,8 +38,6 @@
 
 #define DEFAULT_VTCM_SIZE               (8 * 1024 * 1024)
 
-#define HEX_OP_PROF_BUCKETS             64
-
 #define HEX_OP_PROF_DUMP_INTERVAL       25
 
 // Queue capacity/stack sizes: mirror htp/main.c defaults with JZ_ prefix.
