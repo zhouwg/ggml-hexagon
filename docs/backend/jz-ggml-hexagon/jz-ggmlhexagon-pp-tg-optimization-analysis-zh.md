@@ -2,9 +2,9 @@
 
 > Initial: 2026-08-05
 
-> Last updated: 2026-08-07
+> Last updated: 2026-08-08
 
-> Author: Seed-2.1-Pro (Ch 1-4), MiniMax-M3 (Ch 5-6), revised by DeepSeek-V4-Pro & GLM-5.2 & MiniMax-M3 & Kimi-K3
+> Author: Seed-2.1-Pro (Ch 1-4), MiniMax-M3 (Ch 5-6), revised by DeepSeek-V4-Pro & GLM-5.2 & MiniMax-M3 & Kimi-K3 & Jeff Zhou (review & feedback)
 
 ***
 
@@ -27,21 +27,21 @@
 
 | 模型           | PP JZ (tok/s) | PP QCOM (tok/s) | PP JZ vs QCOM | TG JZ (tok/s) | TG QCOM (tok/s) | TG JZ vs QCOM |
 | ------------ | :-----------: | :-------------: | :-----------: | :-----------: | :-------------: | :-----------: |
-| Qwen3.5-2B   |     436.6     |      481.1      |     -9.2%     |      27.0     |       14.0      |   **+93.6%**  |
-| Gemma4-E2B   |     669.7     |      452.3      |   **+48.1%**  |      27.1     |       24.4      |     +11.1%    |
-| Gemma4-E4B   |     406.9     |      420.9      |     -3.3%     |      15.2     |       11.3      |   **+35.1%**  |
-| Qwen1.5-1.8B |     541.8     |      750.4      |     -27.8%    |      18.6     |       26.6      |     -30.2%    |
-| Llama3.2-1B  |    1013.9     |      1144.2     |     -11.4%    |      42.4     |       28.7      |   **+47.4%**  |
+| Qwen3.5-2B   |     501.7     |      456.1      |   **+10.0%**  |      26.7     |       13.4      |   **+99.0%**  |
+| Gemma4-E2B   |     684.8     |      457.9      |   **+49.5%**  |      27.1     |       25.0      |     +8.1%     |
+| Gemma4-E4B   |     403.6     |      417.4      |     -3.3%     |      14.9     |       10.8      |   **+38.2%**  |
+| Qwen1.5-1.8B |     552.9     |      711.2      |     -22.3%    |      18.6     |       26.2      |     -28.8%    |
+| Llama3.2-1B  |    1018.8     |      1084.3     |     -6.0%     |      42.2     |       28.7      |   **+47.1%**  |
 
-数据来源：`./scripts/build-run-android.sh run_abtest_all 2>&1 | tee log_abtest_all_$(date +%Y%m%d-%H%M%S).txt`（本轮日志 `log_abtest_all_20260807-102443.txt`）
+数据来源：`./scripts/build-run-ggmlhexagon-android.sh run_abtest_all 2>&1 | tee log_abtest_all_$(date +%Y%m%d-%H%M%S).txt`（本轮日志 `log_abtest_all_20260807-223924.txt`，self-build-jz 分支，2026-08-07 22:39）
 
-> **数据注记**：Qwen1.5-1.8B QCOM PP 首轮为 825.79 tok/s，后两轮为 720.69 / 704.70 tok/s，首轮明显偏离（可能因 dspqueue warmup 或后台负载），Table-1 仍按 3 轮均值 750.4 tok/s 如实记录；若排除首轮，PP 差距从 -27.8% 收窄至约 -24.0%。
+> **数据注记**：Qwen1.5-1.8B QCOM TG 首轮 29.52 tok/s 明显偏高（后两轮 24.83 / 24.11 tok/s），QCOM PP 跨轮递增（680.53 -> 701.19 -> 751.86 tok/s），均与设备轮间热状态相关；Table-1 按 3 轮均值（PP 711.2 / TG 26.2 tok/s）如实记录。与早晨 run（`log_abtest_all_20260807-102443.txt`）相比，Qwen3.5-2B 之外的四个模型 PP/TG 差异均在热状态波动范围内；唯一结构性变化是 Qwen3.5-2B PP 从 -9.2% 翻转为 +10.0%（graph 拆分修复生效，详见 3.7 末节与第六章）。
 
 **关键观察**：
 
-- **TG（Token Generation）**：JZ 在 4/5 模型上领先，最大优势 +93.6%（Qwen3.5-2B），领先 4 模型平均约 +46.8%；仅 Qwen1.5-1.8B（唯一 MHA 模型）落后 30.2%。
-- **PP（Prompt Processing）**：QCOM 在 4/5 模型上领先，最大优势 +27.8%（Qwen1.5-1.8B）；唯一例外是 Gemma4-E2B，JZ 反超 +48.1%。
-- TG 和 PP 的性能模式截然相反，指向不同的瓶颈根因。
+- **TG（Token Generation）**：JZ 在 4/5 模型上领先，最大优势 +99.0%（Qwen3.5-2B），领先 4 模型平均约 +48.1%；仅 Qwen1.5-1.8B（唯一 MHA 模型）落后 28.8%。
+- **PP（Prompt Processing）**：JZ 在 2/5 模型上领先（Gemma4-E2B +49.5%、Qwen3.5-2B +10.0%），QCOM 在其余 3 模型上领先，最大优势 +22.3%（Qwen1.5-1.8B）。Qwen3.5-2B 较早晨 run（-9.2%）翻转为 JZ 获胜，根因是 graph 拆分修复（第六章）。
+- TG 和 PP 的性能模式依然指向不同的瓶颈根因。
 
 ***
 
@@ -159,7 +159,7 @@ JZ 在加载阶段对 Q4\_K/Q6\_K 等量化权重做 **Q4\_K/Q6\_K -> Q4\_0 tile
 **Qwen1.5-1.8B（唯一 MHA 模型，24 层）PP/TG 均落后的根因** = dspqueue pipelining 优势 + 层数不足 + MHA VTCM/cache 压力三重叠加：
 
 1. **dspqueue pipelining 优势最大化**：dspqueue 的 AP-DSP overlap 收益与每次 DSP 计算时长正相关，Qwen1.5-1.8B 在 PP 阶段单 layer 计算时间长（24 层 x 每层 MHA Q@K^T 的 full attention），pipelining 隐藏的 AP prep 时间窗口大。
-2. **JZ 整图固定优势无法累积**：lm-head offload（~200MB Q6_K）+ first-touch 权重 inval（~9.2ms/token）是固定的、不会随 layer 数增加而放大的优势；24 层不足以让 JZ 的 per-layer 增量优势赶超 dspqueue 的 per-layer pipelining 收益。Gemma4-E2B 35 层则可以反超（+48.1%）。
+2. **JZ 整图固定优势无法累积**：lm-head offload（~200MB Q6_K）+ first-touch 权重 inval（~9.2ms/token）是固定的、不会随 layer 数增加而放大的优势；24 层不足以让 JZ 的 per-layer 增量优势赶超 dspqueue 的 per-layer pipelining 收益。Gemma4-E2B 35 层则可以反超（+49.5%）。
 3. **MHA 加重 VTCM/cache 压力**：1:1 attention 的 Q@K^T 是 full attention（无 KV 共享），相比 GQA 模型的 KV 共享头占用更多 VTCM 与 cache 带宽，恰好是 JZ role-aware cache 策略（bit0-3）本来要优化的场景-但这些优化只在 TG M=1 场景放大收益，对 PP 长序列 M=prompt_len 帮助有限。
 
 **结论**：Qwen1.5-1.8B 不是 corner case，而是三重不利因素叠加的体现。**任何 PP 优化（如 per-layer pipelining）只要把 dspqueue 的 per-layer 优势部分削弱，就能同时改善 Qwen1.5-1.8B 这类模型**-这是 PP 优化优先级应当高于 TG 精雕细琢的核心论证。
@@ -264,6 +264,8 @@ non-op     avg= 4,693 us/batch  (13.1% of wall time)
 
 **结论**：qwen3 的 PP 落后不全是调度框架的"固有税"，其中相当部分是**算子支持度缺口导致的图拆分税**。启用 SOLVE_TRI offload 是消除该差距的最直接手段（详见 4.3.3）。
 
+**修复确认（2026-08-07 夜间 CI，self-build-jz 分支）**：SOLVE_TRI/SSM_CONV bridge（4.3.3）与 RMS_NORM validator 放宽（第二根因，per-head view 被拒绝，详见 6.5-6.7）已合入本分支。夜间五模型 CI（`log_abtest_all_20260807-223924.txt`）实测 Qwen3.5-2B `batch_calls=256`（与其余四模型一致），25 路拆分归零；JZ PP 从 436.6 提升至 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 **+10.0%**，本节"拆分税是 PP 差距重要构成"的归因得到验证。
+
 ***
 
 ## 四、优化方向
@@ -273,7 +275,7 @@ non-op     avg= 4,693 us/batch  (13.1% of wall time)
 TG 和 PP 的瓶颈不同，优化策略也不同：
 
 - **TG 瓶颈**（基于 3.6 profiling，仅覆盖 DSP 侧）：在 DSP 执行内部，三类 matmul 占 91.1% op-sum，其中 lm-head MUL\_MAT（max=4697us，每 token 1 次）和 MUL\_MAT\_FFN（avg=334us，每 layer 1 次 fused op = 105 个内部 matmul）是绝对主导；JZ 已通过 lm-head offload + first-touch 权重 inval（\~9.2 ms/token 节省，固定整图总量）解决最关键的两项，剩余优化空间主要在 DSP matmul kernel 本身。
-- **PP 瓶颈**：PP 差距是**模型结构相关的**，不是普遍的 JZ 弱点。[ion 文档](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md)第 9 节分析表明 JZ 净优势 = per\_layer\_saving x n\_layers + fixed\_lmhead\_saving - dspqueue\_overlap。当层数足够时 JZ 也赢 PP（如 Gemma4-E2B 的 35 层，PP +48.1%）；浅层模型（qwen3.5-2B 24 层、llama3.2-1B 16 层）dspqueue 的固定 overlay 优势尚未被 per-layer 累积超越；此外 qwen3.5-2B 还叠加了 SOLVE_TRI 缺口导致的 25 路 graph 拆分税（详见 3.7）。[ion 文档](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md)也明确指出：**性能差异来自 data-plane policy（weight residency + role-aware cache），而非 control-plane**（FastRPC 开销历史值 \~89us，可忽略；本轮实测详见 4.4.4）。
+- **PP 瓶颈**：PP 差距是**模型结构相关的**，不是普遍的 JZ 弱点。[ion 文档](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md)第 9 节分析表明 JZ 净优势 = per\_layer\_saving x n\_layers + fixed\_lmhead\_saving - dspqueue\_overlap。当层数足够时 JZ 也赢 PP（如 Gemma4-E2B 的 35 层，PP +49.5%）；浅层模型（llama3.2-1B 16 层）dspqueue 的固定 overlay 优势尚未被 per-layer 累积超越；qwen3.5-2B 曾叠加 SOLVE_TRI 缺口导致的 25 路 graph 拆分税（详见 3.7），该拆分税已于本分支修复（第六章），PP 由 -9.2% 翻转为 +10.0%。[ion 文档](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/jz-ggml-hexagon/ion-mempool-vs-perbuffer-analysis-20260713.md)也明确指出：**性能差异来自 data-plane policy（weight residency + role-aware cache），而非 control-plane**（FastRPC 开销历史值 \~89us，可忽略；本轮实测详见 4.4.4）。
 
 ### 4.1 前置准备：Profiling 数据驱动
 
@@ -319,19 +321,19 @@ TG 模式下，**每 token 的 cgraph 拓扑完全相同**，只有 tensor 数�
 
 ### 4.3 第二优先级：PP 优化（结构性收益，是 JZ 的真正战场）
 
-**优先级重排论证**：JZ TG 在领先 4 模型上平均 +46.8%，继续优化的边际收益受 matmul kernel 物理极限约束；PP 落后 -3.3% 到 -27.8%，根因（AP-DSP 无 pipelining、算子支持度缺口导致的图拆分）是**可重构的框架/支持度差异**，而非 kernel 差异。**PP 从 -27.8% 改善到 -18% 等同于 +10pp 绝对提升**；TG 从 +47% 到 +57% 需要改 kernel 才有 +10pp，但 kernel 已与 QCOM 100% 共享，**只能从 matmul 内部优化（HMX 利用率、tile size）挤牙膏**。因此 PP 优化是 JZ 的真正战场，应排在 P0 profiling 之后立即推进。
+**优先级重排论证**：JZ TG 在领先 4 模型上平均 +48.1%，继续优化的边际收益受 matmul kernel 物理极限约束；PP 在 3/5 模型上落后 -3.3% 到 -22.3%，根因（AP-DSP 无 pipelining）是**可重构的框架差异**，而非 kernel 差异。**PP 从 -22.3% 改善到 -12% 等同于 +10pp 绝对提升**；TG 从 +48% 到 +58% 需要改 kernel 才有 +10pp，但 kernel 已与 QCOM 100% 共享，**只能从 matmul 内部优化（HMX 利用率、tile size）挤牙膏**。因此 PP 优化是 JZ 的真正战场，应排在 P0 profiling 之后立即推进。
 
 **Table-6**：PP 表现与模型结构关联（基于 3.5 节三重叠加与 3.7 节 graph 拆分分析）
 
 | 模型           | 层数                | PP JZ vs QCOM | TG JZ vs QCOM | 根因分项                                                 |
 | ------------ | ----------------- | :-----------: | :-----------: | ---------------------------------------------------- |
-| Gemma4-E2B   | 35 (GQA 8:1)      |   **+48.1%**  |     +11.1%    | 层数深且单层 DSP 时间适中（R 低），per-layer 优势累计超越 dspqueue overlap |
-| Gemma4-E4B   | 42 (GQA 4:1)      |     -3.3%     |   **+35.1%**  | 单层 DSP 时间长（R 高），dspqueue 每层隐藏的 AP prep 放大，抵消 42 层累积优势   |
-| Qwen3.5-2B   | 24 (GQA + Delta Net) |    -9.2%     |   **+93.6%**  | **25 路 graph 拆分税（SOLVE_TRI 未 offload，详见 3.7）** + 层数中等  |
-| Llama3.2-1B  | 16 (GQA 4:1)      |     -11.4%    |   **+47.4%**  | 层数浅，dspqueue 优势显著                                     |
-| Qwen1.5-1.8B | 24 (MHA 1:1)      |     -27.8%    |     -30.2%    | **三重叠加：dspqueue + 层数不足 + MHA VTCM/cache**              |
+| Gemma4-E2B   | 35 (GQA 8:1)      |   **+49.5%**  |     +8.1%     | 层数深且单层 DSP 时间适中（R 低），per-layer 优势累计超越 dspqueue overlap |
+| Qwen3.5-2B   | 24 (GQA + Delta Net) |   **+10.0%** |   **+99.0%**  | 25 路 graph 拆分税已修复归零（3.7 + 第六章），per-layer 优势兑现，PP 反超 |
+| Gemma4-E4B   | 42 (GQA 4:1)      |     -3.3%     |   **+38.2%**  | 单层 DSP 时间长（R 高），dspqueue 每层隐藏的 AP prep 放大，抵消 42 层累积优势   |
+| Llama3.2-1B  | 16 (GQA 4:1)      |     -6.0%     |   **+47.1%**  | 层数浅，dspqueue 优势显著                                     |
+| Qwen1.5-1.8B | 24 (MHA 1:1)      |     -22.3%    |     -28.8%    | **三重叠加：dspqueue + 层数不足 + MHA VTCM/cache**              |
 
-**结论**：PP 优化应聚焦于**结构性杠杆**（per-layer pipelining）与**支持度缺口补齐**（SOLVE_TRI offload），而非模型结构特化。Qwen1.5-1.8B 不是 corner case，而是三重不利因素的"压力测试"：per-layer pipelining 改善后这类模型获益最大。Gemma4-E2B 已经赢 PP，进一步压榨 +48.1% 之上的空间也来自 per-layer pipelining 在深层模型上的累积收益。Qwen3.5-2B 的 -9.2% 中约 5-6pp 来自 25 路 graph 拆分税（3.7 节），是五模型中唯一可用"补算子"而非"改架构"收回的差距。
+**结论**：PP 优化应聚焦于**结构性杠杆**（per-layer pipelining）与**支持度缺口补齐**（SOLVE_TRI offload），而非模型结构特化。Qwen1.5-1.8B 不是 corner case，而是三重不利因素的"压力测试"：per-layer pipelining 改善后这类模型获益最大。Gemma4-E2B 已经赢 PP，进一步压榨 +49.5% 之上的空间也来自 per-layer pipelining 在深层模型上的累积收益。Qwen3.5-2B 的 25 路 graph 拆分税（3.7 节）已通过"补算子 + validator 放宽"收回（第六章），PP 从 -9.2% 翻转为 +10.0%，验证了该归因；其余模型的 PP 差距（Gemma4-E4B / Llama3.2-1B / Qwen1.5-1.8B）需靠 4.3.1 per-layer pipelining 这类架构改动收回。
 
 #### 4.3.1 Per-layer intra-batch pipelining - 结构性突破点
 
@@ -360,7 +362,7 @@ AP Phase 1-9 + 11-12 估算：5.4.2.1 gemma4 dump 显示端到端 256 calls（1 
 AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==] -> ... -> AP P11-12 [=]
 ```
 
-**预期收益（基于估算）**：AP 侧 Phase 1-9 + 11-12 占 PP 10-15%，pipelining 隐藏 50-70%，PP 提速 5-10%。Qwen1.5-1.8B 从 -27.8% 改善到 -20% 左右，Gemma4-E2B 从 +48.1% 进一步到 +53%+。
+**预期收益（基于估算）**：AP 侧 Phase 1-9 + 11-12 占 PP 10-15%，pipelining 隐藏 50-70%，PP 提速 5-10%。Qwen1.5-1.8B 从 -22.3% 改善到 -15% 左右，Gemma4-E2B 从 +49.5% 进一步到 +55%+。
 
 **关键设计约束**：
 
@@ -386,7 +388,7 @@ AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==]
 
 如 4.2.1 节所述，descriptor 模板缓存可减少 AP 侧 prep 时间，与 pipelining 是**互补关系**（pipelining 利用 prep 的时间，缓存减少 prep 本身）。**已有 cgraph cache 覆盖 Phase 1-2 hit case（98.8% 命中率，详见 4.2.1）**，本节方案进一步跳过 Phase 4-8。**如果 Step 0 profiling 显示 AP 侧 prep 是 pipelining 收益的主要瓶颈，缓存应同步实施**。对长 context PP 收益较大（5-10%），对 TG M=1 收益很小。
 
-#### 4.3.3 SOLVE_TRI offload 启用 - 消除 qwen3 的 25 路 graph 拆分（低成本高收益）
+#### 4.3.3 SOLVE_TRI offload 启用 - 已落地验证，消除 qwen3 的 25 路 graph 拆分
 
 3.7 节已确认：qwen3（Qwen3.5-2B）的 cgraph 在 JZ 后端被拆成 25 个子图的唯一原因是 `GGML_OP_SOLVE_TRI` 未在 AP 侧注册，而 DSP 侧 kernel 已完整存在。补齐两处胶水代码即可消除拆分：
 
@@ -396,6 +398,8 @@ AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==]
 **预期收益**：qwen3 恢复完整单图后，每 batch 的 25 次 FastRPC round-trip 与 25 倍 Phase 1-9/11-12 开销归零，按 3.7 节实测估算 PP 可收回约 5-6pp（-9.2% 收窄至约 -3%）；TG 收益 <1%（拆分开销在 M=1 时占比已极小），但 25->1 的子图收敛同时降低了 per-token 的 cgraph cache 与 mempool 管理负担。
 
 **复杂度**：**低**。两处注册各约 10-20 行，无新 kernel、无调度框架改动、无 cache 策略变化，是全部 PP 方向中风险收益比最优的一项。
+
+**实际收益（2026-08-07 夜间 CI，self-build-jz）**：bridge 合入后 batch_calls 6400->1792，仍残留 6 个 MHA 层 attn_q_norm 拆分（第二根因：RMS_NORM validator 拒绝 per-head view，详见 6.5-6.7）；validator 放宽后 batch_calls 收敛至 256。夜间 CI（`log_abtest_all_20260807-223924.txt`）实测 JZ PP 436.6 -> 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 +10.0%，超过本节 5-6pp 预期（预期仅计拆分税，实际还含第二根因收益）；TG 持平（26.7 tok/s，对 QCOM +99.0%）。完整修复过程见第六章。
 
 **风险与验证**：
 
@@ -446,7 +450,7 @@ FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-
 
 ### 4.5 优化路线图
 
-**潜在收益优先级 vs 执行优先级是两个维度**：4.2-4.4 的"第一/第二/第三优先级"按**潜在收益空间**分级（4.2 TG 扩展优势 > 4.3 PP 优化 > 4.4 低风险快速收益），按**实际执行顺序**（下方 Step 0-4）则重新排列。**调整依据**：前期实验（详见 4.4.5 末尾注）证实 sampling 路径优化代码复杂且性能收益极小；AB 测试数据也确认 JZ 在 TG 已领先 4/5 模型，进一步投入产出比低，PP 是 JZ 的真正短板（4/5 模型落后 QCOM），结构性优化收益空间最大。**两个维度的执行映射**：4.3.3 SOLVE_TRI offload（约 30 行胶水代码，qwen3 PP 收回 5-6pp）作为 Step 1 立即收益（4.4.1 a-inv 已于 2026-08-07 实验证伪关闭）；PP 结构性突破（4.3.1 per-layer pipelining）作为 Step 2 核心战场；TG kernel 精调（4.4.2 + 4.4.3 + 4.2.2）作为 Step 3 最后做。**长期/已关闭项**：4.4.5 sampling 路径优化与 4.2.2 KV cache 增量 inval 因复杂度高/收益小。
+**潜在收益优先级 vs 执行优先级是两个维度**：4.2-4.4 的"第一/第二/第三优先级"按**潜在收益空间**分级（4.2 TG 扩展优势 > 4.3 PP 优化 > 4.4 低风险快速收益），按**实际执行顺序**（下方 Step 0-4）则重新排列。**调整依据**：前期实验（详见 4.4.5 末尾注）证实 sampling 路径优化代码复杂且性能收益极小；AB 测试数据也确认 JZ 在 TG 已领先 4/5 模型，进一步投入产出比低，PP 是 JZ 的真正短板（拆分修复前 4/5 模型落后 QCOM，Qwen3.5-2B 修复反超后仍 3/5 落后），结构性优化收益空间最大。**两个维度的执行映射**：4.3.3 SOLVE_TRI offload 作为 Step 1 立即收益（已完成：夜间 CI 实测 qwen3 PP +14.9%，对 QCOM 从 -9.2% 翻转为 +10.0%；4.4.1 a-inv 已于 2026-08-07 实验证伪关闭）；PP 结构性突破（4.3.1 per-layer pipelining）作为 Step 2 核心战场；TG kernel 精调（4.4.2 + 4.4.3 + 4.2.2）作为 Step 3 最后做。**长期/已关闭项**：4.4.5 sampling 路径优化与 4.2.2 KV cache 增量 inval 因复杂度高/收益小。
 
 4.1-4.4 节按优先级组织，经实验验证后，实际执行顺序调整为：
 
@@ -454,7 +458,7 @@ FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-
 Step 0: Profiling 数据驱动（必做前提，详见 4.1）
 
 Step 1: 低风险快速收益（独立于 PP/TG 主战场）
-  +-- 4.3.3 SOLVE_TRI offload 启用（qwen3 PP +5-6pp，约 30 行胶水代码，五模型 CI 验证）
+  +-- 4.3.3 SOLVE_TRI offload：已完成（2026-08-07 夜间 CI：batch_calls 6400->256，qwen3 PP 436.6->501.7 tok/s，对 QCOM -9.2% -> +10.0%，详见第六章）
   +-- 4.4.1 a-inv 优化：2026-08-07 实验证伪（bit1 受 PRIOR_DST_MAX_LEN=64 限制退化为 no-op），关闭
   +-- 4.4.4 FastRPC 校准：已实测，结论为投入产出比低，关闭
 
@@ -462,7 +466,7 @@ Step 2: PP 结构性突破（核心战场，详见 4.3.1）
   +-- DSP 侧 partial-execute + resume 接口 + async FastRPC 调度
   +-- 严格 TG 回归测试：M=1 单次 doorbell 优势不被新同步点吃掉
   +-- （条件性）4.3.2 descriptor 模板缓存
-  +-- 预期：PP +5-10%；Qwen1.5-1.8B 从 -27.8% -> ~-20%；Gemma4-E2B 从 +48.1% -> +53%+
+  +-- 预期：PP +5-10%；Qwen1.5-1.8B 从 -22.3% -> ~-15%；Gemma4-E2B 从 +49.5% -> +55%+
 
 Step 3: TG kernel 精调（边际收益，详见 4.4.2 + 4.4.3 + 4.2.2）
   +-- 4.4.2 MUL_MAT_FFN kernel 调优（HMX 利用率与 tile size）
@@ -937,6 +941,7 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 - 24 层 x 2 = 2400-4800 us 节省，PP 收益 +2.6-5.3%
 - 同步收益: Q/K/V 三个 output 从 3 个独立 dst 合并到 1 个 fused dst，**减少 a-inv 总量** (FLASH_ATTN 读 Q/K/V 时只 invalidate 1 个 tensor 而非 3 个)
 - 风险: 新 kernel 需验证正确性，参考 QCOM `htp/matmul-ops.c` 中 HMX-aware QKV 实现 (若存在)
+- 实施陷阱 (feature 分支实测): 三个权重共享同一 kparams->n 会在 GQA 模型上 garble (K/V 输出维度 < Q，共享 n 导致 K/V 写出维度错误); 必须为 Wk/Wv/Wq 各自独立 kparams 并携带各自权重维度
 
 **B. bulk flush 异步化 (P0 突破方向)**:
 
@@ -947,6 +952,7 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 - 节省: 15145 us 中 30-50% 可与下一 batch 重叠，理论省 4500-7500 us
 - 风险: 需要新增 DSP thread + 跨 batch 同步原语，可能影响后续读取的 cache coherency
 - 参考: 5.7 节保留的 `dsp-ctx.h` `bulk_flush_ranges` 数组已包含 sort + merge 逻辑，异步化只需把 `bulk_flush_all()` 从主线程移到 worker thread
+- 实施陷阱 (feature 分支实测): enable_async_bulk_flush=1 曾在 qwen1 上 garble (flush 线程 DMA 写与主线程读的竞态); 同步点必须显式保证 batch N+1 首个读 dst 的 op 之前 flush 完成，并逐模型验证五模型 CI 输出
 
 **C. HMX fused FFN (P1 方向)**:
 
@@ -965,11 +971,50 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 - 风险: 中，跨 batch 跟踪需要考虑 L2 容量 (128KB) 和 tensor 生命周期
 - 前提: 必须先确认 1754 MB 的 24% 重复率假设成立 (需 AP 侧打点验证)
 
-#### 5.8.4 优先级排序依据
+#### 5.8.4 新增三个方向（2026-08-08 morning，Kimi-K3，基于 self-build-jz 最新代码与数据）
+
+**Table-15**：新增方向一览（编号沿用 5.8.3 的 A-D 顺延）
+
+| 优先级 | 方向 | 当前开销 | 预期节省 | 收益场景 | 风险 |
+|---|---|---|---|---|---|
+| P0 | F. qwen1 TG 根因定位（op 级 profiling 先行） | TG -28.8%（15.6 ms/token） | 待定，上限为抹平差距 | qwen1 TG | 低（先测后修） |
+| P1 | E. AP 侧 per-call overhead 消除（hash 瘦身 + descriptor blob 复用） | 641 us/batch（p1 395 + p8 166 + p5/p6 79） | ~540 us/batch | 全模型 TG +1.2-2.7% | 低（纯 AP 侧） |
+| P2 | G. first-touch w-inv 移至加载期 | 首个 PP batch 13.6-25.8 ms | 同左（计时窗口口径） | PP 测量 + TTFT | 低-中（顺序约束） |
+
+**E. AP 侧 per-call overhead 消除（P1）**：
+
+- 证据：第五章 gemma4 端到端 256 批次 `dump_perf_stats`：per-call overhead avg=690 us（graph_dur - p10），其中 p1=395 us/batch（compute_content_hash 每 batch 游走 1493 个散落 tensor 结构体）、p8=166 us/batch（descriptor 构建）、p5/p6=79 us/batch；cgraph cache hits=253 / misses=3，即 253 个 TG batch 图内容完全一致，这部分 AP 工作每 token 原样重做
+- 机制 1（hash 瘦身）：[compute_content_hash](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5105-L5123) 每节点 fold op+ne+nb+10 个 src 指针+data ptr（约 20 次解引用）；改为只 fold {op, data ptr}，data ptr 在图内近唯一，配合已有 n_nodes 校验，碰撞安全性可论证
+- 机制 2（descriptor blob 复用）：hash 已覆盖全部 data ptr，命中时 Phase 5/6/8 的输出是确定性的；将构建完成的 ops+tensors descriptor 区（约 240 KB 连续 blob）存入 cgraph cache entry，命中时一次 memcpy 替代重跑三个阶段
+- 与 4.3.1 pipelining 互补（elimination vs overlap）；纯 AP 侧改动，不碰 DSP kernel / cache 策略 / 调度框架，风险为全部方向中最低
+- 预期：641 -> 约 100 us/batch；TG：llama3 +2.3%，gemma4 +1.4%，qwen1 +1.2%
+- 验证：`dump_perf_stats` 对照 p1/p8 累计值 + 五模型 CI
+
+**F. qwen1 TG 根因定位（P0）**：
+
+- 现状：五模型中唯一 TG 败局（-28.8%，53.8 vs 38.2 ms/token）；文档对 TG 落后只有 "MHA VTCM/cache 压力" 定性描述，qwen1 TG 的 per-op profile 从未测过（3.6 节是 gemma4 TG，5.x 是 qwen1 PP）
+- 计划：`HEX_OP_PROF` 跑 qwen1 TG，与 3.6 节 gemma4 TG profile 逐项对比
+- 待验证假设：H1 FLASH_ATTN 主导（MHA 每 token 每层 KV 读取 = 2 x n_embd x 2B = 8 KB，为 GQA 8:1 的 8 倍，随 ctx 线性增长）；H2 lm-head（Q6_K->Q4_0 repack 约 163 MB）matvec 在 DSP 的实际带宽未达预期；H3 KV cache 写入路径 per-token invalidation
+- 测出主导项后再设计修复：H1 对策为 KV layout / VTCM 分块，H2 对策为 matvec kernel DRAM 预取
+- 一次 CI 即可定位；qwen1 同时是 PP 差距最大模型（-22.3%），机制级解释对 PP 优化同样有价值
+
+**G. first-touch w-inv 移至加载期（P2）**：
+
+- 证据：gemma4 首个 PP batch w-inv=13,637 us（1,334 MB），e4b 25,802 us（2,528 MB）；会话级一次性成本（TG batch 实测 w-inv 约 10 us，bit0 生效），但全部落在首个 PP batch 的计时窗口内，gemma4 PP 76 ms 中 18% 是会话初始化成本而非 prompt 计算
+- 机制：复用 `execute_batch(0xFFFC)` 特殊命令通道（推 dsp_cache_mode 的同一路径），模型加载完成后发 init 命令，DSP 一次性整块 invalidate 权重区并预标记 first-touch bitmap；权重区在 mempool 内连续，整块 invalidate 比 24-42 层交错 per-range 遍历局部性更好
+- 预期：PP 测量窗口 -13.6 ms（gemma4）/ -25.8 ms（e4b），PP 数字更纯粹反映计算本身，后续 pipelining 收益测量更准；TTFT 微降
+- 风险：低-中；只需保证 invalidate 在最后一次 AP 侧权重写之后、首个 DSP batch 之前
+
+**已评估并否掉的方向**（避免重复提议）：
+
+- a-inv range 合并（sort+merge）：a-inv=19,167 us 是字节线性 dcinva 成本，1,754 MB 已是 per-batch 结构性下限（4.4.1 已证伪压缩空间）；合并 range 只省 per-call 开销，不省逐行 invalidate 本身
+- PP/TG 双模 cache 策略（PP 批次改用 flush-all）：flush-all 会把权重逐出 L2，恰好摧毁 bit0 first-touch 带来的 TG 优势，得不偿失
+
+#### 5.8.5 优先级排序依据
 
 P0 方向 (A + B) 合计理论节省 6900-12300 us = PP +7.6-13.6%，符合 `4.5 路线图` 中"PP 优化第二优先级"的潜在收益空间。P1 方向 (C + D) 合计 2000-3900 us = PP +2.2-4.3%，作为 P0 实施完成后的后续优化。
 
-实施顺序建议: A -> C -> B -> D。前两个 (A + C) 共用 HMX fused kernel 基础设施，先实施可积累经验。B 涉及新 DSP thread + 同步原语，复杂度最高，但潜在收益最大 (PP +5-8%)。D 风险最低 (复用现有 weight_inval 模式)，但收益受限于重复率假设验证。
+实施顺序建议: A -> C -> B -> D。前两个 (A + C) 共用 HMX fused kernel 基础设施，先实施可积累经验。B 涉及新 DSP thread + 同步原语，复杂度最高，但潜在收益最大 (PP +5-8%)。D 风险最低 (复用现有 weight_inval 模式)，但收益受限于重复率假设验证。2026-08-08 新增 E/F/G (5.8.4) 后: F 与 A/B 同为 P0 但性质是定位测量 (一次 CI 出结论)，建议最先执行; E 为最低风险速赢项，可与 A 并行; G 为计时口径修正，独立实施。
 
 注意: 本节 4 个方向均在 `feature/qwen1_optimize` 分支探索，**不应直接合并到主分支 `self-build-jz`**，需 5 模型 CI 验证无回归 + 主分支 baseline 对比后再议。
 
@@ -992,7 +1037,7 @@ P0 方向 (A + B) 合计理论节省 6900-12300 us = PP +7.6-13.6%，符合 `4.5
 
 ### 6.3 第二阶段：拆分减少，但推理输出乱码
 
-`batch_calls=1792` 已大幅改善，但 qwen3 推理输出仍为字符级乱码（截断、重复、词界破坏），与 4.4.5 描述的"garble = cache 损坏"症状一致：
+`batch_calls=1792` 已大幅改善，但 qwen3 推理输出出现字符级乱码（截断、重复、词界破坏）：起点（batch_calls=6400）输出经 `log_abtest_all_20260807-102443.txt` 核实为文本连贯，乱码是 bridge patch 后新引入的中间状态，症状与 4.4.5 描述的"garble = cache 损坏"一致：
 
 - 排除 1：4.4.5 已回滚的 DSP-side sampling 优化不是当前代码状态
 - 排除 2：已知 a-inv bit1 实验已证伪（4.4.1），对当前 cgraph 退化为 no-op
@@ -1082,41 +1127,41 @@ Qcur      = build_norm(Qcur, model.layers[il].attn_q_norm, LLM_NORM_RMS) // <- v
 
 ### 6.8 第七阶段：验证结果
 
-**Table-15**：Qwen3.5-2B 修复全过程分阶段对比
+**Table-16**：Qwen3.5-2B 修复全过程分阶段对比
 
 | 阶段                       | 改动                                    | `batch_calls` | 拆分来源         | 推理输出          |
 | ------------------------ | ------------------------------------- | ------------ | ------------ | ------------- |
-| 起点（kimi-k3 指出）            | 无                                     | 6400         | SOLVE_TRI + SSM_CONV 缺失（25 子图/批） | 拆分导致的多子图 cache 错误 |
-| 第一阶段：补 SOLVE_TRI/SSM_CONV bridge | 6.2 节两组 patch                            | 1792         | 6 个 MHA 层 attn_q_norm（7 子图/批）  | 字符级乱码         |
+| 起点（kimi-k3 指出）            | 无                                     | 6400         | SOLVE_TRI + SSM_CONV 缺失（25 子图/批） | 正常（拆分仅造成性能损失） |
+| 第一阶段：补 SOLVE_TRI/SSM_CONV bridge | 6.2 节两组 patch                            | 1792         | 6 个 MHA 层 attn_q_norm（7 子图/批）  | 字符级乱码（bridge 后新引入） |
 | 第二阶段：放宽 RMS_NORM validator  | 6.7 节 patch                            | **256**      | 无（完整单图）       | 正常输出          |
 
-**Table-16**：最终修复后实测数据
+**Table-17**：最终修复后实测数据
 
 | 指标                         | 起点   | 第一阶段（bridge layer） | 第二阶段（per-head view fix） | 变化 (起点->Stage 2) |
 | -------------------------- | ------------ | --------------- | ----------------- | ----------- |
 | `batch_calls`              | 6400         | 1792            | **256**           | **-96.0%**  |
-| 推理输出                       | 多子图 cache 错误 | 字符级乱码           | 正常               | garble 消除   |
+| 推理输出                       | 正常（log 102443 文本连贯） | 字符级乱码（新引入）           | 正常               | 正常 -> 正常（Stage 1 引入并已消除）   |
 | 6 个 MHA 层 attn_q_norm 上 DSP | 0/6          | 0/6             | **6/6**           | -           |
-| PP tok/s                   | **436.6**     | 456.91          | **495.50**          | **+13.5%**  |
-| TG tok/s                   | **27.0**      | 23.94           | **26.82**           | **-0.7%**   |
+| PP tok/s                   | **436.6**     | 456.91          | **501.71**          | **+14.9%**  |
+| TG tok/s                   | **27.0**      | 23.94           | **26.74**           | **-1.0%**   |
 
 > **数据来源**:
 > - 起点 (Qwen3.5-2B JZ baseline): Table-1 AB 测试 (log_abtest_all_20260807-102443.txt), PP 436.6 tok/s, TG 27.0 tok/s, batch_calls=6400 (Table-6A).
 > - 第一阶段 (bridge layer, batch_calls=1792): common_perf_print 输出 PP 456.91 tok/s, TG 23.94 tok/s, 输出字符级乱码.
-> - 第二阶段 (per-head view fix, batch_calls=256): 5 模型 CI 3 轮均值 (log_abtest_all_post_qwen3_opt_20260807-210809.txt), PP 495.50 tok/s, TG 26.82 tok/s, 输出正常.
-> - QCOM baseline (Table-1, log_abtest_all_20260807-102443.txt): PP 481.1 tok/s, TG 14.0 tok/s; 5 模型 CI QCOM (log_abtest_all_post_qwen3_opt_20260807-210809.txt): PP 466.61 tok/s, TG 13.50 tok/s.
+> - 第二阶段 (per-head view fix, batch_calls=256): 5 模型 CI 3 轮均值 (log_abtest_all_20260807-223924.txt, self-build-jz 分支), PP 501.71 tok/s, TG 26.74 tok/s, 输出正常.
+> - QCOM baseline (Table-1, log_abtest_all_20260807-102443.txt): PP 481.1 tok/s, TG 14.0 tok/s; 5 模型 CI QCOM (log_abtest_all_20260807-223924.txt): PP 456.10 tok/s, TG 13.44 tok/s.
 >
 > **与 QCOM 对比的视角**:
-> - **PP 性能反超**: 起点 -9.2% (436.6 vs 481.1) -> Stage 2 **+6.2%** (495.50 vs 466.61, 5 模型 CI QCOM 基线). 15.4pp 反转, JZ 在 Qwen3.5-2B 上首次反超 QCOM.
-> - **TG依然保持领先**: 起点 +93.6% (27.0 vs 14.0) -> Stage 2 +98.7% (26.82 vs 13.50, 5 模型 CI QCOM 基线). 基本持平, 仍保持近 2x 优势.
+> - **PP 性能反超**: 起点 -9.2% (436.6 vs 481.1) -> Stage 2 **+10.0%** (501.71 vs 456.10, 5 模型 CI QCOM 基线). 19.2pp 反转, JZ 在 Qwen3.5-2B 上首次反超 QCOM.
+> - **TG依然保持领先**: 起点 +93.6% (27.0 vs 14.0) -> Stage 2 +99.0% (26.74 vs 13.44, 5 模型 CI QCOM 基线). 基本持平, 仍保持近 2x 优势.
 >
 > **变化归因 (JZ 内部起点 -> Stage 2)**:
-> - PP +13.5% (436.6 -> 495.50) 来自两部分: (a) bridge layer 阶段 PP 456.91 (+4.7% vs 起点, 单测), 消除 11 处 delta net 层拆分的子图固定开销; (b) per-head view fix 阶段 PP 进一步 +8.5% (456.91 -> 495.50, 5 模型 CI 3 轮均值), 消除 6 次 MHA 层 attn_q_norm CPU<DSP> 上下文切换.
-> - TG -0.7% (27.0 -> 26.82) 内部基本持平, 但 QCOM 对比保持 +98.7% 领先 (5 模型 CI QCOM TG 13.50 tok/s), 实际净效果是 PP 性能反超 + TG依然保持 QCOM 2x 优势.
+> - PP +14.9% (436.6 -> 501.71) 来自两部分: (a) bridge layer 阶段 PP 456.91 (+4.7% vs 起点, 单测), 消除 11 处 delta net 层拆分的子图固定开销; (b) per-head view fix 阶段 PP 进一步 +9.8% (456.91 -> 501.71, 5 模型 CI 3 轮均值), 消除 6 次 MHA 层 attn_q_norm CPU<DSP> 上下文切换.
+> - TG -1.0% (27.0 -> 26.74) 内部基本持平, 但 QCOM 对比保持 +99.0% 领先 (5 模型 CI QCOM TG 13.44 tok/s), 实际净效果是 PP 性能反超 + TG依然保持 QCOM 2x 优势.
 
 ### 6.9 与 3.7 / 4.3.3 节的关系
 
-**Table-17**：Qwen3.5-2B graph 拆分修复路径全景
+**Table-18**：Qwen3.5-2B graph 拆分修复路径全景
 
 | 拆分来源                  | 层类型        | 拆分点数 | 根因诊断章节 | 修复章节    | 修复后 batch_calls |
 | --------------------- | ---------- | ---- | ------ | ------- | --------------- |
@@ -1177,9 +1222,14 @@ GGML_SCHED_DEBUG=2 adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./llama-cl
 
 ## 修订历史
 
+### 2026-08-08
+
+- CI 数据更新 (Kimi-K3, 基于 self-build-jz 分支 log_abtest_all_20260807-223924.txt): Table-1 更新为夜间五模型 3 轮均值, Qwen3.5-2B PP 从 -9.2% 翻转为 +10.0% (JZ 501.7 vs QCOM 456.1 tok/s), 确认 batch_calls=256 拆分归零; 数据注记改写为夜间 Qwen1.5-1.8B QCOM TG 首轮 spike + PP 跨轮递增; 3.7 节新增修复确认段; Table-6 重排并更新; 4.3.3 标记已落地验证并补实际收益; 4.5 路线图 Step 1 标记完成; 第六章 Table-17 与数据来源从 feature 分支 210809 日志切换为本分支 223924 日志 (PP 495.50->501.71, 对 QCOM +6.2%->+10.0%)
+- 新增 5.8.4 + 起点输出误记修正 (Kimi-K3, 06:55): 5.8.4 新增 E/F/G 三方向 (AP per-call overhead 消除 / qwen1 TG 根因定位 / first-touch w-inv 移至加载期) 及两项否掉方向 (a-inv range 合并, PP/TG 双模 cache 策略); 5.8.3 方向 A/B 补录 feature 分支实测陷阱 (共享 kparams->n 致 GQA garble; enable_async_bulk_flush 竞态致 qwen1 garble); 原 5.8.4 顺延为 5.8.5; 修正 MiniMax-M3 表格中起点推理输出误记 - log 102443 实测起点 (batch_calls=6400) 输出文本连贯正常, 乱码为第一阶段 bridge 后新引入的中间状态, 原 "拆分导致的多子图 cache 错误" 表述不成立; Table-15/16/17 顺延为 Table-16/17/18
+
 ### 2026-08-07
 
-- **第六章新增 (MiniMax-M3)**: Qwen3.5-2B PP&TG 优化完整过程 (6.1-6.11). 涵盖 7 个阶段: (1) 基于 kimi-k3 在 3.7 节指出的 SOLVE_TRI/SSM_CONV 缺失, 实施两个算子的 bridge layer patch; (2) batch_calls 6400->1792 但推理仍乱码; (3) 用 ggml core 的 `GGML_SCHED_DEBUG` 抓 split 现场; (4) 定位到 6 个 MHA 层 attn_q_norm 拆分点; (5) 分析 per-head view 与 validator 拒绝原因; (6) 放宽 validator + 验证 batch_calls=256 PP&TG 大幅提升. Table-15/16/17 三表按阶段/指标/根因三种维度组织
+- **第六章新增 (MiniMax-M3)**: Qwen3.5-2B PP&TG 优化完整过程 (6.1-6.11). 涵盖 7 个阶段: (1) 基于 kimi-k3 在 3.7 节指出的 SOLVE_TRI/SSM_CONV 缺失, 实施两个算子的 bridge layer patch; (2) batch_calls 6400->1792 但推理仍乱码; (3) 用 ggml core 的 `GGML_SCHED_DEBUG` 抓 split 现场; (4) 定位到 6 个 MHA 层 attn_q_norm 拆分点; (5) 分析 per-head view 与 validator 拒绝原因; (6) 放宽 validator + 验证 batch_calls=256 PP&TG 大幅提升. Table-16/17/18 三表按阶段/指标/根因三种维度组织
 - 措辞精度修正: 3.1 offload 权重对象/repack 价值/lifecycle 等 4 处; 3.2 与 Table-3 列名术语统一为"调度框架"; 3.6 解除 `HEX_OP_PROF` 与 DSP-side sampling 的 commit 错误关联 (后者为已回滚的 logits copyback 优化方案)
 - 第四章结构整理: 删除 4.2.1 + 4.3.2 (实际为同一实验的 DSP 侧 + AP 侧配套组件, 文档分拆造成"两个独立方案"错觉); 新增 4.4.5 作为合并澄清与已关闭项; 同步重编号 4.2-4.4 子节 (4.x -> 4.x.y, 与第五章多级编号风格对齐)
 - 第四章代码核验与路线图: 多处代码核验修正 (FastRPC 实测替换历史值 ~89us、DDR 带宽、fusion 状态、bit1 跳过方向等); 4.5 路线图精简为时间线; "核心转变"段显式区分"潜在收益优先级"与"执行优先级"两个维度
