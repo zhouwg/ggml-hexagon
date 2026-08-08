@@ -102,8 +102,9 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
-#   qwen3       -> Qwen3.5-2B-Q4_0.gguf
-#   gemma4      -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
+#   qwen3-2b    -> Qwen3.5-2B-Q4_0.gguf
+#   qwen3-9b    -> Qwen3.5-9B-Q4_0.gguf
+#   gemma4-e2b  -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
 #   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
 #   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
 #   llama3      -> Llama-3.2-1B-Instruct-Q4_0.gguf
@@ -111,8 +112,9 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
-        qwen3)      echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
-        gemma4)     echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        qwen3-2b)   echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3-9b)   echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
+        gemma4-e2b) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
         gemma4-e4b) echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
         qwen1)      echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
         llama3)     echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
@@ -547,7 +549,9 @@ function remove_temp_dir()
 
 function update_cfg()
 {
-    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
+    if [ -f ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ]; then
+        adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
+    fi
 }
 
 
@@ -609,7 +613,9 @@ function prepare_ggmlhtp()
 #for JZ's open-source ggml-hexagon backend in branch self-build-jz
 function prepare_ggmldsp()
 {
-    adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    if [ -f ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ]; then
+        adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
+    fi
     for ver in ${HTP_ARCH_VERSIONS}; do
         if [ -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ]; then
             echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${REMOTE_PATH}/libggmldsp-skel-${ver}.so"
@@ -649,6 +655,9 @@ function check_prebuilt_models()
 
     #1.2 GiB
     check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
+
+    #5.1 GiB
+    check_and_download_model Qwen3.5-9B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_0.gguf
 
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
@@ -975,7 +984,7 @@ function run_llamacli()
         model_name="$1"
         model_path=$(resolve_model_name "$model_name")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             exit 1
         fi
     else
@@ -1016,7 +1025,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("gemma4" "qwen3" "qwen1" "llama3" "gemma4-e4b")
+    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b")
 
     local total=${#models[@]}
     local count=0
@@ -1074,12 +1083,12 @@ function run_abtest()
     # Requires out/ab-test/ populated (run 'build' then 'build_qcom' first).
     # Usage: run_abtest [rounds] [model_alias]
     #   rounds:      default 3
-    #   model_alias: default gemma4
+    #   model_alias: default gemma4-e2b
     #
     # Example:
     #   $0 run_abtest
     #   $0 run_abtest 5
-    #   $0 run_abtest 3 qwen3
+    #   $0 run_abtest 3 qwen3-2b
     #   $0 run_abtest 2>&1 | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt
 
     local rounds=3
@@ -1093,7 +1102,7 @@ function run_abtest()
         local model_alias="$2"
         model_path=$(resolve_model_name "$model_alias")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_alias'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_alias'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             exit 1
         fi
     fi
@@ -1248,7 +1257,7 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen3 gemma4 gemma4-e4b qwen1 llama3"
+    local all_models="qwen3-2b gemma4-e2b gemma4-e4b qwen1 llama3"
     local total=5
     local idx=0
 
@@ -1273,9 +1282,9 @@ function run_ubatchtest()
 {
     # Update ubatch-size values for a given model.
     # Usage: run_ubatchtest [model_alias] [ubatch_sizes_csv]
-    #   model_alias    default: gemma4
+    #   model_alias    default: gemma4-e2b
     #   ubatch_sizes   default: 32,64,128,512,1024
-    local model_alias="gemma4"
+    local model_alias="gemma4-e2b"
     local ubatch_sizes=(8 16 22 32 64 128 512 1024)
     local save_params="${running_params}"
 
@@ -1283,7 +1292,7 @@ function run_ubatchtest()
         if [ -n "$(resolve_model_name "$1")" ]; then
             model_alias="$1"
         else
-            echo "ERROR: unknown model alias '$1'. Valid: qwen3, gemma4, qwen1, llama3, gemma4-e4b"
+            echo "ERROR: unknown model alias '$1'. Valid: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             return 1
         fi
     fi
@@ -1393,7 +1402,7 @@ function run_ubatchtest_all()
 {
     # Batch ubatch sweep across 5 models x 5 ubatches = 25 tests.
     # No arguments. Similar in spirit to run_llamacli_all.
-    local models=("gemma4" "qwen3" "qwen1" "llama3" "gemma4-e4b")
+    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b")
     local ubatch_sizes=(32 64 128 512 1024)
 
     # re-join ubatch sizes back into a comma-separated string for run_ubatchtest
@@ -1605,17 +1614,17 @@ function show_usage()
     echo "  $0 run_abtest  [rounds] [model_alias]"
     echo "    JZ vs QCOM performance comparison (requires 'build' then 'build_qcom' first)."
     echo "    rounds:       default 3"
-    echo "    model_alias:  default gemma4"
+    echo "    model_alias:  default gemma4-e2b"
     echo "    Examples:"
-    echo "      $0 run_abtest                      # 3 rounds, gemma4"
-    echo "      $0 run_abtest 5                    # 5 rounds, gemma4"
-    echo "      $0 run_abtest 3 qwen3              # 3 rounds, qwen3"
+    echo "      $0 run_abtest                      # 3 rounds, gemma4-e2b"
+    echo "      $0 run_abtest 5                    # 5 rounds, gemma4-e2b"
+    echo "      $0 run_abtest 3 qwen3-2b           # 3 rounds, qwen3-2b"
     echo "    Log capture example:"
     echo "      $0 run_abtest 2>&1 | tee log_abtest_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 5 models (qwen3, gemma4, gemma4-e4b, qwen1, llama3)."
+    echo "    Batch AB test across all 5 models (qwen3-2b, gemma4-e2b, gemma4-e4b, qwen1, llama3)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1623,15 +1632,17 @@ function show_usage()
 
     echo "  $0 run_llamacli   [model_alias]"
     echo "  Model aliases for run_llamacli:"
-    echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
-    echo "    gemma4        -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB)"
+    echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
+    echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
+    echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB)"
     echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, stress test for mirror/eviction)"
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
+    echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
-    echo "    $0 run_llamacli qwen3        # test qwen3"
-    echo "    $0 run_llamacli gemma4       # test gemma4"
-    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-E4B (mirror stress test)"
+    echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
+    echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
+    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b (mirror stress test)"
     echo -e "\n"
 
     echo "  $0 run_stresstest"
@@ -1644,20 +1655,20 @@ function show_usage()
 
     echo "  $0 run_ubatchtest  [model_alias] [ubatch_csv]"
     echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
-    echo "    model_alias:  gemma4 (default) | qwen3 | gemma4-e4b | qwen1 | llama3"
+    echo "    model_alias:  gemma4-e2b (default) | qwen3-2b | qwen3-9b | gemma4-e4b | qwen1 | llama3"
     echo "    ubatch_csv:   32,64,128,512,1024 (default)"
     echo "    Examples:"
-    echo "      $0 run_ubatchtest                          # gemma4 + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3                    # qwen3  + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3 32,128,512         # qwen3  + 32/128/512"
-    echo "      $0 run_ubatchtest qwen3 64                 # qwen3  + 64"
+    echo "      $0 run_ubatchtest                          # gemma4-e2b + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3-2b                 # qwen3-2b + 32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3-2b 32,128,512      # qwen3-2b + 32/128/512"
+    echo "      $0 run_ubatchtest qwen3-2b 64              # qwen3-2b + 64"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
     echo "  $0 run_ubatchtest_all"
     echo "    Batch ubatch sweep across 5 models x 5 ubatches = 25 tests."
-    echo "    models:    gemma4, qwen3, qwen1"
+    echo "    models:    gemma4-e2b, qwen3-2b, qwen1"
     echo "    ubatches:  32, 64, 128, 512, 1024"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1760,7 +1771,7 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
         if [ -z "$(resolve_model_name "$2")" ]; then
-            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             show_usage
             exit 1
         fi
@@ -1793,7 +1804,7 @@ elif [ $# == 3 ]; then
         exit 0
     elif [ "$1" == "run_llamacli" ]; then
         if [ -z "$(resolve_model_name "$2")" ]; then
-            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, gemma4-e4b, qwen1, llama3"
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             show_usage
             exit 1
         fi
