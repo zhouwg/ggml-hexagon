@@ -87,18 +87,33 @@ GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
+#4.9 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/gemma-4-E4B_q4_0-it.gguf
+
+#5.1 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/Qwen3.5-9B-Q4_0.gguf
+
+#0.7 GiB, will be downloadded automatically via this script when running this script at the first time
+GGUF_MODEL_NAME=/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf
+
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli_jz <alias>
-#   qwen3       -> Qwen3.5-2B-Q4_0.gguf
-#   gemma4      -> gemma-4-E2B-it-Q4_0.gguf
+#   qwen3-2b    -> Qwen3.5-2B-Q4_0.gguf
+#   qwen3-9b    -> Qwen3.5-9B-Q4_0.gguf
+#   gemma4-e2b  -> gemma-4-E2B-it-Q4_0.gguf
+#   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf
 #   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
+#   llama3      -> Llama-3.2-1B-Instruct-Q4_0.gguf
 #   (default)   -> gemma-4-E2B-it-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
-        qwen3)      echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
-        gemma4)     echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        qwen3-2b)   echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3-9b)   echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
+        gemma4-e2b) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        gemma4-e4b) echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
         qwen1)      echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
+        llama3)     echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
         *)          echo "" ; return 1 ;;
     esac
 }
@@ -559,11 +574,20 @@ function check_prebuilt_models()
     #1.12 GiB
     check_and_download_model qwen1_5-1_8b-chat-q4_0.gguf  https://huggingface.co/Qwen/Qwen1.5-1.8B-Chat-GGUF/resolve/main/qwen1_5-1_8b-chat-q4_0.gguf
 
+    #0.7 GiB
+    check_and_download_model Llama-3.2-1B-Instruct-Q4_0.gguf  https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf
+
     #1.2 GiB
     check_and_download_model Qwen3.5-2B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_0.gguf
 
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
+
+    #4.9 GiB
+    check_and_download_model gemma-4-E4B_q4_0-it.gguf     https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf
+
+    #5.1 GiB
+    check_and_download_model Qwen3.5-9B-Q4_0.gguf         https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q4_0.gguf
 
     set -e
 }
@@ -847,7 +871,7 @@ function run_llamacli_jz()
         model_name="$1"
         model_path=$(resolve_model_name "$model_name")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             exit 1
         fi
     else
@@ -873,7 +897,7 @@ function run_llamacli_qcom()
         model_name="$1"
         model_path=$(resolve_model_name "$model_name")
         if [ -z "$model_path" ]; then
-            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             exit 1
         fi
     else
@@ -941,9 +965,12 @@ function show_usage()
     echo -e "\n"
 
     echo "  Model aliases for run_llamacli_jz / run_llamacli_qcom:"
-    echo "    qwen3         -> Qwen3.5-2B-Q4_0.gguf"
-    echo "    gemma4        -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
+    echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
+    echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf"
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
+    echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo -e "\n"
 }
@@ -1007,7 +1034,7 @@ elif [ $# == 1 ]; then
 elif [ $# == 2 ]; then
     if [ "$1" == "run_llamacli_jz" ] || [ "$1" == "run_llamacli_qcom" ]; then
         if [ -z "$(resolve_model_name "$2")" ]; then
-            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3, gemma4, qwen1, llama3"
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
             show_usage
             exit 1
         fi

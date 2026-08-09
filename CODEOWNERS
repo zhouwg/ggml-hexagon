@@ -4,7 +4,7 @@
 # ggml-org/ci               : CISC, danbev, ggerganov, netrunnereve, ngxson, taronaeo
 # ggml-org/ggml-cann        : hipudding
 # ggml-org/ggml-cuda        : JohannesGaessler, am17an, IMbackK, ORippler
-# ggml-org/ggml-hexagon     : lhez, max-krasnyansky
+# ggml-org/ggml-hexagon     : lhez, max-krasnyansky, zhouwg-jeffzhou
 # ggml-org/ggml-metal       : ggerganov
 # ggml-org/ggml-opencl      : lhez, max-krasnyansky
 # ggml-org/ggml-rpc         : rgerganov
