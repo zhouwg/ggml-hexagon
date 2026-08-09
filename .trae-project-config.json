@@ -83,7 +83,32 @@
       "reason": "Commits and pushes must be explicitly performed by the user. Automated PR submissions may result in contributor ban."
     }
   },
+  "patch_review_rules": {
+    "description": "Methods for accurately reviewing patch changes. Required whenever reviewing a non-trivial patch (e.g. multi-hunk diffs that touch shared code blocks).",
+    "lcs_alignment_misjudgment": {
+      "description": "git diff hunk headers and internal line counts are not strictly aligned. The LCS algorithm may mark pre-existing code as '+' (actually unchanged). Trust the diff only at the granularity of a hunk, not line-by-line.",
+      "observed_case": "Q4_K/Q6_K shared case in ggml-hexagon-jz.cpp: the three checks (ne[0] % 32, ne[2] != 1, ggml_is_contiguous) appear as new additions in the diff, but they have been present in self-build-jz since baseline. The new Q5_K case was inserted as a separate case block; the shared Q4_K/Q6_K logic itself was not modified.",
+      "lesson_learned": "Do not infer runtime side effects on shared code from diff '+' lines alone. Always verify with the precise line-range comparison method below before claiming a regression risk on existing types."
+    },
+    "precise_comparison_method": {
+      "description": "Standard recipe to verify whether a specific code region (e.g. a shared case block) was actually modified. Uses git show to extract line ranges from both branches and pipes into diff.",
+      "command_template": "diff <(git show A:path | sed -n 'X1,Y1p') <(git show B:path | sed -n 'X2,Y2p')",
+      "example": "diff <(git show self-build-jz:ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp | sed -n '3173,3195p') <(git show feature/qwen3.5-9b-optimize:ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp | sed -n '3175,3222p')",
+      "expected_output_case": "Only 2 lines of comment insertion + 23 lines of new Q5_K case, confirming zero Q4_K/Q6_K logic change",
+      "use_when": [
+        "Reviewing a patch that adds conditions into a shared case block",
+        "Verifying a 'zero runtime side effect' claim on existing types",
+        "Investigating suspected unintended changes flagged by suspicious '+' lines in git diff",
+        "Cross-branch comparison of a specific function or case block"
+      ]
+    }
+  },
   "scripts": {
+    "ci_script": {
+      "path": "./scripts/build-run-ggmlhexagon-android.sh",
+      "alias": "CI script (entry point for build / run_testop / run_llamacli / run_abtest / run_ubatchtest commands)",
+      "description": "Unified build and test entry script for JZ's ggml-hexagon. All CI tests (5-model CI AB test, 6-model CI AB test, MUL_MAT validator unit tests) are triggered through this script"
+    },
     "build": "./scripts/build-run-android.sh build",
     "run_testops": "./scripts/build-run-android.sh run_testops",
     "run_testop_add": "./scripts/build-run-android.sh run_testop ADD",

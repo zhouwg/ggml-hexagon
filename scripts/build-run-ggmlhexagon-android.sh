@@ -1025,7 +1025,7 @@ function run_llamabench()
 
 function run_llamacli_all()
 {
-    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b")
+    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b" "qwen3-9b")
 
     local total=${#models[@]}
     local count=0
@@ -1243,9 +1243,9 @@ function run_abtest()
 
 function run_abtest_all()
 {
-    # Run AB test across all 5 supported models.
+    # Run AB test across all 6 supported models.
     # Usage: run_abtest_all [rounds]
-    #   rounds: default 3
+    #   rounds: default 3 (per model); qwen3-9b is hard-capped to 1 (slow + high power, phone gets hot)
     #
     # Example:
     #   $0 run_abtest_all
@@ -1257,18 +1257,24 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen3-2b gemma4-e2b gemma4-e4b qwen1 llama3"
-    local total=5
+    local all_models="qwen3-2b gemma4-e2b gemma4-e4b qwen1 llama3 qwen3-9b"
+    local total=6
     local idx=0
 
     for model_alias in ${all_models}; do
         idx=$((idx + 1))
+        # qwen3-9b inference is slow + high power + phone gets hot; cap to 1 round (vs ${rounds} for other models)
+        local model_rounds=${rounds}
+        if [ "${model_alias}" = "qwen3-9b" ]; then
+            model_rounds=1
+            echo "  NOTE: qwen3-9b -> rounds=1 (slow inference, high power, phone gets hot)"
+        fi
         echo ""
         echo "##############################################"
-        echo "  AB test ${idx}/${total}: ${model_alias}"
+        echo "  AB test ${idx}/${total}: ${model_alias} (rounds=${model_rounds})"
         echo "  $(date '+%Y-%m-%d %H:%M:%S')"
         echo "##############################################"
-        run_abtest ${rounds} ${model_alias}
+        run_abtest ${model_rounds} ${model_alias}
     done
 
     echo ""
@@ -1400,9 +1406,9 @@ function run_ubatchtest()
 
 function run_ubatchtest_all()
 {
-    # Batch ubatch sweep across 5 models x 5 ubatches = 25 tests.
+    # Batch ubatch sweep across 6 models x 5 ubatches = 30 tests.
     # No arguments. Similar in spirit to run_llamacli_all.
-    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b")
+    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b" "qwen3-9b")
     local ubatch_sizes=(32 64 128 512 1024)
 
     # re-join ubatch sizes back into a comma-separated string for run_ubatchtest
@@ -1606,7 +1612,7 @@ function show_usage()
     echo "  $0 run_llamacli"
     echo "  $0 run_llamabench"
 
-    echo "  $0 run_llamacli_all     (batch test 5 models = 5 tests)"
+    echo "  $0 run_llamacli_all     (batch test 6 models = 6 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
@@ -1624,7 +1630,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 5 models (qwen3-2b, gemma4-e2b, gemma4-e4b, qwen1, llama3)."
+    echo "    Batch AB test across all 6 models (qwen3-2b, gemma4-e2b, gemma4-e4b, qwen1, llama3, qwen3-9b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
