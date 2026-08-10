@@ -8,7 +8,7 @@ interface ChatCommandsOptions {
 	/** Gates `/prompt`. */
 	hasPrompts: () => boolean;
 	/** Gates `/cwd`. */
-	hasBuiltinTools: () => boolean;
+	hasCwdTools: () => boolean;
 }
 
 /**
@@ -22,23 +22,23 @@ interface ChatCommandsOptions {
 export function getChatCommands(options: ChatCommandsOptions): ChatFormCommand[] {
 	return [
 		{
-			name: 'prompt',
-			description: 'Insert an MCP prompt',
 			action: ChatFormCommandAction.PROMPT,
-			disabled: !options.hasPrompts()
+			description: 'Insert an MCP prompt',
+			disabled: !options.hasPrompts(),
+			name: 'prompt'
 		},
 		{
-			name: 'cwd',
-			description: SET_WORKING_DIRECTORY_LABEL,
-			keywords: ['current working directory'],
 			action: ChatFormCommandAction.CWD,
-			disabled: !options.hasBuiltinTools()
+			description: SET_WORKING_DIRECTORY_LABEL,
+			disabled: !options.hasCwdTools(),
+			keywords: ['current working directory'],
+			name: 'cwd'
 		},
 		{
-			name: 'model',
-			description: 'Select model',
 			action: ChatFormCommandAction.MODEL,
-			disabled: !options.showModelSelector
+			description: 'Select model',
+			disabled: !options.showModelSelector,
+			name: 'model'
 		}
 	];
 }
