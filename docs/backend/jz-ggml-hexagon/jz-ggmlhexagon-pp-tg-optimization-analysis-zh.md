@@ -2,7 +2,7 @@
 
 > Initial: 2026-08-05
 
-> Last updated: 2026-08-10
+> Last updated: 2026-08-11
 
 > Author: Seed-2.1-Pro (Ch 1-4), MiniMax-M3(Ch 5-8), revised by DeepSeek-V4-Pro & GLM-5.2 & MiniMax-M3 & Kimi-K3 & Jeff Zhou (review & feedback)
 
@@ -53,7 +53,7 @@ JZ (`ggml-hexagon-jz.cpp` + `kernels/`) 与 QCOM (`ggml-hexagon.cpp` + `htp/`) �
 | IOVA 空间局部性 (prefetch/TLB) | 连续, 可预测 | 跨 buffer 分散 | JZ |
 | Cache 一致性 | 用户态: role-aware (权重 vs 激活); `ion_sync` + `dsp_cache_mode` | driver 刷新 descriptor packet + DSP 侧每 batch 全量 D-cache flush+invalidate (统一, 不区分角色) | JZ (role-aware 策略灵活性) |
 | 物理地址稳定性 | 分配后稳定 (不迁移) | 分配后稳定 (不迁移) | 平手 |
-| lm-head 常驻 | 可行 (mempool offset 范围) | 不可行 (per-buffer fd/mmap/生命周期开销) | JZ |
+| lm-head offload | 可行 (mempool offset 范围) | 不可行 (per-buffer fd/mmap/生命周期开销) | JZ |
 
 ### 1.2 控制平面原语差异: dspqueue vs. 原生 FastRPC invoke
 
@@ -142,8 +142,8 @@ AP 打包 descriptors -> 传输到 DSP -> DSP 入口解析 descriptors -> 分发
 
 QCOM 后端在 `ggml-hexagon.cpp` 的 `ggml_hexagon_supported_mul_mat` 中有**3 处 guard** 阻止 lm-head offload 到 DSP：
 
-1. **类型 guard**：switch 只处理 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4/F16/F32，**Q4_K/Q6_K/BF16 不在 switch 中**，落入 `default: return false`（`ggml-hexagon.cpp` L2841-2842）。JZ 侧（[`ggml-hexagon-jz.cpp`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) L3274-3289）显式处理了 Q4_K/Q6_K（若 Q4_0 已启用则放行，因为 JZ 在加载时做了 Q4_K/Q6_K -> Q4_0 tiled repack）和 BF16（在 repack buffer 中转为 F16 bytes 后放行，L3318-3324）。
-2. **尺寸 guard**：`src0->ne[1] > 32768` 时拒绝（`ggml-hexagon.cpp` L2806-2808）。此 guard 嵌在 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4 case 内，对 Q4_K/Q6_K 不生效（已在类型 guard 阶段被 default 拦截）。
+1. **类型 guard**：switch 只处理 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4/F16/F32，**Q4_K/Q6_K/BF16 不在 switch 中**，落入 `default: return false`（[ggml-hexagon.cpp：ggml_hexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)）。JZ 侧（[ggml-hexagon-jz.cpp：ggmlhexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）显式处理了 Q4_K/Q6_K（若 Q4_0 已启用则放行，因为 JZ 在加载时做了 Q4_K/Q6_K -> Q4_0 tiled repack）和 BF16（在 repack buffer 中转为 F16 bytes 后放行，[ggml-hexagon-jz.cpp：ggmlhexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）。
+2. **尺寸 guard**：`src0->ne[1] > 32768` 时拒绝（[ggml-hexagon.cpp：ggml_hexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)）。此 guard 嵌在 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4 case 内，对 Q4_K/Q6_K 不生效（已在类型 guard 阶段被 default 拦截）。
 3. **repack buffer guard**：QCOM 在 switch 分支内还有一处 **repack buffer guard**（L2815：`!ggml_backend_buffer_is_hexagon_repack(src0->buffer)`），要求权重必须位于 repacked buffer 中。即使类型 guard 被移除，lm-head 权重（不在 repacked buffer 中）仍会被此 guard 阻止。该 guard 位于类型 guard 后面的 switch 分支内，当前未被触发，但揭示了 QCOM 对 offload lm-head 权重的额外约束：权重不仅要类型匹配，还必须位于 repacked buffer 中。
 
 对于本次测试的 五个模型，**类型 guard（#1）是实际生效的 guard**（lm-head 权重均为 Q4_K/Q6_K，不在 switch 中）。尺寸 guard（#2）是 per-buffer 成本约束的直接体现（32K 行是 per-buffer 的成本上限）。
@@ -181,7 +181,7 @@ dspqueue depth=16 (`opt_opqueue=16`) 意味着每个 batch 都通过 `add_buffer
 
 ### 3.2 dspqueue async overlay vs 同步 FastRPC：PP 性能差异的根因
 
-**调度框架差异是 PP 性能差异的根因，而非简单的"调度开销"。**
+**调度框架差异是 PP 性能差异的根因，而非简单的调度开销。**
 
 **QCOM (htp/) - dspqueue 异步流水线**：
 
@@ -208,7 +208,7 @@ dspqueue depth=16 (`opt_opqueue=16`) 意味着每个 batch 都通过 `add_buffer
 
 ### 3.3 Role-aware batch-level cache 管理：JZ TG 的第二大优势
 
-JZ 的 batch-level cache 策略通过 bitmap 控制，大幅减少了 cache sync 次数：
+JZ 的 batch-level cache 策略通过 bitmap 控制，大幅降低了 cache sync 开销：
 
 - **bit0 (first-touch weight bitmap)**：权重首次 touch 后不再 dcinva，命中 L2。
 - **bit1 (prior-dst skip)**：当前 src 与前序 op 的小 dst（<= 单 cacheline）为同一 tensor 时，跳过该 src 的 invalidation（本轮测试 mode=5 未启用，详见 4.6.1）。
@@ -217,9 +217,9 @@ JZ 的 batch-level cache 策略通过 bitmap 控制，大幅减少了 cache sync
 
 而 QCOM 采用 batch 级全量 cache 维护：在 batch 开始和结束时各执行一次完整 D-cache flush+invalidate（`qurt_mem_cache_clean(..., FLUSH_INVALIDATE_ALL, ...)`），uniform、role-blind，无法区分 weight 和 activation。
 
-**对 TG 的影响**：M=1 时每个 matmul 计算量极小，QCOM 的 batch 级全量 cache flush+invalidate 开销被放大。JZ 的 batch-level 策略大幅减少 cache sync 次数，效果显著。
+**对 TG 的影响**：M=1 时 matmul 计算量小，cache sync 开销占比大，JZ 的 bitmap 策略优势显著。
 
-**对 PP 的影响**：大 M matmul 计算时间长，cache sync 被计算摊薄，差异小。
+**对 PP 的影响**：PP 时 matmul 计算量大，cache sync 开销被摊薄，差异不明显。
 
 **QCOM cache 维护的两层结构:**
 - 第一层是 descriptor packet flags: dspqueue packet 携带固定 flags (`DSPQUEUE_BUFFER_FLAG_FLUSH_SENDER | DSPQUEUE_BUFFER_FLAG_INVALIDATE_RECIPIENT`), 但这只作用于 batch descriptor block (几 KB), 不是 tensor data。tensor data 通过 `fastrpc_mmap` 在 alloc 时映射, DSP skel 在首次使用时 mmap fds (`prep_op_bufs`)。实际 flush/invalidate 逻辑在闭源 Hexagon DSP driver 中。
@@ -268,7 +268,7 @@ dspqueue 的 overlay 优势受两个因素限制:
 
 当 `n_layers x per_layer_saving > dspqueue_overlap` 时, JZ 在 PP 也反超。交叉点取决于模型结构: Gemma4-E2B (35 层, GQA 8:1) 跨过两个阈值, JZ PP & TG 均胜; Qwen3.5-2B (25 层, GQA 4:1, 修复 graph 拆分后) 跨过 TG 阈值且 PP 反超; Qwen1.5-1.8B (24 层, MHA 1:1) 未跨过任一阈值。现代 GQA 模型 (30+ 层) 最受益于 JZ 架构。
 
-**公式不适用的场景:** 当模型权重超出 single mempool 容量时（如 Qwen3.5-9B），推理会触发大量 mirror memcpy，直接拖累 PP&TG 性能，上述公式不再适用。mempool 容量受限于 Hexagon DSP VA 32-bit 虚拟地址空间（约 4 GiB）；若高通 Hexagon SDK 实现真正的 UMA，mempool 大小将仅受 system memory 约束，公式适用范围可大幅扩展。详见第八章。
+**公式不适用的场景:** 当模型权重超出 single mempool 容量时（如 Qwen3.5-9B），推理会触发大量 mirror memcpy，直接影响 PP&TG 性能，上述公式不再适用。mempool 容量受限于 Hexagon DSP VA 32-bit 虚拟地址空间（约 4 GiB）；若高通 Hexagon SDK 实现真正的 UMA，mempool 大小将仅受 system memory 约束，公式适用范围可大幅扩展。详见第八章。
 
 **对 Qualcomm ggml-hexagon 的启示:** 若 QCOM 未来改进 lm-head offload, 需要将 dspqueue buffer 分为两类 ("常驻共享 buffer" + "per-batch 瞬态 buffer"), 在 driver/DSP skel 中加入 "权重角色" 概念, 允许 buffer 独立于 dspqueue 生命周期存在。但这本质上就是把 per-buffer 重新设计为 "几个 buffer + 一个 pool", 也就是 single mempool 方案。
 
@@ -288,9 +288,9 @@ dspqueue 的 overlay 优势受两个因素限制:
 
 ### 4.1 DSP Op-Level Profiling 实测数据（2026-08-06）
 
-基于 Gemma4-E2B 模型（TG 主场景），在 DSP 侧通过 `HEX_OP_PROF`（定义于 [`kernels/dsp-ctx.h` L25](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/dsp-ctx.h#L25)；feature/force_opfusion_in_pp 分支 hardcode=1，主分支默认=0）开启 per-op 计时统计，每 25 个 batch 通过 FARF(ERROR) 输出累计数据。以下分析取 batch#200 稳定数据点。
+基于 Gemma4-E2B 模型（TG 主场景），在 DSP 侧通过 `HEX_OP_PROF`（定义于 [dsp-ctx.h：HEX_OP_PROF](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/dsp-ctx.h)；feature/force_opfusion_in_pp 分支 hardcode=1，主分支默认=0）开启 per-op 计时统计，每 25 个 batch 通过 FARF(ERROR) 输出累计数据。以下分析取 batch#200 稳定数据点。
 
-**测量环境**：同 Table-6，Gemma4-E2B，n\_ctx=8192, n\_threads=6, dsp\_cache\_mode=5, ion\_sync\_mode=1
+**测试环境**：同本文第二章测试环境，Gemma4-E2B，n\_ctx=8192, n\_threads=6, dsp\_cache\_mode=5, ion\_sync\_mode=1
 
 **Table-9**: DSP 算子耗时排名（batch#200，cumulative，us）
 
@@ -335,7 +335,7 @@ non-op     avg= 4,693 us/batch  (13.1% of wall time)
 | hdr cache inval                    | 4             | -         | batch descriptor invalidation，可忽略             |
 | tensor pre-conversion              | 318           | -         | hex\_tensor\_desc -> dsptensor/htp\_tensor 预转换 |
 | weight cache inval (w-inv)         | 68            | 6 MB      | bit0 first-touch 效果显著：权重仅首次 inval             |
-| **activation cache inval (a-inv)** | **1,030**     | **82 MB** | **最大 non-op 开销**，mode=5 未启用 bit1，接近结构性下限（详见 4.6.1）  |
+| **activation cache inval (a-inv)** | **1,030**     | **82 MB** | **最大 non-op 开销**，mode=5 未启用 bit1，接近结构性下限  |
 | dst tracking                       | 105           | -         | prior\_dst/bulk\_flush 范围收集                   |
 | **bulk dst flush**                 | **1,377**     | -         | 所有 dst 合并到 batch 末尾 flush                     |
 | queue wakeup/suspend               | 5             | -         | DMA/HMX queue 管理，可忽略                          |
@@ -343,25 +343,25 @@ non-op     avg= 4,693 us/batch  (13.1% of wall time)
 
 **瓶颈根因分析（基于 profiling 数据修正）**：
 
-> **注意**：以下 profiling 数据仅覆盖 DSP 批处理执行阶段（Phase 10），在 DSP 侧通过 HEX\_OP\_PROF 测量。AP 侧开销（Phase 1-9 + Phase 11-12）未包含在内，需通过 Step 0 profiling（dump\_diag\_info=1）单独测量。此处"wall time"指 DSP 侧 batch 执行 wall time（35,789 us/batch），非端到端 TG 时间。
+> **注意**：以下 profiling 数据仅覆盖 DSP 批处理执行阶段（Phase 10），在 DSP 侧通过 HEX\_OP\_PROF 测量。AP 侧开销（Phase 1-9 + Phase 11-12）未包含在内，需通过 AP 侧 profiling（dump\_diag\_info=1）单独测量。此处"wall time"指 DSP 侧 batch 执行 wall time（35,789 us/batch），非端到端 TG 时间。
 
 - **在 DSP 执行内部，matmul kernel 是绝对主导**：op-sum 占 DSP batch-wall time 的 86.9%，其中 91.1% 是三类 matmul。DSP 侧 non-op 开销（cache inval、tensor 转换、dst flush 等）合计 4693 us/batch，占 DSP batch-wall 的 13.1%。
 - **lm-head MUL\_MAT（max=4697us）是 TG 单算子最大项**：每个 token 出现一次，对应 `1xhiddenxvocab` matrix-vector product。通用 GEMM kernel 对 M=1 的 skinny matmul 效率不高，专用 GEMV kernel 有优化空间。
 - **MUL\_MAT\_FFN（avg=334us）是 per-layer 最大稳定开销**：FFN matmul 已使用 fused op（MUL\_MAT\_FFN），需要检查是否充分利用 HMX 加速，以及 tile size 是否对 FFN 维度最优。
-- **activation cache invalidation（a-inv=1030us/batch, 82MB）是最大 DSP 侧 non-op 开销**：本轮 dsp\_cache\_mode=5 未启用 bit1；2026-08-07 对照实验（qwen1 PP-only，mode=7 vs 5）证实即使启用 bit1，a-inv 也零变化（根因：prior_dst_add 只登记 <= 单 cacheline 的 dst，cgraph 中间张量均 >= 256 字节，skip 路径几乎不触发，详见 4.4.1）。per-batch dedup 已保证每条 unique src 每 batch 至多失效一次，a-inv 接近结构性下限。bulk flush（1377us）是第二大 DSP 侧 non-op，但这是 bit2 bulk flush 策略的代价，将所有 dst flush 合并到一次。
+- **activation cache invalidation（a-inv=1030us/batch, 82MB）是最大 DSP 侧 non-op 开销**：本轮 dsp\_cache\_mode=5 未启用 bit1；2026-08-07 对照实验（Qwen1.5-1.8B PP-only，mode=7 vs 5）证实即使启用 bit1，a-inv 也零变化（根因：prior_dst_add 只登记 <= 单 cacheline 的 dst，cgraph 中间张量均 >= 256 字节，skip 路径几乎不触发）。per-batch dedup 已保证每条 unique src 每 batch 至多失效一次，a-inv 接近结构性下限。bulk flush（1377us）是第二大 DSP 侧 non-op，但这是 bit2 bulk flush 策略的代价，将所有 dst flush 合并到一次。
 - **DSP-side sampling 实际收益极小**：跳过 logits copyback 仅节省 \~100-200us（因 ion\_sync\_mode=1 下整个 mempool sync 掩盖了局部收益），与实测一致：DSP-side sampling 功能正确，但性能提升可忽略。
 
 **对优化方向优先级的影响**：
 
 1. **DSP 内部 matmul kernel 优化是首要方向**：三类 matmul 占 DSP 执行时间的 91.1%，lm-head 专用 GEMV kernel 和 MUL\_MAT\_FFN 调优是 DSP 侧最具潜力的单点优化。
-2. **AP 侧开销（Phase 1-9 + Phase 11-12）未被 DSP profiling 数据覆盖**：无法直接比较 AP 侧优化（descriptor 模板缓存等）与 DSP kernel 优化的收益。AP 侧开销需通过 Step 0 profiling 单独量化后再定优先级。
+2. **AP 侧开销（Phase 1-9 + Phase 11-12）未被 DSP profiling 数据覆盖**：无法直接比较 AP 侧优化（descriptor 模板缓存等）与 DSP kernel 优化的收益。AP 侧开销需单独量化后再定优先级。
 3. **lm-head 专用 GEMV kernel**：每 token 出现一次，max=4697us，是 TG 阶段 DSP 侧最大的单算子。
 4. **MUL\_MAT\_FFN kernel 优化**（HMX 利用率、tile size）：收益面最广（35 次/batch x 334us = 11690us/batch）。
-5. **a-inv 优化（已关闭）**：bit1 prior-dst 覆盖扩展于 2026-08-07 实验证伪（详见 4.4.1），a-inv 接近结构性下限，不再列为收益项。
+5. **a-inv 优化（已关闭）**：bit1 prior-dst 覆盖扩展于 2026-08-07 实验证伪，a-inv 接近结构性下限，不再列为收益项。
 
 ### 4.2 Qwen3.5-2B 的 25 路 graph 拆分：SOLVE_TRI 支持度差异
 
-本轮 AB 测试的 `ggmlhexagon_dump_perf_stats` 输出揭示了一个此前未被记录的结构差异：**Qwen3.5-2B 在 JZ 后端每个 batch 的 cgraph 被拆成 25 个子图，而 QCOM 后端保持完整单图**。
+本轮 AB 测试的 `ggmlhexagon_dump_perf_stats` 输出揭示了一个此前未被记录的结构差异：**Qwen3.5-2B 在 JZ 后端每个 batch 的 cgraph 被拆成 25 个子图**。
 
 **Table-11**：JZ 后端五模型 graph 拆分实测（`log_abtest_all_20260807-102443.txt`，JZ run 1）
 
@@ -375,27 +375,27 @@ non-op     avg= 4,693 us/batch  (13.1% of wall time)
 
 > \* Llama3.2-1B 的 min=3 来自 cgraph cache miss 时的零星小图（本轮 misses=6），256 个正式 batch 均为 ~501 节点完整图，不属于结构性拆分。
 
-**根因**：Qwen3.5-2B 是 delta net 混合架构（24 层 = 13 标准 attention 层 + 11 个 linear-attention delta net 层），delta net 层每层调用一次 `ggml_solve_tri`（[`delta-net-base.cpp` L166](file:///home/zhouwg/develop/ggml-hexagon/src/models/delta-net-base.cpp#L166)）。两个后端对该算子的支持度不同：
+**根因**：Qwen3.5-2B 是 delta net 混合架构（24 层 = 13 标准 attention 层 + 11 个 linear-attention delta net 层），delta net 层每层调用一次 `ggml_solve_tri`（[delta-net-base.cpp：build_delta_net_chunking](file:///home/zhouwg/develop/ggml-hexagon/src/models/delta-net-base.cpp)）。两个后端对该算子的支持度不同：
 
-- **QCOM 完整支持**：AP 侧 `supports_op` 有 `case GGML_OP_SOLVE_TRI`（[`ggml-hexagon.cpp` L4209-4211](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L4209-L4211)），DSP 侧有 HVX kernel 实现（[`htp/solve-tri-ops.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/solve-tri-ops.c)）。
-- **JZ 断在 AP 侧**：`init_op_validators()`（[`ggml-hexagon-jz.cpp` L3762-3798](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3762-L3798)）未注册 `GGML_OP_SOLVE_TRI` 的 validator，`ggmlhexagon_can_handle_op_through_cdsp` 对该算子返回 false。值得注意的是，**JZ 的 DSP 侧能力其实完整**：fork 自 htp/ 的 [`kernels/solve-tri-ops.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/solve-tri-ops.c) 与 entry.c 的 op 表注册（[L811](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L811)）都在，仅缺 AP 侧 validator 与 `ggml_op_to_htp_op` 映射（[entry.c L905](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L905) 的 switch 中无 `GGML_OP_SOLVE_TRI` case）。
+- **QCOM 完整支持**：AP 侧 `supports_op` 有 `case GGML_OP_SOLVE_TRI`（[ggml-hexagon.cpp：ggml_backend_hexagon_device_supports_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)），DSP 侧有 HVX kernel 实现（[`htp/solve-tri-ops.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/solve-tri-ops.c)）。
+- **JZ 断在 AP 侧**：`init_op_validators()`（[ggml-hexagon-jz.cpp：init_op_validators](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）未注册 `GGML_OP_SOLVE_TRI` 的 validator，`ggmlhexagon_can_handle_op_through_cdsp` 对该算子返回 false。**JZ 的 DSP 侧能力已完整**：fork 自 htp/ 的 [`kernels/solve-tri-ops.c`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/solve-tri-ops.c) 与 entry.c 的 op 表注册（[entry.c：g_op_dispatch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)）都在，仅缺 AP 侧 validator 与 `ggml_op_to_htp_op` 映射（[entry.c：ggml_op_to_htp_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c) 的 switch 中无 `GGML_OP_SOLVE_TRI` case）。
 
-于是 ggml scheduler 将 qwen3 的 cgraph 在每个 SOLVE_TRI 处切开：11 个 delta net 层的 SOLVE_TRI 回退 CPU，连同其前后依赖算子的段边界，将整图切成 25 段（6400 batch\_calls = 256 batches x 25 子图，345,600 / 6400 = 54 节点/子图）。
+于是 ggml scheduler 将 Qwen3.5-2B 的 cgraph 在每个 SOLVE_TRI 处切开：11 个 delta net 层的 SOLVE_TRI 回退 CPU，连同其前后依赖算子的段边界，将整图切成 25 段（6400 batch\_calls = 256 batches x 25 子图，345,600 / 6400 = 54 节点/子图）。
 
-**对同步架构的惩罚被放大**：JZ 每个子图都要走完整 12-phase 同步流程（25 次 FastRPC round-trip + 25 倍 Phase 1-9/11-12 的 AP 开销），且因子图间串行，完全无法 pipelining；QCOM 对完整单图做一次 dspqueue 流水提交，AP prep 与 DSP compute 跨 layer 重叠。本轮实测 qwen3 JZ 后端 6400 个子图的 AP phase 累计约 69ms（p1+p2+...+p12），摊到 256 个 token 约 270us/token；TG 阶段占比 <1% 尚可忽略（qwen3 TG 仍 +93.6% 领先），但 PP 阶段（单 batch ~119ms）25 倍的固定开销约占 5-6pp，是 qwen3 PP -9.2% 的重要构成。
+**对同步架构的惩罚被放大**：JZ 每个子图都要走完整 12-phase 同步流程（25 次 FastRPC round-trip + 25 倍 Phase 1-9/11-12 的 AP 开销），且因子图间串行，完全无法 pipelining；QCOM 对完整单图做一次 dspqueue 流水提交，AP prep 与 DSP compute 跨 layer 重叠。本轮实测 Qwen3.5-2B JZ 后端 6400 个子图的 AP phase 累计约 69ms（p1+p2+...+p12），摊到 256 个 token 约 270us/token；TG 阶段占比 <1% 尚可忽略（Qwen3.5-2B TG 仍 +93.6% 领先），但 PP 阶段（单 batch ~119ms）25 倍的固定开销约占 5-6pp，是 Qwen3.5-2B PP -9.2% 的重要构成。
 
-**结论**：qwen3 的 PP 落后不全是调度框架的"固有税"，其中相当部分是**算子支持度缺口导致的图拆分税**。启用 SOLVE_TRI offload 是消除该差距的最直接手段（详见 4.5.3）。
+**结论**：Qwen3.5-2B 的 PP 落后不全是调度框架差异，其中 SOLVE_TRI 算子支持度缺口导致的 25 段 cgraph 拆分是可通过补齐算子注册消除的结构性开销。
 
-**修复确认（2026-08-07 夜间 CI，self-build-jz 分支）**：SOLVE_TRI/SSM_CONV bridge（4.5.3）与 RMS_NORM validator 放宽（第二根因，per-head view 被拒绝，详见 6.5-6.7）已合入本分支。夜间五模型 CI（`log_abtest_all_20260807-223924.txt`）实测 Qwen3.5-2B `batch_calls=256`（与其余四模型一致），25 路拆分归零；JZ PP 从 436.6 提升至 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 **+10.0%**，本节"拆分税是 PP 差距重要构成"的归因得到验证。
+**修复确认（2026-08-07 夜间 CI，self-build-jz 分支）**：SOLVE_TRI/SSM_CONV 算子注册补齐与 RMS_NORM validator 放宽（per-head view 支持）已合入本分支。夜间五模型 CI（`log_abtest_all_20260807-223924.txt`）实测 Qwen3.5-2B `batch_calls=256`（与其余四模型一致），25 路拆分归零；JZ PP 从 436.6 提升至 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 **+10.0%**，验证了 cgraph 拆分是 PP 差距的主要构成。
 
-根据 4.1 节 DSP op-level profiling 实测数据，**在 DSP 执行内部，matmul kernel 是绝对主导**（三类 matmul 占 DSP batch-wall time 的 79.1% = 86.9%x91.1%）。注意：DSP profiling 数据仅覆盖 Phase 10（DSP 批处理执行），AP 侧开销（Phase 1-9 + Phase 11-12）未包含在内，需通过 Step 0 profiling 单独量化。在 AP 侧数据补全前，优化方向优先聚焦在 DSP kernel 与 offload 策略上，AP 侧优化暂不调整优先级。
+### 4.3 前置准备：Profiling 数据驱动
+
+根据 4.1 节 DSP op-level profiling 实测数据，**在 DSP 执行内部，matmul kernel 是绝对主导**（三类 matmul 占 DSP batch-wall time 的 79.1% = 86.9%x91.1%）。注意：DSP profiling 数据仅覆盖 Phase 10（DSP 批处理执行），AP 侧开销（Phase 1-9 + Phase 11-12）未包含在内，需通过 AP 侧 profiling 单独量化。在 AP 侧数据补全前，优化方向优先聚焦在 DSP kernel 与 offload 策略上，AP 侧优化暂不调整优先级。
 
 TG 和 PP 的瓶颈不同，优化策略也不同：
 
 - **TG 瓶颈**（基于 4.1 profiling，仅覆盖 DSP 侧）：在 DSP 执行内部，三类 matmul 占 91.1% op-sum，其中 lm-head MUL\_MAT（max=4697us，每 token 1 次）和 MUL\_MAT\_FFN（avg=334us，每 layer 1 次 fused op = 105 个内部 matmul）是绝对主导；JZ 已通过 lm-head offload + first-touch 权重 inval（\~9.2 ms/token 节省，固定整图总量）解决最关键的两项，剩余优化空间主要在 DSP matmul kernel 本身。
-- **PP 瓶颈**：PP 差距是**模型结构相关的**，不是普遍的 JZ 弱点。3.4 节分析表明 JZ 净优势 = per\_layer\_saving x n\_layers + fixed\_lmhead\_saving - dspqueue\_overlap。当层数足够时 JZ 也赢 PP（如 Gemma4-E2B 的 35 层，PP +49.5%）；浅层模型（llama3.2-1B 16 层）dspqueue 的固定 overlay 优势尚未被 per-layer 累积超越；qwen3.5-2B 曾叠加 SOLVE_TRI 缺口导致的 25 路 graph 拆分税（详见 4.2），该拆分税已于本分支修复（第六章），PP 由 -9.2% 翻转为 +10.0%。3.4 节也明确指出：**性能差异来自 data-plane policy（weight residency + role-aware cache），而非 control-plane**（FastRPC 开销历史值 \~89us，可忽略；本轮实测详见 4.6.4）。
-
-### 4.3 前置准备：Profiling 数据驱动
+- **PP 瓶颈**：PP 差距是**模型结构相关的**，不是普遍的 JZ 弱点。3.4 节分析表明 JZ 净优势 = per\_layer\_saving x n\_layers + fixed\_lmhead\_saving - dspqueue\_overlap。当层数足够时 JZ 也赢 PP（如 Gemma4-E2B 的 35 层，PP +49.5%）；浅层模型（llama3.2-1B 16 层）dspqueue 的固定 overlap 优势尚未被 per-layer 累积超越；Qwen3.5-2B 曾叠加 SOLVE_TRI 缺口导致的 25 路 cgraph 拆分（详见 4.2），该拆分已于本分支修复，PP 由 -9.2% 翻转为 +10.0%。3.4 节也明确指出：**性能差异来自 data-plane policy（weight residency + role-aware cache），而非 control-plane**（FastRPC 开销历史值 \~89us，可忽略）。
 
 在投入任何优化之前，先跑一轮 benchmark 量化各阶段耗时：
 
@@ -403,14 +403,14 @@ TG 和 PP 的瓶颈不同，优化策略也不同：
   - Phase 10 三阶段（`cum_p10_rpc_setup_us` / `cum_p10_dsp_exec_us` / `cum_p10_civac_us`）的占比。
   - TG 中 Phase 4-8 的固定开销究竟多大（验证 descriptor 模板缓存的收益上限）。
   - PP 中 Phase 1-9 + 11-12 的 AP 纯开销占比（验证 async/pipelining 的收益上限）。
-- **DSP 侧**：`HEX_OP_PROF=1`（定义于 [`kernels/dsp-ctx.h`](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/dsp-ctx.h#L25)），量化 DSP 侧 per-op / per-layer 耗时分布（即 4.1 节与第五章的 OP-PROF 数据来源）。feature/force_opfusion_in_pp 分支 hardcode 为 1，主分支默认为 0，合入主分支时需改为运行时配置或 build flag。
+- **DSP 侧**：`HEX_OP_PROF=1`（定义于 [dsp-ctx.h：HEX_OP_PROF](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/dsp-ctx.h)），量化 DSP 侧 per-op / per-layer 耗时分布（即 4.1 节与第五章的 OP-PROF 数据来源）。feature/force_opfusion_in_pp 分支 hardcode 为 1，主分支默认为 0，合入主分支时需改为运行时配置或 build flag。
 
 **决策阈值**：
 
-- 如果 Phase 1-9 + 11-12 在 PP 中占比 < 10%，async/pipelining 不值得做（FastRPC 开销历史值 \~89us 的数据也支持这一判断；本轮实测详见 4.6.4）。
+- 如果 Phase 1-9 + 11-12 在 PP 中占比 < 10%，async/pipelining 不值得做（FastRPC 开销历史值 \~89us，可忽略）。
 - 如果 Phase 4-8 在 TG 中占比 > 5%，descriptor 模板缓存值得投入。
 
-参考数据来源：本轮 5.4.2.1 gemma4 端到端 256 calls dump 已提供 AP phase 累计实测，可作为 Step 0 profiling 的起点。
+参考数据来源：本轮 Gemma4-E2B 端到端 256 calls dump 已提供 AP phase 累计实测，可作为 AP 侧 profiling 的起点。
 
 ### 4.4 TG 优化（巩固与扩大已有优势）
 
@@ -420,10 +420,10 @@ JZ 当前的 TG 优势来自 3.1 节 (lm-head DSP offload) 和 3.3 节 (role-awa
 
 TG 模式下，**每 token 的 cgraph 拓扑完全相同**，只有 tensor 数据指针变化。当前每 token 都要走 `graph_compute_batch` 的全部 12 phase（Phase 1-9 AP 侧全图分析 / 镜像 / 权重 repack / mempool 分配 / desc 构建 / cache flush，Phase 10 同步 RPC，Phase 11-12 AP 侧 cache inval / 回拷）。其中 Phase 1-9 内的 layout 计算、mempool offset 跟踪、descriptor 构建等纯 AP 工作在拓扑不变时可复用：
 
-- **已有基础**：Phase 1 已有 cgraph cache（[ggml-hexagon-jz.cpp:5159](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5159)），按 op+shape+src ptr 哈希命中时跳过 Phase 2 descriptor 重建。本轮 gemma4 端到端 256 calls 中 cgraph cache 命中率 98.8%（hits=253, misses=3，详见 5.4.2.1）。
+- **已有基础**：Phase 1 已有 cgraph cache（[ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)），按 op+shape+src ptr 哈希命中时跳过 Phase 2 descriptor 重建。本轮 Gemma4-E2B 端到端 256 calls 中 cgraph cache 命中率 98.8%（hits=253, misses=3）。
 - **本节方案在 cgraph cache 之上扩展**：缓存 mempool layout 与 desc 模板到层级别，后续 token 只 patch 变化的数据指针（activation/KV cache 地址），跳过 Phase 4-8 的 layout/desc 构建。
 - 首次 token 或 cgraph 拓扑变化时（如 context shift）构建 descriptor 模板，记录所有 op 的 src/dst offset 与 mempool layout。
-- **收益（按 4.1 profiling 数据估算）**：4.1 节 profiling 仅覆盖 DSP 侧 Phase 10，未测量 AP 侧 Phase 1-9 开销。descriptor 模板缓存省的是 AP 侧开销，无法用 DSP profiling 数据直接估算。需在 Step 0 profiling 拿到 AP 侧 Phase 1-9 的精确耗时后再评估收益。作为参考，若 AP 侧 Phase 1-9 开销与 DSP 侧 non-op 开销（4693 us/batch）同量级，即使消除其中一半（\~2.3 ms），相对于端到端 TG 时间的占比也会因 AP 侧 Phase 11-12 的额外开销而更低。**descriptor 模板缓存优先级的最终判断依赖 Step 0 profiling 数据**。
+- **收益（按 4.1 profiling 数据估算）**：4.1 节 profiling 仅覆盖 DSP 侧 Phase 10，未测量 AP 侧 Phase 1-9 开销。descriptor 模板缓存省的是 AP 侧开销，无法用 DSP profiling 数据直接估算。需在 AP 侧 profiling 拿到 AP 侧 Phase 1-9 的精确耗时后再评估收益。作为参考，若 AP 侧 Phase 1-9 开销与 DSP 侧 non-op 开销（4693 us/batch）同量级，即使消除其中一半（\~2.3 ms），相对于端到端 TG 时间的占比也会因 AP 侧 Phase 11-12 的额外开销而更低。**descriptor 模板缓存优先级的最终判断依赖 AP 侧 profiling 数据**。
 - **复杂度**：中等偏低。需要在 ctx 中缓存 descriptor 模板和 mempool layout，处理 KV cache 增长时的 realloc 以及 graph topology 变化（context shift）时的 invalidate。
 - **注意**：权重 repack offset 在模型加载后不变，但 activation 地址每 token 不同，模板需要支持 per-pointer patch。
 
@@ -431,7 +431,7 @@ TG 模式下，**每 token 的 cgraph 拓扑完全相同**，只有 tensor 数�
 
 当前 bit0 first-touch 标记对只读权重有效，但 KV cache 是 read-write 的，每 token 被 DSP 写入、AP 读取。KV cache 已在 mempool 中，Phase 11（cache inval）可以只 inval KV cache 的新增部分（增量 inval），而非每次做大范围 inval。
 
-- **复杂度**：**高**（非中等偏高）。需要新增** DSP->AP 通信通道**：KV cache 写发生在 DSP 侧（每 layer FlashAttn 输出），AP 侧无法独立知道写入了哪些 position；需要 DSP 侧在 Phase 10 RPC reply 中携带 KV cache 写入范围（按 layer x position 的 bitmap 或 range list），AP 侧在 Phase 11 按此范围做精确 CIVAC。
+- **复杂度**：**高**。需要新增** DSP->AP 通信通道**：KV cache 写发生在 DSP 侧（每 layer FlashAttn 输出），AP 侧无法独立知道写入了哪些 position；需要 DSP 侧在 Phase 10 RPC reply 中携带 KV cache 写入范围（按 layer x position 的 bitmap 或 range list），AP 侧在 Phase 11 按此范围做精确 CIVAC。
 - **注意**：bit0 机制不适用于 KV cache（read-write），需要独立的增量跟踪机制。
 
 ### 4.5 PP 优化（结构性收益，是 JZ 的真正战场）
@@ -443,21 +443,21 @@ JZ 在 4 个模型的 TG 上领先，平均优势 +48.1%，继续优化的边际
 | 模型           | 层数                | PP JZ vs QCOM | TG JZ vs QCOM | 根因分项                                                 |
 | ------------ | ----------------- | :-----------: | :-----------: | ---------------------------------------------------- |
 | Gemma4-E2B   | 35 (GQA 8:1)      |   **+49.5%**  |     +8.1%     | 层数深且单层 DSP 时间适中（R 低），per-layer 优势累计超越 dspqueue overlap |
-| Qwen3.5-2B   | 24 (GQA + Delta Net) |   **+10.0%** |   **+99.0%**  | 25 路 graph 拆分税已修复归零（4.2 + 第六章），per-layer 优势兑现，PP 反超 |
+| Qwen3.5-2B   | 24 (GQA + Delta Net) |   **+10.0%** |   **+99.0%**  | 25 路 cgraph 拆分已修复归零（详见 4.2），per-layer 优势兑现，PP 反超 |
 | Gemma4-E4B   | 42 (GQA 4:1)      |     -3.3%     |   **+38.2%**  | 单层 DSP 时间长（R 高），dspqueue 每层隐藏的 AP prep 放大，抵消 42 层累积优势   |
 | Llama3.2-1B  | 16 (GQA 4:1)      |     -6.0%     |   **+47.1%**  | 层数浅，dspqueue 优势显著                                     |
 | Qwen1.5-1.8B | 24 (MHA 1:1)      |     -22.3%    |     -28.8%    | **三重叠加：dspqueue + 层数不足 + MHA VTCM/cache**              |
 
-**结论**：PP 优化应聚焦于**结构性杠杆**（per-layer pipelining）与**支持度缺口补齐**（SOLVE_TRI offload），而非模型结构特化。Qwen1.5-1.8B 不是 corner case，而是三重不利因素的"压力测试"：per-layer pipelining 改善后这类模型获益最大。Gemma4-E2B 已经赢 PP，进一步压榨 +49.5% 之上的空间也来自 per-layer pipelining 在深层模型上的累积收益。Qwen3.5-2B 的 25 路 graph 拆分税（4.2 节）已通过"补算子 + validator 放宽"收回（第六章），PP 从 -9.2% 翻转为 +10.0%，验证了该归因；其余模型的 PP 差距（Gemma4-E4B / Llama3.2-1B / Qwen1.5-1.8B）需靠 4.5.1 per-layer pipelining 等架构改动弥补。
+**结论**：PP 优化应聚焦于**结构性杠杆**（per-layer pipelining）与**支持度缺口补齐**（SOLVE_TRI offload），而非模型结构特化。Qwen1.5-1.8B 不是特例，而是三重不利因素叠加的体现：per-layer pipelining 改善后这类模型获益最大。Gemma4-E2B 已经赢 PP，进一步提升 +49.5% 之上的性能也来自 per-layer pipelining 在深层模型上的累积收益。Qwen3.5-2B 的 25 路 cgraph 拆分（详见 4.2）已通过补齐算子注册与 validator 放宽修复，PP 从 -9.2% 翻转为 +10.0%，验证了该归因；其余模型的 PP 差距（Gemma4-E4B / Llama3.2-1B / Qwen1.5-1.8B）需靠 4.5.1 per-layer pipelining 等架构改动弥补。
 
 #### 4.5.1 Per-layer intra-batch pipelining - 结构性突破点
 
 **关键澄清**：3.4 节"性能差异来自 data-plane policy 而非 control-plane，FastRPC 开销 ~89us 可忽略"的论断，**不能用于反对 per-layer pipelining**。这两个是不同的概念：
 
-- **FastRPC ~89us（历史值，本轮实测 min=102us / avg=154us，详见 4.6.4）是 control-plane 路径成本**（RPC invoke 自身的 marshalling + transport 开销），与是否做 pipelining 无关
-- **Pipelining 收益 = min(AP prep 时间, DSP compute 时间) 的隐藏量**-完全由调度重叠决定，与 FastRPC 开销无关
+- **FastRPC ~89us（历史值，本轮实测 min=102us / avg=154us）是 control-plane 路径成本**（RPC invoke 自身的 marshalling + transport 开销），与是否做 pipelining 无关
+- **Pipelining 收益 = min(AP prep 时间, DSP compute 时间) 的隐藏量** - 完全由调度重叠决定，与 FastRPC 开销无关
 
-FastRPC 是 RTS 路径成本，pipelining 关心的是能否把 1-3ms 的 AP prep 隐藏在 5-10ms 的 DSP layer 执行后面。**这是两个独立维度**。
+FastRPC 是 control-plane 路径成本，pipelining 关心的是能否把 1-3ms 的 AP prep 隐藏在 5-10ms 的 DSP layer 执行后面。**这是两个独立维度**。
 
 **当前同步模型的瓶颈**：
 
@@ -466,12 +466,12 @@ AP Phase 1-9 [=====] -> AP阻塞 [==] -> AP Phase 11-12 [===]
                           DSP Phase 10
 ```
 
-PP 阶段单 layer DSP 计算时间（按 4.1 profiling 与 5.4.2.1 实测分两段）：
+PP 阶段单 layer DSP 计算时间（按 4.1 profiling 与本轮 Gemma4-E2B 实测分两段）：
 
 - **TG (M=1)**：per 4.1 profiling，MUL_MAT avg=97us x 多 ops + FlashAttn 20us + RMS_NORM 1us 等 ≈ **200-500us per layer**
-- **PP (M=58, gemma4-E2B batch#1)**：per 5.4.2.1 实测，batch-wall=81,637us / 35 layers ≈ **2,332us/layer**
+- **PP (M=58, Gemma4-E2B batch#1)**：本轮实测，batch-wall=81,637us / 35 layers ≈ **2,332us/layer**
 
-AP Phase 1-9 + 11-12 估算：5.4.2.1 gemma4 dump 显示端到端 256 calls（1 PP + 255 TG）AP phase 累计 p1=101,249us / p2-p9=72,159us / p11-p12=3,653us，总和 177,061us，平均每 call 691us（**此为 PP+TG 平均值，非 PP 单独**）。PP batch#1 单次 81,637us 远大于 TG 的 ~37ms，AP 侧 PP 单独占比需在 Step 0 profiling 中分离 PP/TG 后才能精确给出（粗估 5-10%）。如果按 layer 切分：
+AP Phase 1-9 + 11-12 估算：本轮 Gemma4-E2B dump 显示端到端 256 calls（1 PP + 255 TG）AP phase 累计 p1=101,249us / p2-p9=72,159us / p11-p12=3,653us，总和 177,061us，平均每 call 691us（**此为 PP+TG 平均值，非 PP 单独**）。PP batch#1 单次 81,637us 远大于 TG 的 ~37ms，AP 侧 PP 单独占比需在 AP 侧 profiling 中分离 PP/TG 后才能精确给出（粗估 5-10%）。如果按 layer 切分：
 
 ```
 AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==] -> ... -> AP P11-12 [=]
@@ -497,18 +497,18 @@ AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==]
 
 - 收益面广：4/5 测试模型 PP 改善
 - 实施复杂度高：DSP partial-execute 接口是新基础设施
-- 风险点：MUL_MAT per-layer 平均仅 97us（远低于本轮实测 min=102us 的 FastRPC 开销，pipelining 切换代价 1-2 倍），**单 matmul pipelining 无收益；必须聚合到 layer 级别才有收益**。4.1 profiling 给出的是 batch#200 累计值，5.4.2.1 gemma4 batch#1 已提供 per-layer 实测数据（batch-wall / n_layer ≈ 2,332us/layer）
+- 风险点：MUL_MAT per-layer 平均仅 97us（远低于本轮实测 min=102us 的 FastRPC 开销，pipelining 切换代价 1-2 倍），**单 matmul pipelining 无收益；必须聚合到 layer 级别才有收益**。4.1 profiling 给出的是 batch#200 累计值，本轮 Gemma4-E2B batch#1 已提供 per-layer 实测数据（batch-wall / n_layer ≈ 2,332us/layer）
 
 #### 4.5.2 descriptor 模板缓存（视 profiling 结果实施）
 
-如 4.4.1 节所述，descriptor 模板缓存可减少 AP 侧 prep 时间，与 pipelining 是**互补关系**（pipelining 利用 prep 的时间，缓存减少 prep 本身）。**已有 cgraph cache 覆盖 Phase 1-2 hit case（98.8% 命中率，详见 4.4.1）**，本节方案进一步跳过 Phase 4-8。**如果 Step 0 profiling 显示 AP 侧 prep 是 pipelining 收益的主要瓶颈，缓存应同步实施**。对长 context PP 收益较大（5-10%），对 TG M=1 收益很小。
+如 4.4.1 节所述，descriptor 模板缓存可减少 AP 侧 prep 时间，与 pipelining 是**互补关系**（pipelining 利用 prep 的时间，缓存减少 prep 本身）。**已有 cgraph cache 覆盖 Phase 1-2 hit case（98.8% 命中率，详见 4.4.1）**，本节方案进一步跳过 Phase 4-8。**如果 AP 侧 profiling 显示 AP 侧 prep 是 pipelining 收益的主要瓶颈，缓存应同步实施**。对长 context PP 收益较大（5-10%），对 TG M=1 收益很小。
 
 #### 4.5.3 SOLVE_TRI offload 启用：消除 Qwen3.5-2B 的 25 路 graph 拆分
 
 4.2 节已确认：Qwen3.5-2B 的 cgraph 在 JZ 后端被拆成 25 个子图的唯一原因是 `GGML_OP_SOLVE_TRI` 未在 AP 侧注册，而 DSP 侧 kernel 已完整存在。补齐两处胶水代码即可消除 graph 拆分：
 
-- **AP 侧**：在 `init_op_validators()`（[ggml-hexagon-jz.cpp L3762-3798](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3762-L3798)）新增 `s_op_validators[GGML_OP_SOLVE_TRI]`，校验逻辑可直接参照 QCOM 的 `ggml_hexagon_supported_solve_tri`（[ggml-hexagon.cpp L3367-3399](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L3367-L3399)：F32 类型 + 方阵 + 维度匹配检查）。
-- **DSP 侧**：在 `ggml_op_to_htp_op`（[entry.c L905](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L905)）新增 `case GGML_OP_SOLVE_TRI: *htp_op = HTP_OP_SOLVE_TRI; return 0;`。kernel 本体（`op_solve_tri`，[kernels/solve-tri-ops.c L197](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/solve-tri-ops.c#L197)）与 op 表注册（entry.c L811）均已存在，无需改动。
+- **AP 侧**：在 `init_op_validators()`（[ggml-hexagon-jz.cpp：init_op_validators](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）新增 `s_op_validators[GGML_OP_SOLVE_TRI]`，校验逻辑可直接参照 QCOM 的 `ggml_hexagon_supported_solve_tri`（[ggml-hexagon.cpp：ggml_hexagon_supported_solve_tri](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)：F32 类型 + 方阵 + 维度匹配检查）。
+- **DSP 侧**：在 `ggml_op_to_htp_op`（[entry.c：ggml_op_to_htp_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)）新增 `case GGML_OP_SOLVE_TRI: *htp_op = HTP_OP_SOLVE_TRI; return 0;`。kernel 本体（`op_solve_tri`，[solve-tri-ops.c：op_solve_tri](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/solve-tri-ops.c)）与 op 表注册（[entry.c：g_op_dispatch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)）均已存在，无需改动。
 
 **预期收益**：Qwen3.5-2B 恢复完整单图后，每 batch 的 25 次 FastRPC round-trip 与 25 倍 Phase 1-9/11-12 开销归零，按 4.2 节实测估算 PP 可收回约 5-6pp（-9.2% 收窄至约 -3%）；TG 收益 <1%（拆分开销在 M=1 时占比已极小），但 25->1 的子图收敛同时降低了 per-token 的 cgraph cache 与 mempool 管理负担。
 
@@ -517,19 +517,19 @@ AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==]
 **风险与验证**：
 
 - SOLVE_TRI 在 Qwen3.5-2B 中为 F32 算子，QCOM validator 的 F32/方阵/维度检查可直接复用；JZ 侧需确认 delta net 的 chunked 调用路径下 tensor shape 均满足该校验。
-- 合入前必须跑五模型 CI：Qwen3.5-2B 重点验证输出无 garble 且 `batch_calls` 从 6400 回落至 256；其余四模型验证无回归（它们的 cgraph 本就不含 SOLVE_TRI，预期零影响）。
+- 合入前必须跑五模型 CI：Qwen3.5-2B 重点验证输出无乱码且 `batch_calls` 从 6400 回落至 256；其余四模型验证无回归（它们的 cgraph 本就不含 SOLVE_TRI，预期零影响）。
 - 该改动同时消除了 Qwen3.5-2B PP 分析中的一个混杂变量：拆分消失后，Qwen3.5-2B 的 PP 差距将更纯粹地反映 dspqueue pipelining 优势，可作为 4.5.1 per-layer pipelining 收益验证的对照组。
 
-**实际收益（2026-08-07 夜间 CI，self-build-jz）**：SOLVE_TRI offload 启用后 batch_calls 6400->1792，仍残留 6 个 MHA 层 attn_q_norm 拆分（第二根因：RMS_NORM validator 拒绝 per-head view）；validator 放宽后 batch_calls 收敛至 256。夜间 CI（`log_abtest_all_20260807-223924.txt`）实测 JZ PP 436.6 -> 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 +10.0%，超过本节 5-6pp 预期（预期仅计拆分税，实际还含第二根因收益）；TG 持平（26.7 tok/s，对 QCOM +99.0%）。完整修复过程见第六章。
+**实际收益（2026-08-07 夜间 CI，self-build-jz）**：SOLVE_TRI offload 启用后 batch_calls 6400->1792，仍残留 6 个 MHA 层 attn_q_norm 拆分（第二根因：RMS_NORM validator 拒绝 per-head view）；validator 放宽后 batch_calls 收敛至 256。夜间 CI（`log_abtest_all_20260807-223924.txt`）实测 JZ PP 436.6 -> 501.7 tok/s（+14.9%），对 QCOM 从 -9.2% 翻转为 +10.0%，超过本节 5-6pp 预期（预期仅计 cgraph 拆分开销，实际还含第二根因收益）；TG 持平（26.7 tok/s，对 QCOM +99.0%）。
 
 ### 4.6 低风险快速收益（边际优化与实验结论）
 
 #### 4.6.1 a-inv 优化
 
-4.1 profiling 显示 a-inv 是最大 non-op 开销（1030 us/batch, 82 MB）。bit1 机制（[kernels/entry.c:90-104](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L90-L104)）在读 **src** 时，若前序某个 op 的 dst 已覆盖该 src，就**跳过该 src 的 cache invalidation**（L2 已是新鲜的）。
+4.1 profiling 显示 a-inv 是最大 non-op 开销（1030 us/batch, 82 MB）。bit1 机制（[entry.c：INVAL_SRC_IF_NEEDED](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)）在读 **src** 时，若前序某个 op 的 dst 已覆盖该 src，就**跳过该 src 的 cache invalidation**（L2 已是新鲜的）。
 
-- **实验证伪（2026-08-07）**：本轮测试 `dsp_cache_mode=5`（bit0+bit2）未启用 bit1；qwen1 PP-only 对照实验（mode=7 vs mode=5）显示 a-inv 零变化（19167us/1754MB -> 19135us/1754MB）。根因是 `prior_dst_add` 只登记 len <= PRIOR\_DST\_MAX\_LEN=64（单 cacheline）的 dst（[entry.c L448-460](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L448-L460)），cgraph 中间张量均 >= 256 字节，prior\_dst 列表为空，skip 路径几乎不触发。放宽该上限会引入 async DMA/HMX 路径的 stale L2 read 风险（[entry.c L52-54](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L52-L54) 设计注释），不建议尝试。
-- **结论**：per-batch dedup 已保证每条 unique src 每 batch 至多失效一次，a-inv 字节量接近 batch 内结构性下限。原"预期 500us/batch = 1.4% TG"收益不成立，本项关闭。跨 batch dedup（5.8.3 方向 D）是独立假设，仍待验证。
+- **实验证伪（2026-08-07）**：本轮测试 `dsp_cache_mode=5`（bit0+bit2）未启用 bit1；Qwen1.5-1.8B PP-only 对照实验（mode=7 vs mode=5）显示 a-inv 零变化（19167us/1754MB -> 19135us/1754MB）。根因是 `prior_dst_add` 只登记 len <= PRIOR\_DST\_MAX\_LEN=64（单 cacheline）的 dst（[entry.c：prior_dst_contains_src](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)），cgraph 中间张量均 >= 256 字节，prior\_dst 列表为空，skip 路径几乎不触发。放宽该上限会引入 async DMA/HMX 路径的 stale L2 read 风险（[entry.c：PRIOR_DST_MAX_LEN](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c) 设计注释），不建议尝试。
+- **结论**：per-batch dedup 已保证每条 unique src 每 batch 至多失效一次，a-inv 字节量接近 batch 内结构性下限。原"预期 500us/batch = 1.4% TG"收益不成立，本项关闭。跨 batch dedup 是独立假设，仍待验证。
 
 #### 4.6.2 MUL_MAT_FFN kernel 优化
 
@@ -541,14 +541,14 @@ AP P1-P4 Layer1 [=] -> DSP Layer1 [==] -> AP P5-P7 Layer2 [=] -> DSP Layer2 [==]
 
 #### 4.6.3 post-matmul activation 与 element-wise fuse
 
-`graph_compute_batch` Phase 3 已实现 QKV/FFN/mm_add fusion 以及 `RMS_NORM + MUL`（[ggml-hexagon-jz.cpp:5337-5342](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5337-L5342)），5.4.2.1 Table-17 显示 RMS_NORM_MUL count=227、GLU_GEGLU count=35 是 gemma4 主力算子。**未融合的剩余空间**在 `MUL_MAT -> post-matmul activation`（如 matmul -> SiLU -> mul 即 SwiGLU 的端到端 inline fuse），以及 `MUL_MAT -> element-wise broadcast` 的反向（与 RMS_NORM_MUL 方向相反）场景。在 M=1 TG 时，element-wise op 写入 DDR 再被下一个 matmul 读回是纯粹的浪费，fuse 后可减少一次中间 tensor 的 DDR round-trip。
+`graph_compute_batch` Phase 3 已实现 QKV/FFN/mm_add fusion 以及 `RMS_NORM + MUL`（[ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)），本轮 Table-17 显示 RMS_NORM_MUL count=227、GLU_GEGLU count=35 是 Gemma4-E2B 主力算子。**未融合的剩余空间**在 `MUL_MAT -> post-matmul activation`（如 matmul -> SiLU -> mul 即 SwiGLU 的端到端 inline fuse），以及 `MUL_MAT -> element-wise broadcast` 的反向（与 RMS_NORM_MUL 方向相反）场景。在 M=1 TG 时，element-wise op 写入 DDR 再被下一个 matmul 读回是纯粹的浪费，fuse 后可减少一次中间 tensor 的 DDR round-trip。
 
 - **预期收益**：<1% TG，PP 收益更小
 - **复杂度**：中（kernel 修改 + AP 侧调度调整）
 
 #### 4.6.4 减少 Phase 10 同步 RPC round-trip 开销
 
-FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-hexagon-jz.cpp:262](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L262)）。本轮 gemma4 端到端实测 256 calls 中 warmup n=6, **min=102us, max=251us, avg=154us**（详见 5.4.2.1）。2026-07-24 历史值 \~89us 已不适用本轮测量（设备 thermal / kernel 调度变化可能导致漂移）。相对于 \~37 ms/token 的 TG 占比仍极小（<0.5%）。除非 profiling 发现非预期的高开销，否则此项投入产出比低，不建议优先投入。
+FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-hexagon-jz.cpp：min_rpc_overhead_us](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）。本轮 Gemma4-E2B 端到端实测 256 calls 中 warmup n=6, **min=102us, max=251us, avg=154us**。2026-07-24 历史值 \~89us 已不适用本轮测量（设备 thermal / kernel 调度变化可能导致漂移）。相对于 \~37 ms/token 的 TG 占比仍极小（<0.5%）。除非 profiling 发现非预期的高开销，否则此项投入产出比低，不建议优先投入。
 
 #### 4.6.5 Sampling 路径优化
 
@@ -561,7 +561,7 @@ FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-
 
 ### 4.7 优化路线图
 
-**潜在收益优先级 vs 执行优先级是两个维度**：4.4-4.6 按**潜在收益空间**排序（4.4 TG 优化 > 4.5 PP 优化 > 4.6 低风险快速收益），实际执行顺序（下方 Step 0-4）与之不同。**调整依据**：sampling 路径优化已验证收益极小（详见 4.6.5）；TG 已领先 4/5 模型，边际收益低；PP 是真正短板（拆分修复前 4/5 模型落后 QCOM，修复后仍 3/5 落后），结构性收益空间最大。**两个维度的执行映射**：4.5.3 SOLVE_TRI offload 列为 Step 1（立即收益，已完成：夜间 CI 实测 qwen3 PP +14.9%，对 QCOM 从 -9.2% 翻转为 +10.0%；4.6.1 a-inv 已于 2026-08-07 实验证伪关闭）；PP 结构性突破（4.5.1 per-layer pipelining）作为 Step 2 核心战场；TG kernel 精调（4.6.2 + 4.6.3 + 4.4.2）作为 Step 3 最后做。**长期/已关闭项**：4.6.5 sampling 路径优化与 4.4.2 KV cache 增量 inval 因复杂度高/收益小。
+**潜在收益优先级 vs 执行优先级是两个维度**：4.4-4.6 按**潜在收益空间**排序（4.4 TG 优化 > 4.5 PP 优化 > 4.6 低风险快速收益），实际执行顺序（下方 Step 0-4）与之不同。**调整依据**：sampling 路径优化已验证收益极小（详见 4.6.5）；TG 已领先 4/5 模型，边际收益低；PP 是真正短板（拆分修复前 4/5 模型落后 QCOM，修复后仍 3/5 落后），结构性收益空间最大。**两个维度的执行映射**：4.5.3 SOLVE_TRI offload 列为 Step 1（立即收益，已完成：夜间 CI 实测 Qwen3.5-2B PP +14.9%，对 QCOM 从 -9.2% 翻转为 +10.0%；4.6.1 a-inv 已于 2026-08-07 实验证伪关闭）；PP 结构性突破（4.5.1 per-layer pipelining）作为 Step 2 核心战场；TG kernel 精调（4.6.2 + 4.6.3 + 4.4.2）作为 Step 3 最后做。**长期/已关闭项**：4.6.5 sampling 路径优化与 4.4.2 KV cache 增量 inval 因复杂度高/收益小。
 
 4.3-4.6 节按优先级组织，经实验验证后，实际执行顺序调整为：
 
@@ -569,13 +569,13 @@ FastRPC 开销已在 warmup 阶段校准（变量 `min_rpc_overhead_us`，[ggml-
 Step 0: Profiling 数据驱动（必做前提，详见 4.1）
 
 Step 1: 低风险快速收益（独立于 PP/TG 主战场）
-  +-- 4.5.3 SOLVE_TRI offload：已完成（2026-08-07 夜间 CI：batch_calls 6400->256，qwen3 PP 436.6->501.7 tok/s，对 QCOM -9.2% -> +10.0%，详见第六章）
+  +-- 4.5.3 SOLVE_TRI offload：已完成（2026-08-07 夜间 CI：batch_calls 6400->256，Qwen3.5-2B PP 436.6->501.7 tok/s，对 QCOM -9.2% -> +10.0%）
   +-- 4.6.1 a-inv 优化：2026-08-07 实验证伪（bit1 受 PRIOR_DST_MAX_LEN=64 限制退化为 no-op），关闭
   +-- 4.6.4 FastRPC 校准：已实测，结论为投入产出比低，关闭
 
 Step 2: PP 结构性突破（核心战场，详见 4.5.1）
   +-- DSP 侧 partial-execute + resume 接口 + async FastRPC 调度
-  +-- 严格 TG 回归测试：M=1 单次 invoke 优势不被新同步点吃掉
+  +-- 严格 TG 回归测试：M=1 单次 invoke 优势不被新同步点抵消
   +-- （视 profiling 结果）4.5.2 descriptor 模板缓存
   +-- 预期：PP +5-10%；Qwen1.5-1.8B 从 -22.3% -> ~-15%；Gemma4-E2B 从 +49.5% -> +55%+
 
@@ -602,7 +602,7 @@ Step 4: 长期架构（按 Step 2 效果决定）
 
 ### 5.1 实验动机
 
-第 4.3 节确定 PP 是 JZ 真正战场之后，需要找到一个低风险高收益的切入点。观察到 `is_mergeable_mul_mat()` 中的 HMX-eligibility 闸门在 PP 路径下必然拒绝所有 MUL_MAT（因为 `M > HTP_MM_HMX_MIN_NROWS=4`），导致 QKV/FFN/mm_add fusion 在 PP 完全失效。初始假设：
+第 4.3 节确定 PP 是 JZ 的真正短板之后，需要找到一个低风险高收益的切入点。观察到 `is_mergeable_mul_mat()` 中的 HMX-eligibility 闸门在 PP 路径下必然拒绝所有 MUL_MAT（因为 `M > HTP_MM_HMX_MIN_NROWS=4`），导致 QKV/FFN/mm_add fusion 在 PP 完全失效。初始假设：
 
 - **假设 A**：3 个独立 HMX MUL_MAT -> 1 个 HVX fused MUL_MAT_QKV，单算子更慢但 cache 失效次数减少到 1/3
 - **假设 B**：cache 失效节省 > 算子额外耗时 -> 净收益为正
@@ -627,9 +627,9 @@ Step 4: 长期架构（按 Step 2 效果决定）
 - `ggmlhexagon_print_running_timestamp` 打印 `enable_opfusion` 与 `force_opfusion_in_pp` 当前值，便于运行时核查配置
 - `scripts/ggml-hexagon.cfg` 新增 `force_opfusion_in_pp = 0` 默认值与说明
 
-### 5.3 gemma4-E2B 单模型对比：force=0 baseline vs force=1 实验
+### 5.3 Gemma4-E2B 单模型对比：force=0 baseline vs force=1 实验
 
-gemma4-E2B（35 层，GQA 8:1）是默认测试模型。本节在同一模型上对比 `force_opfusion_in_pp=0` 与 `force_opfusion_in_pp=1` 两组数据，量化"旁路 HMX 闸门"的净收益。
+Gemma4-E2B（35 层，GQA 8:1）是默认测试模型。本节在同一模型上对比 `force_opfusion_in_pp=0` 与 `force_opfusion_in_pp=1` 两组数据，量化"旁路 HMX 闸门"的净收益。
 
 #### 5.3.1 Baseline 数据（`force_opfusion_in_pp=0`）
 
@@ -642,7 +642,7 @@ non-op: hdr=4 pre=392 w-inv=13639(1334MB) a-inv=6869(551MB) dst=112 bulk=1677 qu
 
 **关键解读**：
 
-- `qkv_skip_hmx=15` 与 35 层对应，**每层 1 个 QKV 候选被 HMX 闸门拒掉**，即基线未利用 15 个 QKV 融合机会
+- `qkv_skip_hmx=15` 与 35 层对应，**每层 1 个 QKV 候选被 HMX 闸门拒绝**，即基线未利用 15 个 QKV 融合机会
 - `pair_skip_hmx=65` 即基线未利用 ~65 个 (MUL_MAT, MUL_MAT) pair 融合机会（覆盖 FFN gate+up、output projection + next 等相邻 MUL_MAT 对）
 - 277 个 MUL_MAT 中 276 走 HMX 路径（99.6%），QKV/FFN/mm_add 全部走单算子 HMX
 - non-op 中 `w-inv=13.6ms(1334MB)` + `a-inv=6.9ms(551MB)` 占 batch-wall 25%，是融合潜在节省的最大项
@@ -688,18 +688,18 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 | # | alias       | 模型文件                                       | vocab_size | lm-head 类型 | 层数  | 注意力类型     | 唯一算子 (PP/TG)         |
 | - | ----------- | ------------------------------------------ | ---------- | ---------- | --- | --------- | ------------------- |
-| 1 | gemma4      | gemma-4-E2B-it-Q4_0.gguf                   | 256,000    | Q4_K       | 35  | GQA 8:1   | GLU_GEGLU, UNARY_TANH |
+| 1 | Gemma4-E2B      | gemma-4-E2B-it-Q4_0.gguf                   | 256,000    | Q4_K       | 35  | GQA 8:1   | GLU_GEGLU, UNARY_TANH |
 | 2 | qwen3       | Qwen3.5-2B-Q4_0.gguf                       | 151,936    | Q6_K       | 24  | GQA + Delta Net | **GATED_DELTA_NET**, L2_NORM, UNARY_SILU/SIGMOID/SOFTPLUS |
 | 3 | qwen1       | Qwen1.5-1.8B-Q4_0.gguf                     | 151,936    | Q6_K       | 24  | MHA 1:1   | MUL_MAT_ADD, MUL_MAT_FFN, GLU_SWIGLU |
 | 4 | llama3      | Llama-3.2-1B-Instruct-Q4_0.gguf            | 128,256    | Q4_K       | 16  | GQA 4:1   | MUL_MAT_ADD, GLU_SWIGLU |
-| 5 | gemma4-e4b  | gemma-4-E4B_q4_0-it.gguf                   | 256,000    | Q4_K       | 42  | GQA 4:1   | GLU_GEGLU, UNARY_TANH |
+| 5 | Gemma4-E4B  | gemma-4-E4B_q4_0-it.gguf                   | 256,000    | Q4_K       | 42  | GQA 4:1   | GLU_GEGLU, UNARY_TANH |
 
 **说明**：
 
 - 层数来自 `ggmlhexagon_dump_perf_stats` 的 `model: n_layer=N` 字段（扫描 tensor name 末尾连续数字段得到 max layer index）
-  - qwen3：24 个总层中 13 个含 FFN，其余为 linear-attention delta net 层（见 5.4.3）；log 中 `ffn_gate-12` 编号指 FFN 算子所在层（0-12），非 tensor 层编号
+  - Qwen3.5-2B：24 个总层中 13 个含 FFN，其余为 linear-attention delta net 层（见 5.4.3）；log 中 `ffn_gate-12` 编号指 FFN 算子所在层（0-12），非 tensor 层编号
 - 五个测试均使用 `n_ctx=8192, n_batch=2048, n_predict=256, n_threads=6, dsp_cache_mode=5, ion_sync_mode=1`
-- PP batch#1 中 五个模型均未出现 MUL_MAT_QKV fusion（HMX 闸门正常拒绝，见 5.4.4）；MUL_MAT_FFN 仅 qwen1 边缘触发 1 次（count=1, cum=265us）；MUL_MAT_ADD 在 llama3/qwen1 触发，gemma 系不触发
+- PP batch#1 中 五个模型均未出现 MUL_MAT_QKV fusion（HMX 闸门正常拒绝，见 5.4.4）；MUL_MAT_FFN 仅 Qwen1.5-1.8B 边缘触发 1 次（count=1, cum=265us）；MUL_MAT_ADD 在 Llama3.2-1B/Qwen1.5-1.8B 触发，Gemma4 系列不触发
 
 #### 5.4.2 PP batch#1 五模型 OP-PROF 对比
 
@@ -707,25 +707,25 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 | 模型         | n_layer | batch-wall (us) | op-sum (us) | non-op (us) | MUL_MAT cum (us) | MUL_MAT count | MUL_MAT max (us) | FLASH_ATTN cum (us) | FLASH_ATTN count | non-op w-inv (MB) | non-op a-inv (MB) | non-op bulk (us) |
 | ---------- | :-----: | :-------------: | :---------: | :---------: | :--------------: | :-----------: | :--------------: | :-----------------: | :--------------: | :---------------: | :---------------: | :--------------: |
-| gemma4     |   35    |     81,637      |   57,592    |   24,045    |     39,360       |      277      |     **4,448**    |       4,026         |        35        |     **1,334**     |       542         |      1,485       |
-| gemma4-e4b |   42    |    140,304      |   97,944    |   42,360    |     70,418       |      344      |     **7,873**    |       6,102         |        42        |     **2,528**     |       891         |      2,906       |
+| Gemma4-E2B     |   35    |     81,637      |   57,592    |   24,045    |     39,360       |      277      |     **4,448**    |       4,026         |        35        |     **1,334**     |       542         |      1,485       |
+| Gemma4-E4B |   42    |    140,304      |   97,944    |   42,360    |     70,418       |      344      |     **7,873**    |       6,102         |        42        |     **2,528**     |       891         |      2,906       |
 | llama3     |   16    |     37,598      |   24,275    |   13,323    |      9,856       |       79      |        262       |       5,277         |        16        |        497        |       415         |      2,634       |
 | qwen1      |   24    |     91,150      |   47,613    | **43,537**  |     11,575       |       48      |       3,846      |      **18,615**     |        24        |        818        |    **1,754**      |   **15,119**     |
 | qwen3      |   24    |        794      |      569    |      225    |        191       |        1      |        191       |          -          |        -         |         6         |         5         |         53       |
 
 **关键观察**：
 
-1. **batch-wall 与模型规模/层数正相关**：gemma4-e4b / gemma4 ratio = 1.72x，与层数比 42/35=1.20x + 模型尺寸比 4B/2B=2.0x 加权吻合（e4b 的 GQA 4:1 较 gemma4 的 8:1 有更大的 attention 中间张量，但对 batch-wall 仅为二阶影响）
-2. **MUL_MAT max 是 lm-head 标志**：gemma4 max=4,448us，gemma4-e4b max=7,873us，qwen1 max=3,846us，llama3 max=262us（vocab=128K 在 PP 阶段分块执行，无显式大算子）。gemma4 与 4.1 节 baseline max=4,697us 差异 5.3%（测量噪声范围内）
-3. **qwen1 的 FLASH_ATTN avg=776us 显著高于其他**：MHA（1:1 attention）在 PP 大 M 下 Q@K^T 矩阵规模最大；GQA 模型的 avg 仅 115-145us（gemma4 35层 avg=115us，gemma4-e4b 42层 avg=145us）
-4. **qwen1 的 non-op a-inv=19,134us + bulk=15,119us 是五模型中最高**：MHA 模型 attention 中间张量（Q@K^T, Softmax(QK^T)·V）占用最大 VTCM 与 DDR 带宽，导致 cache 维护代价翻倍。这是 3.4 节"Qwen1.5-1.8B 三重叠加根因"的直接证据
-5. **w-inv 随模型规模增长**：gemma4-e4b 25,802us（2,528MB） vs gemma4 13,637us（1,334MB），4B 参数量首次 touch 的权重范围翻倍。a-inv 方面，gemma4 6,900us（542MB）较 qwen1 少 2.8x，GQA 8:1 attention 中间张量比 MHA 1:1 小约 2.8x，符合 GQA 压缩理论值
-6. **qwen3 是 init batch（M=1）**：仅含 embedding 初始化算子（6 个 op），不代表真实 PP 性能，需用 `run_pp_only` 重抓
-7. **MUL_MAT count 反映 cgraph 大小**：gemma4 1116 graph ops 中 277 个 MUL_MAT，gemma4-e4b 1384 ops 中 344 个，qwen1 533 ops 中 48 个，llama3 296 ops 中 79 个。差异主要来自 FFN/attention 内部 matmul 数量与是否使用 GQA
+1. **batch-wall 与模型规模/层数正相关**：Gemma4-E4B / Gemma4-E2B ratio = 1.72x，与层数比 42/35=1.20x + 模型尺寸比 4B/2B=2.0x 加权吻合（Gemma4-E4B 的 GQA 4:1 较 Gemma4-E2B 的 8:1 有更大的 attention 中间张量，但对 batch-wall 仅为二阶影响）
+2. **MUL_MAT max 是 lm-head 标志**：Gemma4-E2B max=4,448us，Gemma4-E4B max=7,873us，Qwen1.5-1.8B max=3,846us，Llama3.2-1B max=262us（vocab=128K 在 PP 阶段分块执行，无显式大算子）。Gemma4-E2B 与 4.1 节 baseline max=4,697us 差异 5.3%（测量噪声范围内）
+3. **Qwen1.5-1.8B 的 FLASH_ATTN avg=776us 显著高于其他**：MHA（1:1 attention）在 PP 大 M 下 Q@K^T 矩阵规模最大；GQA 模型的 avg 仅 115-145us（Gemma4-E2B 35层 avg=115us，Gemma4-E4B 42层 avg=145us）
+4. **Qwen1.5-1.8B 的 non-op a-inv=19,134us + bulk=15,119us 是五模型中最高**：MHA 模型 attention 中间张量（Q@K^T, Softmax(QK^T)·V）占用最大 VTCM 与 DDR 带宽，导致 cache 维护代价翻倍。这是 3.4 节"Qwen1.5-1.8B 三重叠加根因"的直接证据
+5. **w-inv 随模型规模增长**：Gemma4-E4B 25,802us（2,528MB） vs Gemma4-E2B 13,637us（1,334MB），4B 参数量首次 touch 的权重范围翻倍。a-inv 方面，Gemma4-E2B 6,900us（542MB）较 Qwen1.5-1.8B 少 2.8x，GQA 8:1 attention 中间张量比 MHA 1:1 小约 2.8x，符合 GQA 压缩理论值
+6. **Qwen3.5-2B 是 init batch（M=1）**：仅含 embedding 初始化算子（6 个 op），不代表真实 PP 性能，需用 `run_pp_only` 重抓
+7. **MUL_MAT count 反映 cgraph 大小**：Gemma4-E2B 1116 graph ops 中 277 个 MUL_MAT，Gemma4-E4B 1384 ops 中 344 个，Qwen1.5-1.8B 533 ops 中 48 个，Llama3.2-1B 296 ops 中 79 个。差异主要来自 FFN/attention 内部 matmul 数量与是否使用 GQA
 
-##### 5.4.2.1 gemma4 (E2B) 详细算子分布
+##### 5.4.2.1 Gemma4-E2B 详细算子分布
 
-**Table-17**：gemma4 PP batch#1 完整 15 算子分布
+**Table-17**：Gemma4-E2B PP batch#1 完整 15 算子分布
 
 | 算子             | cum (us) | count | avg (us) | min (us) | max (us) |
 | -------------- | -------- | ----- | -------- | -------- | -------- |
@@ -750,7 +750,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 - hdr=5, pre=302, **w-inv=13,637 us (1,334MB)**, **a-inv=6,900 us (542MB)**, dst=125, bulk=1,485, queue=10 us/batch
 - non-op 合计=24,045 us/batch（占 batch-wall 29.5%）
 
-**FFN/QKV skip 模式**（gemma4 batch#1 真实日志）：
+**FFN/QKV skip 模式**（Gemma4-E2B batch#1 真实日志）：
 
 - `QKV skip: is_qkv_mergeable=false (HMX gate)` at i=4/1116 -> HMX 闸门按预期拒绝 QKV 融合
 - `FFN skip: is_mergeable_mul_mat_pair=false` at i=4/1116 -> HMX 闸门按预期拒绝 FFN pair
@@ -764,7 +764,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 - graphs reused = 253
 - unaccounted time = 26.95 ms / 0.3 %
 
-**`ggmlhexagon_dump_perf_stats` 完整统计**（gemma4 端到端 256 批次）：
+**`ggmlhexagon_dump_perf_stats` 完整统计**（Gemma4-E2B 端到端 256 批次）：
 
 - device info: Qualcomm Snapdragon 8 Elite, dsp arch version 0x79, system mem size 24834 MiB
 - device: Hexagon-CDSP0, arch=QCOM_HTP_V79, vtcm=8MB, hvx=1, hmx=1
@@ -780,7 +780,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 - rpc overhead (warmup): n=6, min=102, max=251, avg=154 us (pure FastRPC/mempool transport)
 - cgraph cache: hits=253, misses=3 (hit_rate=98.8%), entries=0
 
-**`ggmlhexagon_print_running_timestamp` 完整配置**（gemma4）：
+**`ggmlhexagon_print_running_timestamp` 完整配置**（Gemma4-E2B）：
 
 - ggml_hexagon_version: 0.99.6
 - offload MUL_MAT types: F32, F16, BF16, Q4_0, Q8_0, Q4_1, IQ4_NL, MXFP4
@@ -800,9 +800,9 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 **与 4.1 节 baseline 对比**：5 项核心指标（batch-wall / op-sum / non-op / MUL_MAT cum / MUL_MAT max）差异均在 ±6% 以内（batch-wall 81,637us vs 81,252us, 0.5%），确认 force=0 cleanup 无回归
 
-##### 5.4.2.2 gemma4-e4b 详细算子分布
+##### 5.4.2.2 Gemma4-E4B 详细算子分布
 
-**Table-18**：gemma4-e4b PP batch#1 完整 15 算子分布
+**Table-18**：Gemma4-E4B PP batch#1 完整 15 算子分布
 
 | 算子             | cum (us) | count | avg (us) | min (us) | max (us) |
 | -------------- | -------- | ----- | -------- | -------- | -------- |
@@ -825,13 +825,13 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 **non-op 分布**：
 
 - hdr=5, pre=379, **w-inv=25,802 us (2,528MB)**, **a-inv=11,056 us (891MB)**, dst=149, bulk=2,906, queue=10 us/batch
-- non-op 合计=42,360 us/batch（占 batch-wall 30.2%，与 gemma4 的 29.5% 几乎一致，说明 GQA 比例从 4:1 升到 8:1 不会显著改变 non-op 占比）
+- non-op 合计=42,360 us/batch（占 batch-wall 30.2%，与 Gemma4-E2B 的 29.5% 几乎一致，说明 GQA 比例从 8:1 降到 4:1 不会显著改变 non-op 占比）
 
-**FFN/QKV skip 模式**（gemma4-e4b batch#1 真实日志）：
+**FFN/QKV skip 模式**（Gemma4-E4B batch#1 真实日志）：
 
 - `QKV skip: is_qkv_mergeable=false (HMX gate)` at i=4/1384 -> HMX 闸门按预期拒绝 QKV 融合
 - `FFN skip: is_mergeable_mul_mat_pair=false` at i=4/1384 -> HMX 闸门按预期拒绝 FFN pair
-- `FFN skip: next not MUL_MAT` at i=6/1384, i=17/1384 -> 同 gemma4，graph 顺序问题
+- `FFN skip: next not MUL_MAT` at i=6/1384, i=17/1384 -> 同 Gemma4-E2B，graph 顺序问题
 
 **tok/s 数据**（`common_perf_print` 输出）：
 
@@ -841,7 +841,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 - graphs reused = 253
 - unaccounted time = 19.49 ms / 0.1 %
 
-**`ggmlhexagon_dump_perf_stats` 完整统计**（gemma4-e4b 端到端 256 批次）：
+**`ggmlhexagon_dump_perf_stats` 完整统计**（Gemma4-E4B 端到端 256 批次）：
 
 - device info: Qualcomm Snapdragon 8 Elite, dsp arch version 0x79, system mem size 24834 MiB
 - device: Hexagon-CDSP0, arch=QCOM_HTP_V79, vtcm=8MB, hvx=1, hmx=1
@@ -857,24 +857,24 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 - rpc overhead (warmup): n=6, min=93, max=202, avg=129 us (pure FastRPC/mempool transport)
 - cgraph cache: hits=253, misses=3 (hit_rate=98.8%), entries=0
 
-**`ggmlhexagon_print_running_timestamp` 完整配置**（gemma4-e4b）：
+**`ggmlhexagon_print_running_timestamp` 完整配置**（Gemma4-E4B）：
 
-- 与 gemma4 E2B 一致（force_opfusion_in_pp=0, enable_opfusion=1, dsp_cache_mode=5, ion_sync_mode=1, thread_counts=6）
+- 与 Gemma4-E2B 一致（force_opfusion_in_pp=0, enable_opfusion=1, dsp_cache_mode=5, ion_sync_mode=1, thread_counts=6）
 - running timestamp: 2026-08-06, 21:16:23
 
-**与 gemma4 E2B 跨模型对比**：
+**与 Gemma4-E2B 跨模型对比**：
 
-- MUL_MAT avg: gemma4=142us, gemma4-e4b=204us（**1.44x**，接近层数比 42/35=1.20x + 4B/2B 参数量比 2.0x 的加权预期）
-- MUL_MAT max: gemma4=4,448us, gemma4-e4b=7,873us（**1.77x**，lm-head vocab=256K 在两个模型相同，但 E4B 的 hidden dim 翻倍，所以 lm-head matvec 计算量 2x）
-- GLU_GEGLU avg: gemma4=167us, gemma4-e4b=182us（几乎一致，GLU 计算量正比于 hidden_dim）
-- FLASH_ATTN avg: gemma4=115us, gemma4-e4b=145us（1.26x，GQA 8:1 比 4:1 减少 KV 计算量，但 hidden_dim 增大抵消部分优势）
-- non-op 占比：gemma4=29.5%, gemma4-e4b=30.2%（几乎一致，说明 non-op 开销与模型规模近似线性相关，与 3.3 节"role-aware cache 比例恒定"的分析一致）
+- MUL_MAT avg: Gemma4-E2B=142us, Gemma4-E4B=204us（**1.44x**，接近层数比 42/35=1.20x + 4B/2B 参数量比 2.0x 的加权预期）
+- MUL_MAT max: Gemma4-E2B=4,448us, Gemma4-E4B=7,873us（**1.77x**，lm-head vocab=256K 在两个模型相同，但 E4B 的 hidden dim 翻倍，所以 lm-head matvec 计算量 2x）
+- GLU_GEGLU avg: Gemma4-E2B=167us, Gemma4-E4B=182us（几乎一致，GLU 计算量正比于 hidden_dim）
+- FLASH_ATTN avg: Gemma4-E2B=115us, Gemma4-E4B=145us（1.26x，GQA 8:1 比 4:1 减少 KV 计算量，但 hidden_dim 增大抵消部分优势）
+- non-op 占比：Gemma4-E2B=29.5%, Gemma4-E4B=30.2%（几乎一致，说明 non-op 开销与模型规模近似线性相关，与 3.3 节"role-aware cache 比例恒定"的分析一致）
 
-#### 5.4.3 qwen3 TG batch#978 详细数据（唯一完整 TG 抓取，源文件 `log_qwen3_ppandtg_force0_v4`）
+#### 5.4.3 Qwen3.5-2B TG batch#978 详细数据（唯一完整 TG 抓取，源文件 `log_qwen3_ppandtg_force0_v4`）
 
-> **重要**：qwen3 = Qwen3.5-2B（delta net 混合架构，24 个总层中标准 attention 13 层 + linear attention delta net 11 层），GATED_DELTA_NET/L2_NORM 是该架构的正常算子。**`ffn_gate-0/1/2` 这类日志编号指的是 FFN 算子所在层（0-12 共 13 个），与 tensor 的 0-23 共 24 个总层编号不同**
+> **重要**：Qwen3.5-2B（delta net 混合架构，24 个总层中标准 attention 13 层 + linear attention delta net 11 层），GATED_DELTA_NET/L2_NORM 是该架构的正常算子。**`ffn_gate-0/1/2` 这类日志编号指的是 FFN 算子所在层（0-12 共 13 个），与 tensor 的 0-23 共 24 个总层编号不同**
 
-**Table-19**：qwen3 TG batch#978 OP-PROF 详表
+**Table-19**：Qwen3.5-2B TG batch#978 OP-PROF 详表
 
 | 算子                | cum (us)     | count | avg (us) | min (us) | max (us) | 占比    |
 | ----------------- | ------------ | ----- | -------- | -------- | -------- | ----- |
@@ -903,15 +903,15 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 - batch-wall cum=1,355,527 us（avg=1,386 us/batch，即 ~1.4ms/token）
 - op-sum cum=1,157,196 us（avg=1,183 us/batch）
-- non-op avg=202 us/batch（14.6% wall time，**比 gemma4 PP 的 30.0% 低一半**）
+- non-op avg=202 us/batch（14.6% wall time，**比 Gemma4-E2B PP 的 30.0% 低一半**）
 - non-op 细分：hdr=0, pre=8, w-inv=10(1MB), a-inv=76(6MB), dst=3, bulk=71, queue=3 us/batch
 
 **TG 阶段关键观察**：
 
-1. **三类 matmul 占 op-sum 74.4%**：MUL_MAT（38.3%） + MUL_MAT_FFN（23.0%） + MUL_MAT_ADD（13.1%）。与 4.1 节 gemma4-E2B profiling 的 91.1% 略有差异，原因是 qwen3 是 delta net 混合架构，多了 GATED_DELTA_NET（4.5%） + CONCAT（6.3%） + CPY（5.8%） 等"delta net 特有"算子，挤占 matmul 占比
-2. **MUL_MAT_FFN avg=232us 是稳定 FFN fused 调用**：count=1,142/978batch ≈ 1.17 次/batch，说明每 token 大约 1 次 FFN fusion（qwen3 在 TG 阶段 M=1 <= 4，满足 HMX 闸门条件，fusion 正常触发）
+1. **三类 matmul 占 op-sum 74.4%**：MUL_MAT（38.3%） + MUL_MAT_FFN（23.0%） + MUL_MAT_ADD（13.1%）。与 4.1 节 Gemma4-E2B profiling 的 91.1% 略有差异，原因是 Qwen3.5-2B 是 delta net 混合架构，多了 GATED_DELTA_NET（4.5%） + CONCAT（6.3%） + CPY（5.8%） 等"delta net 特有"算子，挤占 matmul 占比
+2. **MUL_MAT_FFN avg=232us 是稳定 FFN fused 调用**：count=1,142/978batch ≈ 1.17 次/batch，说明每 token 大约 1 次 FFN fusion（Qwen3.5-2B 在 TG 阶段 M=1 <= 4，满足 HMX 闸门条件，fusion 正常触发）
 3. **GATED_DELTA_NET avg=74us 是 delta net 核心算子**：max=1,291us 是初始化阶段的 warm-up 路径，稳定阶段 avg 远低于 max；count=704/978batch ≈ 0.72 次/batch，delta net 主干每 1-2 token 调用一次
-4. **MUL_MAT max=5,635us 是 lm-head matvec**：与 4.1 节 gemma4-E2B 的 max=4,697us 同量级，与 Q4_K/Q6_K lm-head 大小相关（本模型 vocab=152K Q6_K ≈ 178MB）
+4. **MUL_MAT max=5,635us 是 lm-head matvec**：与 4.1 节 Gemma4-E2B 的 max=4,697us 同量级，与 Q4_K/Q6_K lm-head 大小相关（本模型 vocab=152K Q6_K ≈ 178MB）
 5. **non-op 仅 14.6% wall time**：M=1 TG 阶段 bit0 first-touch 权重 inval 生效（w-inv=10us/1MB，几乎为 0），a-inv=76us/6MB 也极低。验证 3.3 节"role-aware cache 在 M=1 TG 显著优"的核心论点
 6. **CONCAT + CPY 占 12.1%**：delta net 架构特有的 intermediate tensor 拼接/拷贝操作，是 JZ 后续可优化方向（通过更高效的 in-place 拼接减少 DDR 往返）
 
@@ -921,40 +921,40 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 | 模型         | n_layer | MUL_MAT count | MUL_MAT cum (us) | MUL_MAT avg (us) | MUL_MAT_FFN count | MUL_MAT_ADD count | QKV/FFN skip 模式                |
 | ---------- | :-----: | :-----------: | :--------------: | :--------------: | :---------------: | :---------------: | -------------------------- |
-| gemma4     |   35    |      277      |     39,360       |       142        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
-| gemma4-e4b |   42    |      344      |     70,418       |       204        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
+| Gemma4-E2B     |   35    |      277      |     39,360       |       142        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
+| Gemma4-E4B |   42    |      344      |     70,418       |       204        |         0         |         0         | HMX gate (PP 路径,符合预期)        |
 | llama3     |   16    |       79      |      9,856       |       124        |         0         |        30         | HMX gate (PP 路径,符合预期)        |
 | qwen1      |   24    |       48      |     11,575       |       241        |         1         |        119        | HMX gate (PP 路径,符合预期)        |
 | qwen3      |   24    |        1      |        191       |       191        |         0         |         0         | (init batch,无实际 layer matmul) |
 
 **观察**：
 
-- **PP 路径 HMX 闸门 100% 生效**：五个模型的 PP batch#1 中 MUL_MAT_FFN 全部为 0（仅 qwen1 边缘 1 次，可能是 scheduler 特例），MUL_MAT_ADD 触发条件独立（llama3=30, qwen1=119），与 HMX 闸门无关
-- **MUL_MAT avg 与模型/层数正相关**：gemma4-e4b（42层 4B） avg=204us，qwen1（24层 1.8B MHA） avg=241us，gemma4（35层 2B GQA 8:1） avg=142us，llama3（16层 1B） avg=124us
-- **MUL_MAT_ADD 是稳定的 element-wise 加法融合**：qwen1 count=119 说明该模型 cgraph 中存在大量 MUL_MAT + ADD 模式，被 MUL_MAT_ADD fusion 正确捕获；llama3 count=30，gemma4/gemma4-e4b count=0（其 cgraph 中没有 MUL_MAT->ADD 模式）
-- **HMX eligibility 与 QKV/FFN 融合互斥**：五个模型的 "QKV skip: HMX gate" 日志均出现（本节 5.4.2.1 已确认 gemma4 真实日志，5.4.2.2 确认 gemma4-e4b），验证 `is_mergeable_mul_mat` 闸门在 cleanup 后行为与 a3d04682 基线一致
-- **gemma4-e4b / gemma4 MUL_MAT avg 比例 1.44x**：与层数比 1.20x + 模型尺寸 4B/2B = 2x 加权预期（1.20 * sqrt(2) ≈ 1.70） 相比略低，说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优
-- **qwen3 的 1 次 MUL_MAT 仅是 init batch 的 embedding**：graph nodes 范围 26-62（graph size 在 五模型中最小）说明 delta net 架构在 PP 阶段 matmul 数量极低，大部分计算在 attention 之外的 GATED_DELTA_NET/L2_NORM/CONCAT/CPY 中，详细见 5.4.3 的 TG 数据
+- **PP 路径 HMX 闸门 100% 生效**：五个模型的 PP batch#1 中 MUL_MAT_FFN 全部为 0（仅 Qwen1.5-1.8B 边缘 1 次，可能是 scheduler 特例），MUL_MAT_ADD 触发条件独立（Llama3.2-1B=30, Qwen1.5-1.8B=119），与 HMX 闸门无关
+- **MUL_MAT avg 与模型/层数正相关**：Gemma4-E4B（42层 4B） avg=204us，Qwen1.5-1.8B（24层 1.8B MHA） avg=241us，Gemma4-E2B（35层 2B GQA 8:1） avg=142us，Llama3.2-1B（16层 1B） avg=124us
+- **MUL_MAT_ADD 是稳定的 element-wise 加法融合**：Qwen1.5-1.8B count=119 说明该模型 cgraph 中存在大量 MUL_MAT + ADD 模式，被 MUL_MAT_ADD fusion 正确捕获；Llama3.2-1B count=30，Gemma4-E2B/Gemma4-E4B count=0（其 cgraph 中没有 MUL_MAT->ADD 模式）
+- **HMX eligibility 与 QKV/FFN 融合互斥**：五个模型的 "QKV skip: HMX gate" 日志均出现（本节 5.4.2.1 已确认 Gemma4-E2B 真实日志，5.4.2.2 确认 Gemma4-E4B），验证 `is_mergeable_mul_mat` 闸门在 cleanup 后行为与 a3d04682 基线一致
+- **Gemma4-E4B / Gemma4-E2B MUL_MAT avg 比例 1.44x**：与层数比 1.20x + 模型尺寸 4B/2B = 2x 加权预期（1.20 * sqrt(2) ≈ 1.70） 相比略低，说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优
+- **Qwen3.5-2B 的 1 次 MUL_MAT 仅是 init batch 的 embedding**：graph nodes 范围 26-62（graph size 在 五模型中最小）说明 delta net 架构在 PP 阶段 matmul 数量极低，大部分计算在 attention 之外的 GATED_DELTA_NET/L2_NORM/CONCAT/CPY 中，详细见 5.4.3 的 TG 数据
 
 #### 5.4.5 关键发现与结论
 
-1. **五模型 CI 全部通过，force=0 无回归**：gemma4 batch-wall 与 4.1 节 baseline 差异 0.5%。端到端 tok/s：gemma4 PP 666.69 / TG 26.50，gemma4-e4b PP 401.35 / TG 14.58，qwen1 PP 539.06 / TG 18.41（non-op a-inv+bulk 五模型最高，验证 3.4 节 MHA 三重叠加），llama3 PP 1039.49 / TG 42.20（五模型最高，16 层 + 1B），qwen3 PP 408.38 / TG 21.26
-2. **PP 路径 HMX 闸门 五模型全部正确保留**：QKV/FFN 融合被 HMX 闸门阻止（gemma4/gemma4-e4b 真实日志已确认）；MUL_MAT_ADD 是 PP 路径唯一活跃的 fusion（qwen1 count=119, llama3 count=30, gemma 系 count=0，与 attention pattern 相关）
-3. **non-op 占比与 GQA 比例无关**：gemma4（8:1） 29.5% vs gemma4-e4b（4:1） 30.2%，验证 3.3 节"role-aware cache 与模型规模线性相关"
-4. **n_layer 字段在 五模型中均正确输出**（gemma4=35, gemma4-e4b=42, llama3=16, qwen1=24, qwen3=24），解决了此前层数估算的不准确问题
+1. **五模型 CI 全部通过，force=0 无回归**：Gemma4-E2B batch-wall 与 4.1 节 baseline 差异 0.5%。端到端 tok/s：Gemma4-E2B PP 666.69 / TG 26.50，Gemma4-E4B PP 401.35 / TG 14.58，Qwen1.5-1.8B PP 539.06 / TG 18.41（non-op a-inv+bulk 五模型最高，验证 3.4 节 MHA 三重叠加），Llama3.2-1B PP 1039.49 / TG 42.20（五模型最高，16 层 + 1B），Qwen3.5-2B PP 408.38 / TG 21.26
+2. **PP 路径 HMX 闸门 五模型全部正确保留**：QKV/FFN 融合被 HMX 闸门阻止（Gemma4-E2B/Gemma4-E4B 真实日志已确认）；MUL_MAT_ADD 是 PP 路径唯一活跃的 fusion（Qwen1.5-1.8B count=119, Llama3.2-1B count=30, Gemma4 系列 count=0，与 attention pattern 相关）
+3. **non-op 占比与 GQA 比例无关**：Gemma4-E2B（8:1） 29.5% vs Gemma4-E4B（4:1） 30.2%，验证 3.3 节"role-aware cache 与模型规模线性相关"
+4. **n_layer 字段在 五模型中均正确输出**（Gemma4-E2B=35, Gemma4-E4B=42, Llama3.2-1B=16, Qwen1.5-1.8B=24, Qwen3.5-2B=24），解决了此前层数估算的不准确问题
 
 #### 5.4.6 已知数据局限与后续动作
 
-1. **3 个模型（qwen1/llama3/gemma4-e4b）TG 详细算子分布缺失**：`*_logcat.txt` 仅捕获 batch#1，后续 batch 的 OP-PROF 被丢弃（端到端 tok/s 仍从 `*_terminal.txt` 获取）。如需 TG 详细分布，用 `grep -E "OP-PROF.*batch#" log_*_logcat.txt` 直接拉取
-2. **qwen3 PP 真实数据缺失**：batch#1 仅含 embedding init 算子（M=1, 6 个 op），需用 `run_pp_only qwen3` 重抓（n_prompt >= 64）
-3. **qwen3 端到端 tok/s 稳定**：PP 408.38 / TG 21.26 tok/s，与历史 v4 log（PP 401 / TG 21）一致
-4. **gemma4-e4b log 显示 batch#1 重复打印**：原因待查（可能是 `dump_perf_stats` 与 `OP-PROF` 触发周期冲突），不影响数据正确性
-5. **GQA 4:1 vs 8:1 matmul 差异**：gemma4-e4b/gemma4 MUL_MAT avg ratio 1.44x，略低于层数+模型尺寸加权预期 1.70x，说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优。后续可通过 `mul_mat coverage` 的 "ne11" 维度分布进一步分析
+1. **3 个模型（Qwen1.5-1.8B/Llama3.2-1B/Gemma4-E4B）TG 详细算子分布缺失**：`*_logcat.txt` 仅捕获 batch#1，后续 batch 的 OP-PROF 被丢弃（端到端 tok/s 仍从 `*_terminal.txt` 获取）。如需 TG 详细分布，用 `grep -E "OP-PROF.*batch#" log_*_logcat.txt` 直接拉取
+2. **Qwen3.5-2B PP 真实数据缺失**：batch#1 仅含 embedding init 算子（M=1, 6 个 op），需用 `run_pp_only qwen3` 重抓（n_prompt >= 64）
+3. **Qwen3.5-2B 端到端 tok/s 稳定**：PP 408.38 / TG 21.26 tok/s，与历史 v4 log（PP 401 / TG 21）一致
+4. **Gemma4-E4B log 显示 batch#1 重复打印**：原因待查（可能是 `dump_perf_stats` 与 `OP-PROF` 触发周期冲突），不影响数据正确性
+5. **GQA 4:1 vs 8:1 matmul 差异**：Gemma4-E4B/Gemma4-E2B MUL_MAT avg ratio 1.44x，略低于层数+模型尺寸加权预期 1.70x，说明 E4B 的更大 MUL_MAT 在 VTCM 中复用效率更优。后续可通过 `mul_mat coverage` 的 "ne11" 维度分布进一步分析
 
 #### 5.4.7 文档与 commit 维护
 
 - 五模型 10 个 log 文件（`log_forceopfusioninpp_<model>_<ts>_*`）保留在工作区根目录
-- 本节数据已与 4.1 节 gemma4-E2B profiling 交叉对比（5 项核心指标差异均在 ±6% 以内），确认无回归
+- 本节数据已与 4.1 节 Gemma4-E2B profiling 交叉对比（5 项核心指标差异均在 ±6% 以内），确认无回归
 
 ### 5.5 根因分析
 
@@ -979,7 +979,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 
 ### 5.6 结论
 
-1. **HVX fused 路径不适用于 PP**：M 单算子平均耗时与 M=1（TG） 场景差数十倍，即使 cache 节省也不足以抵消算子额外耗时
+1. **HVX fused 路径不适用于 PP**：PP 大 M 场景下单算子平均耗时与 M=1（TG）场景差数十倍，即使 cache 节省也不足以抵消算子额外耗时
 2. **PP 优化的正确方向是 HMX-aware fused kernel**：需要让 MUL_MAT_QKV / MUL_MAT_FFN 在大 M 路径下走 HMX 而不是 HVX，保留 HMX 速度 + 节省 cache 失效。这是 kernel 重写工作，非小规模 patch 可解决
 3. **保留的基础设施**：
    - `force_opfusion_in_pp` cfg flag + bypass 分支（可作为未来 HMX-aware kernel 上线后的 A/B 对比基线）
@@ -991,8 +991,8 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 ### 5.7 后续步骤
 
 1. **回退 cfg**：`force_opfusion_in_pp = 0`（默认行为不变）
-2. 保留feature/force_opfusion_in_pp，可在未来作为其他feature开发的基线分支
-3. **新方向**：调研高通 htp/ 是否有 HMX-aware MUL_MAT_QKV/FFN kernel 可参考；若无，需自主设计（关键决策点：3 个权重矩阵的 VTCM 复用策略，以及如何在 M=large 时仍能利用 HMX 8x8 systolic 阵列）
+2. 保留 feature/force_opfusion_in_pp，可在未来作为其他feature开发的基线分支
+3. **新方向**：调研高通 htp 目录是否有 HMX-aware MUL_MAT_QKV/FFN kernel 可参考；若无，需自主设计（关键决策点：3 个权重矩阵的 VTCM 复用策略，以及如何在 M=large 时仍能利用 HMX 8x8 systolic 阵列）
 
 ***
 
@@ -1014,7 +1014,7 @@ Table-14 揭示 3.8x 退化的根因：MUL_MAT_FFN 在 HVX fused 路径下单 op
 | qkv_skip_hmx | 0 | 0 次因 HMX eligibility 拒绝 |
 | pair_skip_hmx | 23 | 23 次 FFN pair 因 HMX eligibility 拒绝 |
 
-`qkv_fused=0` 与 `qkv_skip_hmx=0` 的组合定位根因: `is_mergeable_mul_mat()` (ggml-hexagon-jz.cpp:2399-2408) 要求 `!mm_is_hmx_eligible(t)` 才允许进入融合候选。Qwen1.5-1.8B 的 Q/K/V MUL_MAT 全部是 HMX-eligible (Q4_0 + 标准 shape)，永远被 `is_mergeable_mul_mat` 拒之门外。当前 fused QKV (op_matmul_qkv，matmul-ops.c:3562) 是 HVX 实现，无法利用 HMX 加速，所以即使强制融合，HVX 3x 路径也不会比 HMX 3x 更快。这与 5.3.2 节 `force_opfusion_in_pp=1` 的实验结论 (HVX 融合 PP 慢 3.8x) 一致。
+`qkv_fused=0` 与 `qkv_skip_hmx=0` 的组合定位根因: `is_mergeable_mul_mat()` ([ggml-hexagon-jz.cpp：is_qkv_mergeable](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)) 要求 `!mm_is_hmx_eligible(t)` 才允许进入融合候选。Qwen1.5-1.8B 的 Q/K/V MUL_MAT 全部是 HMX-eligible (Q4_0 + 标准 shape)，始终被 `is_mergeable_mul_mat` 拒绝。当前 fused QKV (op_matmul_qkv，[matmul-ops.c：op_matmul_qkv](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/matmul-ops.c)) 是 HVX 实现，无法利用 HMX 加速，所以即使强制融合，HVX 3x 路径也不会比 HMX 3x 更快。这与 5.3.2 节 `force_opfusion_in_pp=1` 的实验结论 (HVX 融合 PP 慢 3.8x) 一致。
 
 #### 5.8.2 Plan A 实验证伪: HVX vs HMX FLASH_ATTN 在 M=51 几乎无差异
 
@@ -1051,18 +1051,18 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 - 24 层 x 2 = 2400-4800 us 节省，PP 收益 +2.6-5.3%
 - 同步收益: Q/K/V 三个 output 从 3 个独立 dst 合并到 1 个 fused dst，**减少 a-inv 总量** (FLASH_ATTN 读 Q/K/V 时只 invalidate 1 个 tensor 而非 3 个)
 - 风险: 新 kernel 需验证正确性，参考 QCOM `htp/matmul-ops.c` 中 HMX-aware QKV 实现 (若存在)
-- 实施陷阱 (feature 分支实测): 三个权重共享同一 kparams->n 会在 GQA 模型上 garble (K/V 输出维度 < Q，共享 n 导致 K/V 写出维度错误); 必须为 Wk/Wv/Wq 各自独立 kparams 并携带各自权重维度
+- 实施陷阱 (feature 分支实测): 三个权重共享同一 kparams->n 会在 GQA 模型上输出乱码 (K/V 输出维度 < Q，共享 n 导致 K/V 写出维度错误); 必须为 Wk/Wv/Wq 各自独立 kparams 并携带各自权重维度
 
 **B. bulk flush 异步化 (P0 突破方向)**:
 
-- 现状: `bulk_flush_all()` (entry.c:527-529) 在所有 op 完成后**阻塞**执行 15145 us，期间 DSP thread idle
+- 现状: `bulk_flush_all()` ([entry.c：bulk_flush_all](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)) 在所有 op 完成后**阻塞**执行 15145 us，期间 DSP thread idle
 - 实施: 新增 1 个 DSP worker thread 负责 flush，main batch 线程与 flush 线程并行
 - 时序: batch N 完成后, flush 线程立即开始 flush batch N 的 dst range; 同时 AP 侧准备 batch N+1 的 descriptor (hdr/pre 阶段)
 - 同步点: batch N+1 的第一个 op 读取 dst 之前，需确保 batch N 的 flush 完成
 - 节省: 15145 us 中 30-50% 可与下一 batch 重叠，理论省 4500-7500 us
 - 风险: 需要新增 DSP thread + 跨 batch 同步原语，可能影响后续读取的 cache coherency
 - 参考: 5.7 节保留的 `dsp-ctx.h` `bulk_flush_ranges` 数组已包含 sort + merge 逻辑，异步化只需把 `bulk_flush_all()` 从主线程移到 worker thread
-- 实施陷阱 (feature 分支实测): enable_async_bulk_flush=1 曾在 qwen1 上 garble (flush 线程 DMA 写与主线程读的竞态); 同步点必须显式保证 batch N+1 首个读 dst 的 op 之前 flush 完成，并逐模型验证五模型 CI 输出
+- 实施陷阱 (feature 分支实测): enable_async_bulk_flush=1 曾在 Qwen1.5-1.8B 上输出乱码 (flush 线程 DMA 写与主线程读的竞态); 同步点必须显式保证 batch N+1 首个读 dst 的 op 之前 flush 完成，并逐模型验证五模型 CI 输出
 
 **C. HMX fused FFN (P1 方向)**:
 
@@ -1076,43 +1076,45 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 
 - 现状: a-inv=19167 us / 1754 MB per batch (非 op 开销最大项)
 - 1754 MB / 24 layer / 51 token = 1.43 MB per layer per token, 主要是 per-token unique activation
-- 实施: 类似 `weight_inval_check_and_mark` (entry.c:334-362) 的 per-batch dedup, 添加 `act_inval_check_and_mark` 跨 batch tracking
+- 实施: 类似 `weight_inval_check_and_mark` ([entry.c：weight_inval_check_and_mark](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)) 的 per-batch dedup, 添加 `act_inval_check_and_mark` 跨 batch tracking
 - 假设: 同一 tensor 跨 batch 复用率 30%, 节省 ~24% = 800-1500 us
 - 风险: 中，跨 batch 跟踪需要考虑 L2 容量 (128KB) 和 tensor 生命周期
 - 前提: 必须先确认 1754 MB 的 24% 重复率假设成立 (需 AP 侧打点验证)
 
-#### 5.8.4 新增三个方向（2026-08-08 morning，Kimi-K3，基于 self-build-jz 最新代码与数据）
+#### 5.8.4 新增三个方向（2026-08-08 上午，Kimi-K3，基于 self-build-jz 最新代码与数据）
 
 **Table-21**：新增方向一览（编号沿用 5.8.3 的 A-D 顺延）
 
 | 优先级 | 方向 | 当前开销 | 预期节省 | 收益场景 | 风险 |
 |---|---|---|---|---|---|
-| P0 | F. qwen1 TG 根因定位（op 级 profiling 先行） | TG -28.8%（15.6 ms/token） | 待定，上限为抹平差距 | qwen1 TG | 低（先测后修） |
+| P0 | F. Qwen1.5-1.8B TG 根因定位（op 级 profiling 先行） | TG -28.8%（15.6 ms/token） | 待定，上限为抹平差距 | Qwen1.5-1.8B TG | 低（先测后修） |
 | P1 | E. AP 侧 per-call overhead 消除（hash 瘦身 + descriptor blob 复用） | 641 us/batch（p1 395 + p8 166 + p5/p6 79） | ~540 us/batch | 全模型 TG +1.2-2.7% | 低（纯 AP 侧） |
 | P2 | G. first-touch w-inv 移至加载期 | 首个 PP batch 13.6-25.8 ms | 同左（计时窗口口径） | PP 测量 + TTFT | 低-中（顺序约束） |
 
+排序依据：F 为 P0 因 Qwen1.5-1.8B 是五模型中唯一 TG 落后模型，需最先定位根因（一次 CI 出结论）；E 为 P1 因最低风险速赢，可与 A 并行；G 为 P2 因仅修正计时口径，独立实施。
+
 **E. AP 侧 per-call overhead 消除（P1）**：
 
-- 证据：第五章 gemma4 端到端 256 批次 `dump_perf_stats`：per-call overhead avg=690 us（graph_dur - p10），其中 p1=395 us/batch（compute_content_hash 每 batch 游走 1493 个散落 tensor 结构体）、p8=166 us/batch（descriptor 构建）、p5/p6=79 us/batch；cgraph cache hits=253 / misses=3，即 253 个 TG batch 图内容完全一致，这部分 AP 工作每 token 原样重做
-- 机制 1（hash 瘦身）：[compute_content_hash](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5105-L5123) 每节点 fold op+ne+nb+10 个 src 指针+data ptr（约 20 次解引用）；改为只 fold {op, data ptr}，data ptr 在图内近唯一，配合已有 n_nodes 校验，碰撞安全性可论证
+- 证据：第五章 Gemma4-E2B 端到端 256 批次 `dump_perf_stats`：per-call overhead avg=690 us（graph_dur - p10），其中 p1=395 us/batch（compute_content_hash 每 batch 游走 1493 个散落 tensor 结构体）、p8=166 us/batch（descriptor 构建）、p5/p6=79 us/batch；cgraph cache hits=253 / misses=3，即 253 个 TG batch 图内容完全一致，这部分 AP 工作每 token 原样重做
+- 机制 1（hash 瘦身）：[ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 每节点 fold op+ne+nb+10 个 src 指针+data ptr（约 20 次解引用）；改为只 fold {op, data ptr}，data ptr 在图内基本唯一，配合已有 n_nodes 校验，碰撞安全性可论证
 - 机制 2（descriptor blob 复用）：hash 已覆盖全部 data ptr，命中时 Phase 5/6/8 的输出是确定性的；将构建完成的 ops+tensors descriptor 区（约 240 KB 连续 blob）存入 cgraph cache entry，命中时一次 memcpy 替代重跑三个阶段
-- 与 4.5.1 pipelining 互补（elimination vs overlap）；纯 AP 侧改动，不碰 DSP kernel / cache 策略 / 调度框架，风险为全部方向中最低
-- 预期：641 -> 约 100 us/batch；TG：llama3 +2.3%，gemma4 +1.4%，qwen1 +1.2%
+- 与 4.5.1 pipelining 互补（消除 vs 重叠）；纯 AP 侧改动，不碰 DSP kernel / cache 策略 / 调度框架，风险为全部方向中最低
+- 预期：641 -> 约 100 us/batch；TG：Llama3.2-1B +2.3%，Gemma4-E2B +1.4%，Qwen1.5-1.8B +1.2%
 - 验证：`dump_perf_stats` 对照 p1/p8 累计值 + 五模型 CI
 
-**F. qwen1 TG 根因定位（P0）**：
+**F. Qwen1.5-1.8B TG 根因定位（P0）**：
 
-- 现状：五模型中唯一 TG 败局（-28.8%，53.8 vs 38.2 ms/token）；文档对 TG 落后只有 "MHA VTCM/cache 压力" 定性描述，qwen1 TG 的 per-op profile 从未测过（4.1 节是 gemma4 TG，5.x 是 qwen1 PP）
-- 计划：`HEX_OP_PROF` 跑 qwen1 TG，与 4.1 节 gemma4 TG profile 逐项对比
+- 现状：五模型中唯一 TG 落后（-28.8%，53.8 vs 38.2 ms/token）；文档对 TG 落后只有 "MHA VTCM/cache 压力" 定性描述，Qwen1.5-1.8B TG 的 per-op profile 从未测过（4.1 节是 Gemma4-E2B TG，5.x 是 Qwen1.5-1.8B PP）
+- 计划：`HEX_OP_PROF` 跑 Qwen1.5-1.8B TG，与 4.1 节 Gemma4-E2B TG profile 逐项对比
 - 待验证假设：H1 FLASH_ATTN 主导（MHA 每 token 每层 KV 读取 = 2 x n_embd x 2B = 8 KB，为 GQA 8:1 的 8 倍，随 ctx 线性增长）；H2 lm-head（Q6_K->Q4_0 repack 约 163 MB）matvec 在 DSP 的实际带宽未达预期；H3 KV cache 写入路径 per-token invalidation
-- 测出主导项后再设计修复：H1 对策为 KV layout / VTCM 分块，H2 对策为 matvec kernel DRAM 预取
-- 一次 CI 即可定位；qwen1 同时是 PP 差距最大模型（-22.3%），机制级解释对 PP 优化同样有价值
+- 定位主导项后再设计修复：H1 对策为 KV layout / VTCM 分块，H2 对策为 matvec kernel DRAM 预取
+- 一次 CI 即可定位；Qwen1.5-1.8B 同时是 PP 差距最大模型（-22.3%），机制级解释对 PP 优化同样有价值
 
 **G. first-touch w-inv 移至加载期（P2）**：
 
-- 证据：gemma4 首个 PP batch w-inv=13,637 us（1,334 MB），e4b 25,802 us（2,528 MB）；会话级一次性成本（TG batch 实测 w-inv 约 10 us，bit0 生效），但全部落在首个 PP batch 的计时窗口内，gemma4 PP 76 ms 中 18% 是会话初始化成本而非 prompt 计算
+- 证据：Gemma4-E2B 首个 PP batch w-inv=13,637 us（1,334 MB），Gemma4-E4B 25,802 us（2,528 MB）；会话级一次性成本（TG batch 实测 w-inv 约 10 us，bit0 生效），但全部落在首个 PP batch 的计时窗口内，Gemma4-E2B PP 76 ms 中 18% 是会话初始化成本而非 prompt 计算
 - 机制：复用 `execute_batch(0xFFFC)` 特殊命令通道（推 dsp_cache_mode 的同一路径），模型加载完成后发 init 命令，DSP 一次性整块 invalidate 权重区并预标记 first-touch bitmap；权重区在 mempool 内连续，整块 invalidate 比 24-42 层交错 per-range 遍历局部性更好
-- 预期：PP 测量窗口 -13.6 ms（gemma4）/ -25.8 ms（e4b），PP 数字更纯粹反映计算本身，后续 pipelining 收益测量更准；TTFT 微降
+- 预期：PP 测量窗口 -13.6 ms（Gemma4-E2B）/ -25.8 ms（Gemma4-E4B），PP 数字更纯粹反映计算本身，后续 pipelining 收益测量更准；TTFT 微降
 - 风险：低-中；只需保证 invalidate 在最后一次 AP 侧权重写之后、首个 DSP batch 之前
 
 **已评估并否掉的方向**（避免重复提议）：
@@ -1124,7 +1126,7 @@ patch 编译验证: `strings libggml-hexagon.so | grep fa_hmx` 返回 3 个匹�
 
 P0 方向 (A + B) 合计理论节省 6900-12300 us = PP +7.6-13.6%，符合 `4.7 路线图` 中 4.5 PP 优化的潜在收益空间。P1 方向 (C + D) 合计 2000-3900 us = PP +2.2-4.3%，作为 P0 实施完成后的后续优化。
 
-实施顺序建议: A -> C -> B -> D。前两个 (A + C) 共用 HMX fused kernel 基础设施，先实施可积累经验。B 涉及新 DSP thread + 同步原语，复杂度最高，但潜在收益最大 (PP +5-8%)。D 风险最低 (复用现有 weight_inval 模式)，但收益受限于重复率假设验证。2026-08-08 新增 E/F/G (5.8.4) 后: F 与 A/B 同为 P0 但性质是定位测量 (一次 CI 出结论)，建议最先执行; E 为最低风险速赢项，可与 A 并行; G 为计时口径修正，独立实施。
+实施顺序建议: A -> C -> B -> D。前两个 (A + C) 共用 HMX fused kernel 基础设施，先实施可积累经验。B 涉及新 DSP thread + 同步原语，复杂度最高，但潜在收益最大 (PP +5-8%)。D 风险最低 (复用现有 weight_inval 模式)，但收益受限于重复率假设验证。2026-08-08 新增 E/F/G (5.8.4) 的排序依据见 Table-21 下方说明。
 
 注意: 本节 4 个方向均在 `feature/qwen1_optimize` 分支探索，**不应直接合并到主分支 `self-build-jz`**，需 5 模型 CI 验证无回归 + 主分支 baseline 对比后再议。
 
@@ -1134,33 +1136,30 @@ P0 方向 (A + B) 合计理论节省 6900-12300 us = PP +7.6-13.6%，符合 `4.7
 
 ### 6.1 起点：kimi-k3 在 4.2 节指出的拆分问题
 
-4.2 节（Kimi-K3 在 2026-08-07 修订轮新增）的核心结论：Qwen3.5-2B（即表 Table-15 中 alias 为 `qwen3` 的模型，24 层 GQA + Delta Net 混合架构）在 JZ 后端每个 batch 的 cgraph 被拆成 25 个子图，原因是 `GGML_OP_SOLVE_TRI` 与 `GGML_OP_SSM_CONV` 未在 AP 侧注册，DSP 侧 kernel 已存在但缺桥接胶水代码。Table-11 实测 `batch_calls=6400`（256 batch x 25 子图），与 QCOM 单图形成鲜明对比。
+4.2 节（Kimi-K3 在 2026-08-07 修订轮新增）的核心结论：Qwen3.5-2B（24 层 GQA + Delta Net 混合架构）在 JZ 后端每个 batch 的 cgraph 被拆成 25 个子图，原因是 `GGML_OP_SOLVE_TRI` 与 `GGML_OP_SSM_CONV` 未在 AP 侧注册，DSP 侧 kernel 已存在但缺桥接胶水代码。Table-11 实测 `batch_calls=6400`（256 batch x 25 子图）。
 
 ### 6.2 第一阶段：补两个算子的 bridge layer 代码
 
-读到 4.2 节后，按 4.5.3 方案实施了两组 patch（两个算子的桥接层）：
+按 4.5.3 方案实施了两组 patch（两个算子的桥接层）：
 
-1. **SOLVE_TRI offload**：在 `init_op_validators()`（[ggml-hexagon-jz.cpp L3762-3798](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3762-L3798)）注册 `s_op_validators[GGML_OP_SOLVE_TRI]`，校验逻辑参照 QCOM 的 `ggml_hexagon_supported_solve_tri`（F32 + 方阵 + 维度匹配）；在 `ggml_op_to_htp_op`（[entry.c L905](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c#L905)）加 `case GGML_OP_SOLVE_TRI: *htp_op = HTP_OP_SOLVE_TRI; return 0;`
+1. **SOLVE_TRI offload**：在 `init_op_validators()`（[ggml-hexagon-jz.cpp：init_op_validators](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）注册 `s_op_validators[GGML_OP_SOLVE_TRI]`，校验逻辑参照 QCOM 的 `ggml_hexagon_supported_solve_tri`（F32 + 方阵 + 维度匹配）；在 `ggml_op_to_htp_op`（[entry.c：ggml_op_to_htp_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)）加 `case GGML_OP_SOLVE_TRI: *htp_op = HTP_OP_SOLVE_TRI; return 0;`
 2. **SSM_CONV offload**：同样在 AP 侧注册 validator（参考 QCOM 校验规则，F32 输入、kernel 维度 1-4），DSP 侧加 `case GGML_OP_SSM_CONV` 映射。SSM_CONV 是 delta net 层的卷积算子，本身不直接是 SOLVE_TRI，但 SOLVE_TRI 之前的卷积路径中 SSM_CONV 缺失会迫使 SOLVE_TRI 前的子图段被切开
 
 构建+本地测试后 `batch_calls` 从 6400 降至 1792（256 batch x 7 子图），delta net 层的 11 处 SOLVE_TRI 拆分点 + 周围依赖算子段合并为 1 个连续子图段。
 
 ### 6.3 第二阶段：拆分减少，但推理输出乱码
 
-`batch_calls=1792` 已大幅改善，但 qwen3 推理输出出现字符级乱码（截断、重复、词界破坏）：起点（batch_calls=6400）输出经 `log_abtest_all_20260807-102443.txt` 核实为文本连贯，乱码是 bridge patch 后新引入的中间状态，症状与 4.6.5 描述的"garble = cache 损坏"一致：
+`batch_calls=1792` 已大幅改善，但 Qwen3.5-2B 推理输出出现字符级乱码（截断、重复、词界破坏）：起点（batch_calls=6400）输出经 `log_abtest_all_20260807-102443.txt` 核实为文本连贯，乱码是 bridge patch 后新引入的中间状态，症状与 4.6.5 描述的"garble = cache 损坏"一致：
 
 - 排除 1：4.6.5 已回滚的 DSP-side sampling 优化不是当前代码状态
 - 排除 2：已知 a-inv bit1 实验已证伪（4.6.1），对当前 cgraph 退化为 no-op
-- 排除 3：cgraph 中无已知 fusion 异常模式（garble 复现路径未穿越 fusion 节点）
+- 排除 3：cgraph 中无已知 fusion 异常模式（乱码复现路径未穿越 fusion 节点）
 
-剩余 7 子图/批的拆分点必然影响 cache coherency 维护路径，需进一步定位具体是哪个算子在何处切图。
+剩余 7 子图/批的拆分点影响 cache coherency 维护路径，需进一步定位具体是哪个算子在何处切图。
 
 ### 6.4 第三阶段：用 ggml core 的 `GGML_SCHED_DEBUG` 抓 split 现场
 
-> [!WARNING]
-> **必须同时启用 `GGML_SCHED_DEBUG=2` 和 `--verbosity 5`，缺一不可**。`GGML_SCHED_DEBUG=2` 通过 `GGML_LOG_DEBUG` 输出 split 行，而 `GGML_LOG_DEBUG` 默认 level 为 0，**仅当 `--verbosity >= 5` 时才在 stdout 可见**。仅设 `GGML_SCHED_DEBUG=2` 而不传 `--verbosity 5` 的常见后果是：跑完一次后日志里没有任何 `## SPLIT #N` 行，看起来像"什么都没发生"，会误判为 `GGML_SCHED_DEBUG=2` 失效。
-
-ggml core 内置的 `GGML_SCHED_DEBUG` 环境变量可在 scheduler 切图时打印每次切分的位置（op index + op type + 原因），无需侵入式修改 [ggml-backend.cpp](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-backend.cpp)。
+ggml core 内置的 `GGML_SCHED_DEBUG` 环境变量可在 scheduler 切图时打印每次切分的位置（op index + op type + 原因）。
 
 **标准抓 log 命令**（复制即可用）：
 
@@ -1198,7 +1197,7 @@ node # <idx> (<OP_NAME>): src0 (size) [BufferKind]
 3. 对每个 CPU SPLIT，**找到紧跟其后的 `node #N` 行**--这个 node 就是触发 CPU fallback 的 op，其 `src0/src1/dst` 后缀标的就是 buffer 归属（`[CPU]` 表示在 system memory，`[Hexag]` 表示在 DSP mempool）
 4. 统计 CPU SPLIT 命中的 op 模式（如全部为 `MUL_MAT x blk.*.ssm_out.weight`），定位根因是 operator 缺失、validator 过严还是 weight buffer 错位
 
-**Qwen3.5-9B 实测（2026-08-08）**：500 CPU + 500 Hexagon SPLIT，每个 CPU SPLIT 对应一个 `node #(MUL_MAT): linear_attn_out-X x blk.X.ssm_out.weight -> final_output-X`，根因是 `ssm_out.weight` 在 system memory buffer 上（model 5.4GB > mempool 4GB 触发 [ggml-hexagon-jz.cpp L5083](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5083) 的 ion pool exhausted 回退路径），scheduler 因 weight 不在 DSP mempool 而强制把对应 MUL_MAT 派给 CPU。这是与 2B 完全不同的根因（2B 是 operator 缺失 + validator 过严，9B 是 weight buffer 错位），不能用 6.2 / 6.7 的方法修复。
+**Qwen3.5-9B 实测（2026-08-08）**：500 CPU + 500 Hexagon SPLIT，每个 CPU SPLIT 对应一个 `node #(MUL_MAT): linear_attn_out-X x blk.X.ssm_out.weight -> final_output-X`，根因是 `ssm_out.weight` 在 system memory buffer 上（model 5.4GB > mempool 4GB 触发 [ggml-hexagon-jz.cpp：ggml_backend_hexagon_buffer_is_host](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 的 ion pool exhausted 回退路径），scheduler 因 weight 不在 DSP mempool 而强制把对应 MUL_MAT 派给 CPU。这是与 Qwen3.5-2B 完全不同的根因（Qwen3.5-2B 是 operator 缺失 + validator 过严，Qwen3.5-9B 是 weight buffer 错位），不能用 6.2 / 6.7 的方法修复。
 
 ### 6.5 第四阶段：root cause 定位
 
@@ -1206,7 +1205,7 @@ node # <idx> (<OP_NAME>): src0 (size) [BufferKind]
 
 **7 个剩余子图/批的拆分点全部位于 6 个 MHA 层的 `attn_q_norm` 算子**（blk.3/7/11/15/19/23），每个 MHA 层各贡献 1 个拆分点（其中一个 MHA 层的 attn_q_norm 因 KV cache 状态差异偶发 2 次），与 delta net 层的 SOLVE_TRI/SSM_CONV 修复无关。
 
-进一步追溯到 JZ 侧 RMS_NORM validator（[ggml-hexagon-jz.cpp L3452-3460](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3452-L3460)）：
+进一步追溯到 JZ 侧 RMS_NORM validator（[ggml-hexagon-jz.cpp：hexagon_validate_rms_norm](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)）：
 
 ```cpp
 static bool hexagon_validate_rms_norm(...) {
@@ -1221,7 +1220,7 @@ static bool hexagon_validate_rms_norm(...) {
 
 ### 6.6 第五阶段：分析 per-head view 为什么不是 contiguous
 
-阅读 [qwen3next.cpp L251-264](file:///home/zhouwg/develop/ggml-hexagon/src/models/qwen3next.cpp#L251-L264) 的 Qcur 构造代码：
+阅读 [qwen3next.cpp：build_layer_attn](file:///home/zhouwg/develop/ggml-hexagon/src/models/qwen3next.cpp) 的 Qcur 构造代码：
 
 ```
 Qcur_full = build_lora_mm(model.layers[il].wq, cur, model.wq_s)         // (n_embd_head*2, n_head, n_tokens)
@@ -1239,7 +1238,7 @@ Qcur      = build_norm(Qcur, model.layers[il].attn_q_norm, LLM_NORM_RMS) // <- v
 
 - `unary_row_offset(ir, ne1, ne2, div_ne1, div_ne2, div_ne12, nb1, nb2, nb3)` 通过 `i1*nb1 + i2*nb2 + i3*nb3` 计算行偏移，与 `nb1/nb2/nb3` 无关形状
 - `unary_block_size` 在 `!src_contig || !dst_contig` 时按 `(fastdiv(ir, div_ne1) + 1) * ne1` 切块，限制跨 ne1 边界
-- [`hex_tensor_desc` 填充代码 L6033-6036](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L6033-L6036) 直接赋值 `t->nb[0..3]`，stride 信息完整传递至 DSP
+- [ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 直接赋值 `t->nb[0..3]`，stride 信息完整传递至 DSP
 - RMS_NORM kernel 内部按 `float*` 步进 dim-0（reduction 维度），仅要求 `nb[0] == sizeof(float)`
 
 **结论**：DSP 侧能力无障碍，AP 侧 validator 过严是唯一原因。
@@ -1264,7 +1263,7 @@ Qcur      = build_norm(Qcur, model.layers[il].attn_q_norm, LLM_NORM_RMS) // <- v
  }
 ```
 
-**设计依据**：RMS_NORM kernel 沿 dim-0（reduction 维度）逐元素计算，dim-0 元素级连续是 kernel 的**最小不变量**，无需整张量连续。QCOM 后端 RMS_NORM validator 同样使用 `ggml_is_contiguous`（ggml-hexagon.cpp L2800-2802），故本修改仅影响 JZ 侧。
+**设计依据**：RMS_NORM kernel 沿 dim-0（reduction 维度）逐元素计算，dim-0 元素级连续是 kernel 的**最小不变量**，无需整张量连续。
 
 ### 6.8 第七阶段：验证结果
 
@@ -1298,7 +1297,7 @@ Qcur      = build_norm(Qcur, model.layers[il].attn_q_norm, LLM_NORM_RMS) // <- v
 >
 > **变化归因 (JZ 内部起点 -> Stage 2)**:
 > - PP +14.9% (436.6 -> 501.71) 来自两部分: (a) bridge layer 阶段 PP 456.91 (+4.7% vs 起点, 单测), 消除 11 处 delta net 层拆分的子图固定开销; (b) per-head view fix 阶段 PP 进一步 +9.8% (456.91 -> 501.71, 5 模型 CI 3 轮均值), 消除 6 次 MHA 层 attn_q_norm CPU<DSP> 上下文切换.
-> - TG -1.0% (27.0 -> 26.74) 内部基本持平, 但 QCOM 对比保持 +99.0% 领先 (5 模型 CI QCOM TG 13.44 tok/s), 实际净效果是 PP 性能反超 + TG依然保持 QCOM 2x 优势.
+> - TG -1.0% (27.0 -> 26.74) 内部基本持平, 但 QCOM 对比保持 +99.0% 领先 (5 模型 CI QCOM TG 13.44 tok/s), 实际净效果是 PP 性能反超 + TG 仍保持 QCOM 2x 优势.
 
 ### 6.9 与 3.6 / 4.5.3 节的关系
 
@@ -1313,42 +1312,10 @@ Qcur      = build_norm(Qcur, model.layers[il].attn_q_norm, LLM_NORM_RMS) // <- v
 
 4.2 节（root cause）与 4.5.3（fix）是同一问题的诊断与方案（缺失算子），6.5-6.7 节是**独立发现的第二个根因**（validator 过严）。两者共同构成 Qwen3.5-2B 在 JZ 后端上的 graph 拆分问题的完整根因，缺一不可。
 
-### 6.10 验证流程（可复现）
+### 6.10 修复意义
 
-```sh
-# 1. 应用 SOLVE_TRI/SSM_CONV bridge layer patch（4.5.3 + 6.2 节）
-git apply <bridge_layer_patch>.patch
-
-# 2. 应用 RMS_NORM validator 放宽 patch（6.7 节）
-git apply <rms_norm_validator_relax>.patch
-
-# 3. 构建
-./scripts/build-run-android.sh build
-
-# 4. 基线回归（无拆分的 MHA 模型不应受 validator 放宽影响）
-./scripts/build-run-android.sh run_llamacli gemma4
-# 预期: batch_calls=256, 无 garble, 性能与 5.4 节基线差异 <2%
-
-# 5. 目标模型验证
-./scripts/build-run-android.sh run_llamacli qwen3
-# 预期: batch_calls=256, 输出正常, PP&TG 双提升
-
-# 6. 长生成稳定性
-./scripts/build-run-android.sh run_llamacli qwen3 -n 256
-# 重点检查 MHA 层 (blk.3/7/11/15/19/23) 输出无 garble
-
-# 7. 拆分原因核对
-GGML_SCHED_DEBUG=2 adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./llama-cli -m qwen3.5-2b-q4_0.gguf -n 32 -p 'Hello' --verbosity 5" 2>&1 | tee log_qwen3_post_fix.log
-# 预期:
-#   - 不再出现 "RMS_NORM validator rejected" 字样
-#   - 不再出现 SOLVE_TRI / SSM_CONV split 段
-#   - 仅剩 lm_head buffer 切换处的正常切分
-```
-
-### 6.11 修复意义
-
-1. **彻底消除 Qwen3.5-2B 在 JZ 后端的所有 graph 拆分**：`batch_calls` 从 6400 降至 256（-96%）
-2. **乱码根因彻底消除**：4.5.3 修复后仍残留的字符级乱码来自 MHA 层的 per-head view，本节同步消除
+1. **消除 Qwen3.5-2B 在 JZ 后端的所有 graph 拆分**：`batch_calls` 从 6400 降至 256（-96%）
+2. **乱码根因消除**：4.5.3 修复后仍残留的字符级乱码来自 MHA 层的 per-head view，本节同步消除
 3. **向后兼容其他 MHA 模型**：放宽后的 validator 对 `ggml_is_contiguous==true` 的常规输入仍接受（满足 `nb[0]==sizeof(float)`），零回归
 4. **per-head view 模式的通用修复**：Qwen3Next、Phi-3、Gemma2 等近年模型都使用 per-head Q/K/V 切分，本修改是该模式 RMS_NORM 算子的通用前提，未来模型无需重复修改
 
@@ -1356,38 +1323,38 @@ GGML_SCHED_DEBUG=2 adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./llama-cl
 
 ### 7.1 背景与数据来源
 
-5.8.4 提出的 F 方向 (qwen1 TG 根因定位) 在 feature/qwen1_qwen3_optimize 分支跑完一轮 `run_qwen1_tg_prof` CI，参数 M=1, n_predict=256, ctx=8192, HEX_OP_PROF=1, DUMP_INTERVAL=1。对照模型 qwen1.5-1.8B (MHA 1:1, 24 层) 与 gemma-4-E2B-it (GQA 8:1, 35 层)，稳态均值取 OP-PROF 序列 skip 前 10 batch 后的窗口。
+5.8.4 提出的 F 方向 (Qwen1.5-1.8B TG 根因定位) 在 feature/qwen1_qwen3_optimize 分支跑完一轮 `run_qwen1_tg_prof` CI，参数 M=1, n_predict=256, ctx=8192, HEX_OP_PROF=1, DUMP_INTERVAL=1。对照模型 Qwen1.5-1.8B (MHA 1:1, 24 层) 与 Gemma4-E2B (GQA 8:1, 35 层)，稳态均值取 OP-PROF 序列 skip 前 10 batch 后的窗口。
 
-数据来源: `qwen1_tg_prof_20260808-165745_summary.log` + `_qwen1_logcat.log` + `_gemma4-e2b_logcat.log` 三组文件，terminal 实测 qwen1 TG 18.62 tok/s (53.70 ms/token), gemma4-e2b TG 26.53 tok/s (37.70 ms/token)。下文表 Table-25 / Table-26 / Table-27 / Table-28 直接来自 OP-PROF 聚合。
+数据来源: `qwen1_tg_prof_20260808-165745_summary.log` + `_qwen1_logcat.log` + `_Gemma4-E2B_logcat.log` 三组文件，terminal 实测 Qwen1.5-1.8B TG 18.62 tok/s (53.70 ms/token), Gemma4-E2B TG 26.53 tok/s (37.70 ms/token)。下文表 Table-25 / Table-26 / Table-27 / Table-28 直接来自 OP-PROF 聚合。
 
 ### 7.2 H1 / H2 / H3 假设的算子级判定
 
 **Table-25**：H1 / H2 / H3 假设的算子级对比 (per batch, 稳态均值)
 
-| 假设 | 算子 | qwen1 (us/batch) | gemma4 (us/batch) | qwen1 占比 | gemma4 占比 | 结论 |
+| 假设 | 算子 | Qwen1.5-1.8B (us/batch) | Gemma4-E2B (us/batch) | Qwen1.5-1.8B 占比 | Gemma4-E2B 占比 | 结论 |
 |---|---|---:|---:|---:|---:|---|
 | H1 | FLASH_ATTN_EXT (us/batch) | 1434.5 | 721.2 | 2.7% | 2.0% | **证伪** |
-| H1 | FLASH_ATTN_EXT (us/op) | 57.7 | 19.9 | - | - | gemma4 GQA 更快 (1/3) |
+| H1 | FLASH_ATTN_EXT (us/op) | 57.7 | 19.9 | - | - | Gemma4-E2B GQA 更快 (1/3) |
 | H1 | FLASH_ATTN_EXT (ops/batch) | 24.88 | 36.26 | - | - | 与 n_layer 一致 |
 | H2 | lm-head MUL_MAT (us/batch, max/op) | ~3500 | ~4800 | 6.7% | 13.0% | **证伪** |
-| H2 | lm-head 带宽 (qwen1 156MB / 3.5ms) | 64 GB/s | - | 峰值 ~91% | - | DRAM 已饱和, op 级无收益 |
-| H3 | a-inv (us/batch) | **16241.0** | 994.1 | **30.9%** | 2.7% | **qwen1 确认** |
-| H3 | a-inv MB invalidated (MB/batch) | 1588 | 79 | - | - | **qwen1 是 gemma4 的 20.1x** |
+| H2 | lm-head 带宽 (Qwen1.5-1.8B 156MB / 3.5ms) | 64 GB/s | - | 峰值 ~91% | - | DRAM 已饱和, op 级无收益 |
+| H3 | a-inv (us/batch) | **16241.0** | 994.1 | **30.9%** | 2.7% | **Qwen1.5-1.8B 确认** |
+| H3 | a-inv MB invalidated (MB/batch) | 1588 | 79 | - | - | **Qwen1.5-1.8B 是 Gemma4-E2B 的 20.1x** |
 | H3 | a-inv per-MB (us/MB) | 10.2 | 12.6 | - | - | 单位带宽成本相近, 为工作量问题 |
 
-注: qwen1 wall ≈ 52500 us/batch (graph_dur 53407); gemma4 wall ≈ 37000 us/batch (graph_dur 37200)。
+注: Qwen1.5-1.8B wall ≈ 52500 us/batch (graph_dur 53407); Gemma4-E2B wall ≈ 37000 us/batch (graph_dur 37200)。
 
 判定说明:
 
-- **H1 (FLASH_ATTN) 证伪**: qwen1 25 op/batch (24 层 + 1) x 58 us, gemma4 36 op x 20 us。即使消除 100% FLASH_ATTN, qwen1 TG 也只提速 2.7% (1.4 ms/token)。
-- **H2 (lm-head) 证伪**: qwen1 lm-head MUL_MAT 3500 us = 6.7% wall (max 3650 us), gemma4 4800 us = 13% wall。qwen1 lm-head 实测 64 GB/s, 逼近 DRAM 峰值 (~70 GB/s)。op-level 优化 (fuse / faster kernel) 被 DRAM 锁死, 上限 ~5-10%。真正的 H2 收益方向是 K/V cache FP16/Q8 量化 (把 cache 从 2 字节降到 1 字节, lm-head input 间接受益, 但要重做 cache 写入路径)。
-- **H3 (KV invalidation) qwen1 确认, gemma4 否决**: qwen1 a-inv 16241 us/batch (30.9% wall) / 1588 MB invalidated, gemma4 仅 994 us / 79 MB。16.3x 时间差, 20.1x 数据量差。单位带宽成本 qwen1 (10.2 us/MB) 甚至略低于 gemma4 (12.6 us/MB), 为总工作量问题而非效率问题。根因推断: qwen1 MHA 1:1 每层 16 KV head x 128 head_dim x 2 (K,V) = 大量 KV 写 src range, 每次 batch 触发整片 L2 invalidation; gemma4 GQA 8:1 KV 头数仅 1/8。
+- **H1 (FLASH_ATTN) 证伪**: Qwen1.5-1.8B 25 op/batch (24 层 + 1) x 58 us, Gemma4-E2B 36 op x 20 us。即使消除 100% FLASH_ATTN, Qwen1.5-1.8B TG 也只提速 2.7% (1.4 ms/token)。
+- **H2 (lm-head) 证伪**: Qwen1.5-1.8B lm-head MUL_MAT 3500 us = 6.7% wall (max 3650 us), Gemma4-E2B 4800 us = 13% wall。Qwen1.5-1.8B lm-head 实测 64 GB/s, 逼近 DRAM 峰值 (~70 GB/s)。op-level 优化 (fuse / faster kernel) 被 DRAM 锁死, 上限 ~5-10%。真正的 H2 收益方向是 K/V cache FP16/Q8 量化 (把 cache 从 2 字节降到 1 字节, lm-head input 间接受益, 但要重做 cache 写入路径)。
+- **H3 (KV invalidation) Qwen1.5-1.8B 确认, Gemma4-E2B 否决**: Qwen1.5-1.8B a-inv 16241 us/batch (30.9% wall) / 1588 MB invalidated, Gemma4-E2B 仅 994 us / 79 MB。16.3x 时间差, 20.1x 数据量差。单位带宽成本 Qwen1.5-1.8B (10.2 us/MB) 甚至略低于 Gemma4-E2B (12.6 us/MB), 为总工作量问题而非效率问题。根因推断: Qwen1.5-1.8B MHA 1:1 每层 16 KV head x 128 head_dim x 2 (K,V) = 大量 KV 写 src range, 每次 batch 触发整片 L2 invalidation; Gemma4-E2B GQA 8:1 KV 头数仅 1/8。
 
-### 7.3 qwen1 vs gemma4 全算子 per-batch 排序 (稳态)
+### 7.3 Qwen1.5-1.8B vs Gemma4-E2B 全算子 per-batch 排序 (稳态)
 
-**Table-26**：qwen1 vs gemma4 全算子 per-batch 排序 (稳态)
+**Table-26**：Qwen1.5-1.8B vs Gemma4-E2B 全算子 per-batch 排序 (稳态)
 
-| rank | qwen1 op | us/batch | 占比 | gemma4 op | us/batch | 占比 |
+| rank | Qwen1.5-1.8B op | us/batch | 占比 | Gemma4-E2B op | us/batch | 占比 |
 |---:|---|---:|---:|---|---:|---:|
 | 1 | MUL_MAT_ADD (123 op, 68 us) | 8418.3 | 16.0% | MUL_MAT (168 op, 99 us) | 16645.4 | 45.0% |
 | 2 | MUL_MAT_FFN (25 op, 258 us) | 6429.0 | 12.2% | MUL_MAT_FFN (36 op, 341 us) | 12379.2 | 33.4% |
@@ -1404,13 +1371,13 @@ GGML_SCHED_DEBUG=2 adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./llama-cl
 | - | 其他非 op (pre, dst, queue, hdr) | 226 | 0.4% | 其他非 op | 445 | 1.2% |
 | - | **wall (est)** | **52021** | - | **wall (est)** | **37387** | - |
 
-注: qwen1 wall 实测 graph_dur = 53407 us (含 AP 侧 ~400 us 杂项); gemma4 wall 实测 37200 us。
+注: Qwen1.5-1.8B wall 实测 graph_dur = 53407 us (含 AP 侧 ~400 us 杂项); Gemma4-E2B wall 实测 37200 us。
 
-### 7.4 qwen1 TG 真正的瓶颈重构 (a-inv + bulk 是核心)
+### 7.4 Qwen1.5-1.8B TG 真正的瓶颈重构 (a-inv + bulk 是核心)
 
-**Table-27**：qwen1 vs gemma4 wall 拆解对比
+**Table-27**：Qwen1.5-1.8B vs Gemma4-E2B wall 拆解对比
 
-| 组件 | qwen1 (us) | gemma4 (us) | 差值 |
+| 组件 | Qwen1.5-1.8B (us) | Gemma4-E2B (us) | 差值 |
 |---|---:|---:|---:|
 | a-inv | 16241 | 994 | +15247 |
 | bulk flush | 15034 | 1205 | +13829 |
@@ -1418,7 +1385,7 @@ GGML_SCHED_DEBUG=2 adb shell "cd /data/local/tmp && LD_LIBRARY_PATH=. ./llama-cl
 | 其他 | 226 | 445 | -219 |
 | **wall** | **52021** | **37387** | **+14634** |
 
-qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把 24 层 vs 35 层的算子优势完全吃掉。a-inv + bulk = 60% wall, 同源 (DSP L2 容量 8 MB 限制), 都是 L2->DRAM 同步代价。
+Qwen1.5-1.8B 比 Gemma4-E2B 慢 14.6 ms/batch, 缓存维护多出 29 ms (56% of delta), 抵消了 24 层 vs 35 层的算子优势。a-inv + bulk = 60% wall, 同源 (DSP L2 容量 8 MB 限制), 都是 L2->DRAM 同步代价。
 
 ### 7.5 优化方向 (按收益/风险排序)
 
@@ -1429,18 +1396,18 @@ qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把
 | P0 | E 方向 AP per-call overhead 消除 (hash 瘦身 + descriptor blob 复用) | 0.7-2.2% TG | 低 | 99% cache hit rate, 全模型生效 |
 | P1 | K/V cache FP16/Q8 量化 | 10-19% TG | 中-高 | 直接砍 a-inv 工作量 (1588 MB -> ~794 MB, 省 ~8000 us/batch = 15% wall), 需改 llama.cpp KV cache 写入路径 |
 | P2 | MUL_MAT_ADD fusion rate 提升 | 5-10% TG | 中 | 当前 123/120 已几乎全 fuse, 边际空间小 |
-| 放弃 | async_bulk_flush (Path-B1) | -14.6% (但 garble) | - | qwen1 MHA K/V race 已实验证伪 |
-| 放弃 | dsp_a_inv_bitmap (Path-B3) | 0% (回退) | - | gemma4 garble + qwen1 回退, 已实验证伪 |
-| 放弃 | qwen1 force_opfusion_in_pp | - | - | 经验证 HVX fused 6.5 ms/op vs HMX 137 us/op, 不适用 |
+| 放弃 | async_bulk_flush (Path-B1) | -14.6% (但输出乱码) | - | Qwen1.5-1.8B MHA K/V race 已实验证伪 |
+| 放弃 | dsp_a_inv_bitmap (Path-B3) | 0% (回退) | - | Gemma4-E2B 输出乱码 + Qwen1.5-1.8B 回退, 已实验证伪 |
+| 放弃 | Qwen1.5-1.8B force_opfusion_in_pp | - | - | 经验证 HVX fused 6.5 ms/op vs HMX 137 us/op, 不适用 |
 
 ### 7.6 关键观察
 
-- qwen1 MUL_MAT_ADD 5.1 op/layer x 24 layers = 123 op/batch, per_op = 68 us 极稳定 (min=47, max=154) -> 完美 fusion, 无空间
-- qwen1 MUL_MAT 只有 2 op/batch, 推断 1 个是 lm-head (max=3650 us ≈ 3500 us/batch = 6.7% wall, 与 H2 一致), 另 1 个是 output norm/bias 小算子
-- qwen1 MUL_MAT_FFN 25 op/batch (24 layers + 1), per_op = 258 us; gemma4 36 op x 341 us
-- qwen1 cgraph 5.8.4 早期测量中, 16249 us a-inv (1588 MB) 是结构上限, bitmap 优化已无效
-- qwen1 bulk 15034 us/batch 几乎与 a-inv 16241 us/batch 相当 -> dst flush 同样吃紧, 与 a-inv 同源 (L2 容量限制)
-- qwen1 5.8.4 路径 A/B/C 三个 cache 优化方向已全部实验证伪 (MHA K/V 与 DMA race, L2 8 MB 容量限制无法绕过, PRIOR_DST_MAX_LEN=64 过严), cache 增量调参路径走完; 剩余两条结构层面路径: (a) 5.8.4 E 方向 = AP per-call overhead 消除 (hash 瘦身 + descriptor blob 复用, Table-28 P0), 收益 0.7-2.2% TG 低风险; (b) K/V cache FP16/Q8 量化 (Table-28 P1, 本节新增), 收益 10-19% TG 中-高风险; 合计潜在 11-21% TG 改善
+- Qwen1.5-1.8B MUL_MAT_ADD 5.1 op/layer x 24 layers = 123 op/batch, per_op = 68 us 极稳定 (min=47, max=154) -> 完美 fusion, 无空间
+- Qwen1.5-1.8B MUL_MAT 只有 2 op/batch, 推断 1 个是 lm-head (max=3650 us ≈ 3500 us/batch = 6.7% wall, 与 H2 一致), 另 1 个是 output norm/bias 小算子
+- Qwen1.5-1.8B MUL_MAT_FFN 25 op/batch (24 layers + 1), per_op = 258 us; Gemma4-E2B 36 op x 341 us
+- Qwen1.5-1.8B cgraph 5.8.4 早期测量中, 16249 us a-inv (1588 MB) 是结构性上限, bitmap 优化已无效
+- Qwen1.5-1.8B bulk 15034 us/batch 几乎与 a-inv 16241 us/batch 相当 -> dst flush 同样吃紧, 与 a-inv 同源 (L2 容量限制)
+- Qwen1.5-1.8B 5.8.4 路径 A/B/C 三个 cache 优化方向已全部实验证伪 (MHA K/V 与 DMA race, L2 8 MB 容量限制无法绕过, PRIOR_DST_MAX_LEN=64 过严), cache 增量调参路径走完; 剩余两条结构层面路径: (a) 5.8.4 E 方向 = AP per-call overhead 消除 (hash 瘦身 + descriptor blob 复用, Table-28 P0), 收益 0.7-2.2% TG 低风险; (b) K/V cache FP16/Q8 量化 (Table-28 P1, 本节新增), 收益 10-19% TG 中-高风险; 合计潜在 11-21% TG 改善
 
 
 ***
@@ -1451,7 +1418,7 @@ qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把
 
 #### 8.1.1 六模型 AB CI 性能对比
 
-2026-08-09 完整跑完六模型 AB CI 测试 (Qualcomm SnapDragon 8 Elite, dsp arch 0x79, system mem 24834 MiB, n_ctx=512, prompt eval 50-75 tokens, 生成 255 tokens)。Qwen3.5-9B 因推理耗时 + 功耗高 + 手机发烫, rounds 强制 1 轮 (CI 脚本 hard cap), 其他 5 模型跑 3 轮取平均。原始 log 见 `log_abtest_all_20260809-140022.txt` (35949 行)。
+2026-08-09 完整跑完六模型 AB CI 测试 (Qualcomm SnapDragon 8 Elite, dsp arch 0x79, system mem 24834 MiB, n_ctx=512, prompt eval 50-75 tokens, 生成 255 tokens)。Qwen3.5-9B 因推理耗时 + 功耗高 + 手机发热, rounds 强制 1 轮 (CI 脚本 hard cap), 其他 5 模型跑 3 轮取平均。原始 log 见 `log_abtest_all_20260809-140022.txt` (35949 行)。
 
 **Table-29**: 六模型 AB CI 性能对比 (PP/TG 单位 tokens/s, total 单位 ms)
 
@@ -1461,10 +1428,10 @@ qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把
 |---|---:|---|---:|---:|---:|---:|:---:|
 | Qwen3.5-2B (qwen3-2b) | 24 | JZ   | 508.21 | 27.55 |   9632.96 |   256 | **2.02x** |
 | Qwen3.5-2B (qwen3-2b) | 24 | QCOM | 472.44 | 13.65 |  19026.71 |   N/A |  baseline |
-| gemma-4-E2B (gemma4-e2b) | 35 | JZ   | 669.54 | 26.96 |   9861.10 |   256 | **1.08x** |
-| gemma-4-E2B (gemma4-e2b) | 35 | QCOM | 432.13 | 24.92 |  10488.07 |   N/A |  baseline |
-| gemma-4-E4B (gemma4-e4b) | 42 | JZ   | 411.91 | 15.04 |  17377.58 |   256 | **1.44x** |
-| gemma-4-E4B (gemma4-e4b) | 42 | QCOM | 413.22 | 10.41 |  24754.51 |   N/A |  baseline |
+| Gemma4-E2B (Gemma4-E2B) | 35 | JZ   | 669.54 | 26.96 |   9861.10 |   256 | **1.08x** |
+| Gemma4-E2B (Gemma4-E2B) | 35 | QCOM | 432.13 | 24.92 |  10488.07 |   N/A |  baseline |
+| Gemma4-E4B (Gemma4-E4B) | 42 | JZ   | 411.91 | 15.04 |  17377.58 |   256 | **1.44x** |
+| Gemma4-E4B (Gemma4-E4B) | 42 | QCOM | 413.22 | 10.41 |  24754.51 |   N/A |  baseline |
 | Qwen1.5-1.8B (qwen1) | 24 | JZ   | 543.53 | 18.46 |  14088.33 |   256 | 0.68x |
 | Qwen1.5-1.8B (qwen1) | 24 | QCOM | 724.80 | 27.22 |   9678.25 |   N/A |  baseline |
 | Llama-3.2-1B (llama3) | 16 | JZ   | 992.48 | 42.59 |   6161.02 |   257 | **1.48x** |
@@ -1478,16 +1445,16 @@ qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把
 |---|---:|---:|:---:|---|---|
 | Qwen3.5-2B (qwen3-2b) | 27.55 | 13.65 | **2.02x** | JZ 强优势 | 24 层, batch_calls=256 无 split, mempool 充足 + lm-head offload |
 | Llama-3.2-1B (llama3) | 42.59 | 28.80 | **1.48x** | JZ 优势 | 16 层小模型, cgraph cache 几乎全 hit, lm-head offload 净收益主导 |
-| gemma-4-E4B (gemma4-e4b) | 15.04 | 10.41 | **1.44x** | JZ 优势 | 42 层偏大, JZ mempool 仍可装下, lm-head offload + 连续 IOVA 净收益显著 |
-| gemma-4-E2B (gemma4-e2b) | 26.96 | 24.92 | **1.08x** | JZ 优势 | 35 层中等模型, batch_calls=256 无 split, QCOM dspqueue 收益对 JZ 边际 |
+| Gemma4-E4B (Gemma4-E4B) | 15.04 | 10.41 | **1.44x** | JZ 优势 | 42 层偏大, JZ mempool 仍可装下, lm-head offload + 连续 IOVA 净收益显著 |
+| Gemma4-E2B (Gemma4-E2B) | 26.96 | 24.92 | **1.08x** | JZ 优势 | 35 层中等模型, batch_calls=256 无 split, QCOM dspqueue 收益对 JZ 边际 |
 | Qwen1.5-1.8B (qwen1) | 18.46 | 27.22 | 0.68x | JZ 劣势 | MHA 1:1 每 token 大量 L2 invalidation, a-inv + bulk flush 占 60% wall, L2 8 MB 限制; K/V 量化可追平 |
 | Qwen3.5-9B (qwen3-9b) | 1.51 | 6.65 | 0.23x | JZ 大劣势 | 模型 5.03 GiB 超 4 GiB mempool 致 heap fallback + mirror memcpy overhead (78% wall), 24 个 Q5_K split 致 batch_calls=6144, per-call overhead 214x (JZ 21.4ms vs QCOM 0.1ms) |
 
 关键观察:
 
-1. JZ TG 在 4/6 模型上领先 QCOM (Qwen3.5-2B / Llama-3.2-1B / gemma-4-E4B / gemma-4-E2B), 最大 2.02x。这 4 个模型共同特征是 batch_calls=256 (无 split, cgraph cache 全 hit) 且模型 < mempool 4 GiB, JZ 架构净优势 (lm-head offload + mempool 连续 IOVA) 完全释放
-2. JZ TG 在 2/6 模型上落后 QCOM (Qwen1.5-1.8B / Qwen3.5-9B)。两个模型代表两种不同的 JZ 失败模式: (a) batch_calls=256 无 graph split 但 a-inv/bulk flush 拖慢 per-call performance; (b) batch_calls=6144 大量 graph split + per-call overhead 214x 放大
-3. PP 维度 JZ 在 5/6 模型上落后 QCOM (除 gemma-4-E4B 基本持平): QCOM dspqueue 的 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy), JZ 的 12 阶段同步 FastRPC 在 PP 短序列下 per-call 开销占比大。但对长生成 (TG), JZ 的开销被 255 段摊薄, dspqueue 收益变小, JZ 反而占优
+1. JZ TG 在 4/6 模型上领先 QCOM (Qwen3.5-2B / Llama-3.2-1B / Gemma4-E4B / Gemma4-E2B), 最大 2.02x。这 4 个模型共同特征是 batch_calls=256 (无 split, cgraph cache 全 hit) 且模型 < mempool 4 GiB, JZ 架构净优势 (lm-head offload + mempool 连续 IOVA) 完全释放
+2. JZ TG 在 2/6 模型上落后 QCOM (Qwen1.5-1.8B / Qwen3.5-9B)。两个模型代表两种不同的 JZ 失败模式: (a) batch_calls=256 无 graph split 但 a-inv/bulk flush 拖慢单次调用性能; (b) batch_calls=6144 大量 graph split + per-call overhead 214x 放大
+3. PP 维度 JZ 在 5/6 模型上落后 QCOM (除 Gemma4-E4B 基本持平): QCOM dspqueue 的 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy), JZ 的 12 阶段同步 FastRPC 在 PP 短序列下 per-call 开销占比大。但对长生成 (TG), JZ 的开销被 255 段摊薄, dspqueue 收益变小, JZ 反而领先
 4. Qwen3.5-9B 是 JZ 第二个 TG/PP 同时落后 QCOM 的模型 (第一个是 Qwen1.5-1.8B), 也是首个双边失利差距达 5x 量级的模型
 
 **Table-31**: 六模型 AB CI 完整 3 轮单值明细 (Qwen3.5-9B 1 轮, 供审计与可复现验证)
@@ -1500,18 +1467,18 @@ qwen1 比 gemma4 慢 14.6 ms/batch, 缓存维护多吃 29 ms (56% of delta), 把
 | Qwen3.5-2B | QCOM | 1 | 494.50 | 14.15 |  18338.34 |
 | Qwen3.5-2B | QCOM | 2 | 452.79 | 13.62 |  19051.96 |
 | Qwen3.5-2B | QCOM | 3 | 470.03 | 13.18 |  19689.82 |
-| gemma-4-E2B (58+255 tok) | JZ   | 1 | 663.65 | 26.94 |   9869.23 |
-| gemma-4-E2B | JZ   | 2 | 676.67 | 26.88 |   9862.48 |
-| gemma-4-E2B | JZ   | 3 | 668.30 | 27.07 |   9851.60 |
-| gemma-4-E2B | QCOM | 1 | 423.94 | 24.99 |  10464.74 |
-| gemma-4-E2B | QCOM | 2 | 443.26 | 24.92 |  10484.72 |
-| gemma-4-E2B | QCOM | 3 | 429.19 | 24.86 |  10514.75 |
-| gemma-4-E4B (58+255 tok) | JZ   | 1 | 412.54 | 15.19 |  17191.56 |
-| gemma-4-E4B | JZ   | 2 | 419.02 | 15.17 |  17225.30 |
-| gemma-4-E4B | JZ   | 3 | 404.16 | 14.75 |  17715.89 |
-| gemma-4-E4B | QCOM | 1 | 416.05 | 10.32 |  24973.29 |
-| gemma-4-E4B | QCOM | 2 | 407.60 | 10.49 |  24543.48 |
-| gemma-4-E4B | QCOM | 3 | 416.01 | 10.41 |  24746.75 |
+| Gemma4-E2B (58+255 tok) | JZ   | 1 | 663.65 | 26.94 |   9869.23 |
+| Gemma4-E2B | JZ   | 2 | 676.67 | 26.88 |   9862.48 |
+| Gemma4-E2B | JZ   | 3 | 668.30 | 27.07 |   9851.60 |
+| Gemma4-E2B | QCOM | 1 | 423.94 | 24.99 |  10464.74 |
+| Gemma4-E2B | QCOM | 2 | 443.26 | 24.92 |  10484.72 |
+| Gemma4-E2B | QCOM | 3 | 429.19 | 24.86 |  10514.75 |
+| Gemma4-E4B (58+255 tok) | JZ   | 1 | 412.54 | 15.19 |  17191.56 |
+| Gemma4-E4B | JZ   | 2 | 419.02 | 15.17 |  17225.30 |
+| Gemma4-E4B | JZ   | 3 | 404.16 | 14.75 |  17715.89 |
+| Gemma4-E4B | QCOM | 1 | 416.05 | 10.32 |  24973.29 |
+| Gemma4-E4B | QCOM | 2 | 407.60 | 10.49 |  24543.48 |
+| Gemma4-E4B | QCOM | 3 | 416.01 | 10.41 |  24746.75 |
 | Qwen1.5-1.8B (51+255 tok) | JZ   | 1 | 558.89 | 18.49 |  14054.64 |
 | Qwen1.5-1.8B | JZ   | 2 | 537.58 | 18.44 |  14112.54 |
 | Qwen1.5-1.8B | JZ   | 3 | 534.13 | 18.46 |  14097.81 |
@@ -1585,7 +1552,7 @@ dump_perf_stats 关键数据解读:
 2. **JZ per-call overhead = 21.4 ms/call** -- 每 sub-call 26.6 ms 总耗时, 5.3 ms 是 DSP 真实计算 (p10 dsp_exec), 21.4 ms 是非 DSP 开销 (FastRPC setup + mirror + sync); 24 calls x 21.4 ms = 514 ms/token 是 JZ 单 token 主要开销
 3. **JZ p5+p12 = 136.5 s = 78% of total** -- mirror 计算是 JZ Qwen3.5-9B 真实瓶颈 (68.7 s compute + 67.8 s apply); 其余 22% 是 p1+p6+p8+p11 等
 4. **JZ p10 dsp_exec = 5.262 ms/call** -- sub-call 真实 DSP 计算是 5.3 ms (不含 ssm_out MUL_MAT, 后者在 CPU 执行), 不是简单 matmul 的 0.5 ms
-5. **PP 36.61 ms/token vs TG 676.00 ms/token = 18.5x 差异** -- TG 100% decode-bound, 与 qwen1 经验一致
+5. **PP 36.61 ms/token vs TG 676.00 ms/token = 18.5x 差异** -- TG 100% decode-bound, 与 Qwen1.5-1.8B 经验一致
 6. **cgraph cache hit_rate=99.1%** (6088/6144), 与 QCOM `graphs reused=253/255=99.2%` 接近 -- graphs reused 是 upstream llama.cpp scheduler 的 cgraph 结构复用计数, 与 FastRPC 无关; QCOM 提交链路是 dspqueue 持久化环形队列, per-call descriptor 准备仍存在但通过 dspqueue 异步提交与 DSP 计算重叠。JZ cgraph cache 是 AP 端按 op+shape+src ptr 哈希的 descriptor 复用 cache, 两者层级不同但命中率接近 (99.1% vs 99.2%), 反映 JZ 与 QCOM 的 cgraph 拓扑变化模式相同 (每 255 步 ~2 步需要重切)
 7. **输出内容**: jinja "Thinking Process" 模式 (Analyze Request / Identify Key Information), 正常电影介绍 ("Once Upon a Time in America", "Sergio Leone", "Robert De Niro"), 非乱码
 
@@ -1616,7 +1583,7 @@ cgraph cache: hits=6088 misses=56 (hit_rate=99.1%) entries=0
 
 | 指标 | 基线 | patch 落地 | 变化 | 根因 |
 |---|---:|---:|---|---|
-| PP tok/s | 27.31 | **44.77** | **+473%** | PP 受 graph split 影响小 + 干净分支基线 (无 qwen1 实验代码拖累) |
+| PP tok/s | 27.31 | **44.77** | **+473%** | PP 受 graph split 影响小 + 干净分支基线 (无 Qwen1.5-1.8B 实验代码影响) |
 | TG tok/s | 1.48 | **1.49** | **+1%** | 4 GiB mempool 装不下 4.5 GiB repack 后 Q4_0 tiled -> Q5_K 权重落 heap (CPU buffer) -> 每 token mirror memcpy (from & back) overhead 占 TG wall 78% |
 | load time | 1912.61 | **1167.50** | **-39%** | repack 后 token buffer layout 简化 |
 | batch_calls | 6400 | **6144** | **-4%** | 4 个非 ssm_out MUL_MAT CPU split 仍存在, Q5_K 24 个 split 未消除 |
@@ -1714,19 +1681,19 @@ ssm_out.weight 在 CPU buffer 的根因是 Q5_K 量化类型不被 JZ MUL_MAT va
 
 2. **GGUF 元数据证据** (Qwen3.5-9B-Q4_0.gguf 实测): 全部 24 个 ssm_out.weight 是 Q5_K [4096, 4096], 11.00 MiB x 24 = 264.0 MiB, 且 Q5_K 在全模型 427 个 tensor 中恰好只有这 24 个。类型普查: Q4_0 n=173 (3929.62 MiB, 含 token_embd.weight 545.62 MiB), Q6_K n=1 (output.weight 795.70 MiB, 全模型唯一), Q4_1 n=4 (120.00 MiB), Q8_0 n=48 (6.38 MiB), F32 n=177 (32.39 MiB)。模型总权重 5148.1 MiB = 5.03 GiB (427 tensors, 32 layers)
 
-3. **代码证据**: [ggml-hexagon-jz.cpp:3336-3406](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3336-L3406) `ggmlhexagon_supported_mul_mat` 的 switch 仅支持 Q8_0 / Q4_0 / IQ4_NL / Q4_1 / MXFP4 / Q4_K / Q6_K (外加 F16/F32/BF16), Q5_K 走 `default: return false` (line 3404)
+3. **代码证据**: [ggml-hexagon-jz.cpp：ggmlhexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) `ggmlhexagon_supported_mul_mat` 的 switch 仅支持 Q8_0 / Q4_0 / IQ4_NL / Q4_1 / MXFP4 / Q4_K / Q6_K (外加 F16/F32/BF16), Q5_K 走 `default: return false`
 
 根因链: ssm_out.weight 是 Q5_K -> JZ MUL_MAT validator 返回 false -> upstream scheduler 把该 MUL_MAT 分配到 CPU backend -> tensor 随之落入 CPU buffer -> 24 个 delta-net 层每层产生 1 个 CPU split。与 mempool 容量无关。
 
-mempool 容量问题的真实边界 (与 graph split 根因相互独立): `log_qwen3.5-9b.txt` 的 "ion pool exhausted" 记录确实存在, 两次运行模式不同 - PID 20562 拆 2005+1996 MiB 双 chunk (后块回退), PID 21326 单块 4002 MiB 整体回退 heap。mempool 4 GiB 装不下 5.0 GiB 全模型是事实, 但容量回退的受害者不是 ssm_out: 4002 MiB hexagon 权重块里 2005 MiB 进 mempool、1996 MiB 回退 heap, heap 块内 tensor 仍属 hexagon buft、仍由 DSP 经 mirror 执行, 不产生 split。真正落入 CPU 的只有 Q5_K 的 ssm_out.weight (类型被 validator 拒绝, 调度阶段判给 CPU buft, 264 MiB 从未进 hexagon 权重块)。容量回退的真实代价体现在 p5/p12 mirror overhead (~200 ms/token), 是另一条独立成本链 (见下文 8.4 节)。
+mempool 容量问题的真实边界 (与 graph split 根因相互独立): `log_qwen3.5-9b.txt` 的 "ion pool exhausted" 记录确实存在, 两次运行模式不同 - PID 20562 拆 2005+1996 MiB 双 chunk (后块回退), PID 21326 单块 4002 MiB 整体回退 heap。mempool 4 GiB 装不下 5.0 GiB 全模型是事实, 但容量回退影响的对象不是 ssm_out: 4002 MiB hexagon 权重块里 2005 MiB 进 mempool、1996 MiB 回退 heap, heap 块内 tensor 仍属 hexagon buft，DSP 通过 mirror 执行, 不产生 split。真正落入 CPU 的只有 Q5_K 的 ssm_out.weight (类型被 validator 拒绝, 调度阶段判给 CPU buft, 264 MiB 从未进 hexagon 权重块)。容量回退的真实代价体现在 p5/p12 mirror overhead (~200 ms/token), 是另一条独立成本链 (见下文 8.4 节)。
 
-最短修复路径: 在 `set_tensor` 时把 Q5_K repack 为 Q4_0, 复用 [ggml-hexagon-jz.cpp:3329](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L3329) 已有的 "Q4_K/Q6_K are stored as Q4_0" repack 机制, 24 个 split 直接消除, batch_calls 6400 -> 256。改动集中在 set_tensor 量化类型转换与 validator 放行, 比 scatter-gather (DSP 端 descriptor 协议扩展) 简单一个量级。
+最短修复路径: 在 `set_tensor` 时把 Q5_K repack 为 Q4_0, 复用 [ggml-hexagon-jz.cpp：ggmlhexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 已有的 "Q4_K/Q6_K are stored as Q4_0" repack 机制, 24 个 split 直接消除, batch_calls 6400 -> 256。改动集中在 set_tensor 量化类型转换与 validator 放行, 比 scatter-gather (DSP 端 descriptor 协议扩展) 简单一个量级。
 
 #### 8.3.3 JZ 与 QCOM 的 Q5_K split 拓扑相同
 
-QCOM 同样拒绝 Q5_K, JZ 与 QCOM 的 Q5_K split 拓扑相同。这是代码级事实而非推测: QCOM `ggml_hexagon_supported_mul_mat` ([ggml-hexagon.cpp:2783-2853](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L2783-L2853)) 的 src0 switch 只认 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4/F16/F32, Q5_K 同样走 `default: return false` (L2841-2842), 且 QCOM 没有 JZ 的 Q4_K/Q6_K -> Q4_0 repack 机制 (`ggml_hexagon_is_repack_type` L210-214 不含任何 K-quants)。同一 upstream scheduler 面对同一张 cgraph 必然给出同样的 24 个 CPU split。
+QCOM 同样拒绝 Q5_K, JZ 与 QCOM 的 Q5_K split 拓扑相同。这是代码级事实而非推测: QCOM `ggml_hexagon_supported_mul_mat` ([ggml-hexagon.cpp：ggml_hexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 的 src0 switch 只认 Q4_0/Q4_1/Q8_0/IQ4_NL/MXFP4/F16/F32, Q5_K 同样走 `default: return false` ([ggml-hexagon.cpp：ggml_hexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)), 且 QCOM 没有 JZ 的 Q4_K/Q6_K -> Q4_0 repack 机制 (`ggml_hexagon_is_repack_type` ([ggml-hexagon.cpp：ggml_hexagon_is_repack_type](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 不含任何 K-quants)。同一 upstream scheduler 面对同一张 cgraph 必然给出同样的 24 个 CPU split。
 
-从算子层面看, SOLVE_TRI / SSM_CONV / GATED_DELTA_NET 三个算子签名与 JZ 一模一样, 对比 [htp/gated-delta-net-ops.c:1079-1147](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/gated-delta-net-ops.c#L1079-L1147) 与 [kernels/gated-delta-net-ops.c:1079-1147](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/gated-delta-net-ops.c#L1079-L1147) 完全相同; [htp/main.c:697-708](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c#L697-L708) 的 op dispatch 也无 fused ssm_out。QCOM 的 24 个 Q5_K split 产生与 JZ 相同数量的 Q5_K sub-graph 段, 差别只在 per-call 提交成本 (QCOM 额外的 lm_head CPU split 见 8.5.4)。
+从算子层面看, SOLVE_TRI / SSM_CONV / GATED_DELTA_NET 三个算子签名与 JZ 一模一样, 对比 [gated-delta-net-ops.c：op_gated_delta_net](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/gated-delta-net-ops.c) 与 [gated-delta-net-ops.c：op_gated_delta_net](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/gated-delta-net-ops.c) 完全相同; [main.c：execute_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) 的 op dispatch 也无 fused ssm_out。QCOM 的 24 个 Q5_K split 产生与 JZ 相同数量的 Q5_K sub-graph 段, 差别只在 per-call 提交成本 (QCOM 额外的 lm_head CPU split 见 8.5.4)。
 
 `graphs reused = 253 / 255 = 99.2%` 是 upstream llama.cpp scheduler 的 cgraph 结构复用计数, 表示 253/255 decode 步复用切分拓扑, 不是提交次数, 与每 token 24 段 DSP 提交不矛盾 (第 25 段 main graph 为 cache hit)。
 
@@ -1761,15 +1728,15 @@ split 修复是后续一切提交路径优化的前置条件: 不先把 24 个 C
 |---|---|---|
 | A. QuRT 内存 API 有 32/64-bit 两套 | QuRT RTOS User Guide §2.6 / §21 | 32-bit 操作为向后兼容, 64-bit 操作 (后缀 `_64`) 可访问 > 4 GB 物理地址, 但 PA 端 64-bit 操作不改变 user VA 32-bit 限制 |
 | B. V79 user-mode VA 是 32-bit | V79 PRM §1.1 | 32-bit general registers (R0-R31)、32-bit memory addressing modes、single 32-bit VA space |
-| C. HAP_mmap 2 GB 限制已被 HAP_mmap2 解决 | HAP_mem.h:351-364 / :380 | HAP_mmap 注释明确写 "limited to buffer size less then 2 GB", HAP_mmap2 用 size_t 64-bit 无 documented size limit。JZ v79 路径已用 HAP_mmap2 (kernels/entry.c:2155) |
-| D. rpcmem_alloc2 已是 64-bit | refs/fastrpc/inc/rpcmem.h:171 | `rpcmem_alloc2(int heapid, uint32_t flags, size_t size)` 签名是 size_t 64-bit |
-| E. FastRPC ioctl 内核接口是 64-bit | refs/fastrpc/inc/fastrpc_ioctl.h:122 / :132 | `fastrpc_ioctl_req_mmap.__u64 size` 与 `fastrpc_ioctl_munmap_req.__u64 length` 都是 64-bit |
+| C. HAP_mmap 2 GB 限制已被 HAP_mmap2 解决 | [HAP_mem.h：HAP_mmap](file:///home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0/incs/HAP_mem.h) / [HAP_mem.h：HAP_mmap2](file:///home/zhouwg/develop/ggml-hexagon/prebuilts/Hexagon_SDK/6.6.0.0/incs/HAP_mem.h) | HAP_mmap 注释明确写 "limited to buffer size less then 2 GB", HAP_mmap2 用 size_t 64-bit 无 documented size limit。JZ v79 路径已用 HAP_mmap2 ([entry.c：ggml_dsp_register_ion](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/kernels/entry.c)) |
+| D. rpcmem_alloc2 已是 64-bit | [rpcmem.h：rpcmem_alloc2](file:///home/zhouwg/develop/ggml-hexagon/refs/fastrpc/inc/rpcmem.h) | `rpcmem_alloc2(int heapid, uint32_t flags, size_t size)` 签名是 size_t 64-bit |
+| E. FastRPC ioctl 内核接口是 64-bit | [fastrpc_ioctl.h：fastrpc_ioctl_req_mmap](file:///home/zhouwg/develop/ggml-hexagon/refs/fastrpc/inc/fastrpc_ioctl.h) / [fastrpc_ioctl.h：fastrpc_ioctl_munmap_req](file:///home/zhouwg/develop/ggml-hexagon/refs/fastrpc/inc/fastrpc_ioctl.h) | `fastrpc_ioctl_req_mmap.__u64 size` 与 `fastrpc_ioctl_munmap_req.__u64 length` 都是 64-bit |
 
-实证 (多次实验经验值): 8Gen4 (HTP arch V79) probe_slots 最大 4032 MiB ([ggml-hexagon-jz.cpp:1743](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1743)), 4096 MiB 不在列表中。4032 MiB = 4 GiB - 64 MiB, 差值 64 MiB 对应 kernel allocator + QuRT 32-bit 字段的 page table / metadata 开销。QCOM 通过 per-chunk 分配 (get_max_size 返回 1 GiB, 最多 16 个 chunk) 绕过 4 GiB VA 限制支持大模型 (见 8.6.5 节源码分析), developer.md 亦提及多设备 layer-splitting 方案 ([developer.md:40-47](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/snapdragon/developer.md#L40-L47))。
+实证 (多次实验经验值): 8Gen4 (HTP arch V79) probe_slots 最大 4032 MiB ([ggml-hexagon-jz.cpp：ggmlhexagon_init_rpcmempool](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)), 4096 MiB 不在列表中。4032 MiB = 4 GiB - 64 MiB, 差值 64 MiB 对应 kernel allocator + QuRT 32-bit 字段的 page table / metadata 开销。QCOM 通过 per-chunk 分配 (get_max_size 返回 1 GiB, 最多 16 个 chunk) 绕过 4 GiB VA 限制支持大模型 (见 8.6.5 节源码分析), developer.md 亦提及多设备 layer-splitting 方案 ([developer.md:40-47](file:///home/zhouwg/develop/ggml-hexagon/docs/backend/snapdragon/developer.md#L40-L47))。
 
 > 注: 以下归因为推测性分析, 缺乏 QCOM 内部源码或文档的直接证据, 仅供方向参考。
 
-4 GiB 限制的可能归因 (推测, 按可能性排序): (1) 最可能 -- QCOM kernel allocator module 的内部 32-bit 截断, 即便 mainline Linux 已升级 `ion_allocation_data.len` 到 64-bit, QCOM Hexagon DSP 配套内核的 allocator driver 可能仍保留旧 ABI, 4032 MiB 探针边界正好对应 32-bit `len` 字段 + allocator metadata 开销; (2) 可能 -- QuRT / HAP_mmap2 内部实现细节, HAP_mmap2 签名是 size_t 但内部可能仍走 QuRT 32-bit 内存池操作, PA > 4 GiB 时需切到 `_64` 版本 (QCOM 在 [htp/main.c:181-184](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c#L181-L184) 仍保留 `HTP_MMAP_MAX_VMEM = 2147483648u` 2 GB 限制是旧版痕迹); (3) 最弱 -- Hexagon V79 32-bit user-mode VA 限制, 这条不直接限制 allocator 分配大小, allocator 分配后通过 fastrpc_mmap 把 fd 映射到 DSP VA, VA 4 GB 不够装 5.10 GB 单 buffer 时才会成为约束。
+4 GiB 限制的可能归因 (推测, 按可能性排序): (1) 最可能 -- QCOM kernel allocator module 的内部 32-bit 截断, 即便 mainline Linux 已升级 `ion_allocation_data.len` 到 64-bit, QCOM Hexagon DSP 配套内核的 allocator driver 可能仍保留旧 ABI, 4032 MiB 探针边界正好对应 32-bit `len` 字段 + allocator metadata 开销; (2) 可能 -- QuRT / HAP_mmap2 内部实现细节, HAP_mmap2 签名是 size_t 但内部可能仍走 QuRT 32-bit 内存池操作, PA > 4 GiB 时需切到 `_64` 版本 (QCOM 在 [main.c：htp_iface_mmap](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/htp/main.c) 仍保留 `HTP_MMAP_MAX_VMEM = 2147483648u` 2 GB 限制是旧版痕迹); (3) 最弱 -- Hexagon V79 32-bit user-mode VA 限制, 这条不直接限制 allocator 分配大小, allocator 分配后通过 fastrpc_mmap 把 fd 映射到 DSP VA, VA 4 GB 不够装 5.10 GB 单 buffer 时才会成为约束。
 
 #### 8.4.2 Qwen3.5-9B 在 single mempool 中的内存布局
 
@@ -1817,7 +1784,7 @@ mempool 注册容量 4024 MiB (probe 4032 - 8 MiB reserve)
 
 #### 8.4.3 Mirror 机制原理
 
-Mirror 机制工作正常, 但 cache hit 跳过了 scan 却没跳过 memcpy。看 [ggml-hexagon-jz.cpp:5936-6014](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5936-L6014):
+Mirror 机制工作正常, 但 cache hit 跳过了 scan 却没跳过 memcpy。看 [ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp):
 
 ```cpp
 // Cache hit 只回填 metadata, 不跳过 memcpy
@@ -1840,7 +1807,7 @@ for (auto & kv : buffer_mirrors_map) {
 }
 ```
 
-设计根因: mirror 区域是临时 ion_region, 每次 call 结束被 Phase 12 末尾的 free 释放 ([ggml-hexagon-jz.cpp:6591-6597](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L6591-L6597)), 下一次 call mempool 区域被复用, 必须重新拷贝。cache hit 跳过的只是 tensor_src scan (~1 ms/call), memcpy 本身的开销还在。
+设计根因: mirror 区域是临时 ion_region, 每次 call 结束被 Phase 12 末尾的 free 释放 ([ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)), 下一次 call mempool 区域被复用, 必须重新拷贝。cache hit 跳过的只是 tensor_src scan (~1 ms/call), memcpy 本身的开销还在。
 
 当前 mirror 的数据搬运路径:
 
@@ -1868,7 +1835,7 @@ for (auto & kv : buffer_mirrors_map) {
 | mempool 占用 | 临时 mirror 区常驻周转 | 0 (weight 不在 mempool) |
 | scheduler 视角 | weight 在 hexagon buft heap 回退 -> 无 split, 但每 call 付 mirror memcpy | weight 在 DSP-accessible buffer -> 无 split 且无 mirror |
 
-DMA 拉取路径需要 JZ 补齐以下能力: (1) buffer type 支持 cross-buffer view (当前 [repack_buffer_type](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L352-L356) 只能描述 mempool 内的 buffer); (2) DSP 端 execute_op 支持 scatter-gather descriptor; (3) AP 不再为 heap 回退权重走临时 mirror; (4) cache coherency 协议扩展 (dc ivac, 复用 JZ 既有 0xFFFD pre-inval 机制, 详见第六章 Path-G)。
+DMA 拉取路径需要 JZ 补齐以下能力: (1) buffer type 支持 cross-buffer view (当前 [ggml-hexagon-jz.cpp：cgraph_cache](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 只能描述 mempool 内的 buffer); (2) DSP 端 execute_op 支持 scatter-gather descriptor; (3) AP 不再为 heap 回退权重走临时 mirror; (4) cache coherency 协议扩展 (dc ivac, 复用 JZ 既有 0xFFFD pre-inval 机制, 详见第六章 Path-G)。
 
 #### 8.4.4 Mirror memcpy 代价
 
@@ -1879,7 +1846,7 @@ Qwen3.5-9B 推理时 mirror memcpy 的具体开销 (6 模型 CI 实测, batch_ca
 - dsp_exec = 31.24 s (17.1%), 是 DSP 真实计算
 - mirror memcpy ~2 GiB/token x 256 token @ ~10 GB/s = ~51 s, 其余 ~83 s 是随 call 数线性的固定开销 (6144 calls x ~13 ms)
 
-mirror memcpy 开销占 TG wall time 的 78% (136.5 s / 174.4 s, 专门 profiling 基线)。Path-E mechanism 2 (cache hit 跳过 memcpy) 对 Qwen3.5-9B 无效: 临时 mirror 区每 call 释放不是单纯的设计疏忽, 而是容量所迫 -- 常驻权重已占 ~2.1 GiB, mempool 余量 ~1.5 GiB, 装不下 ~2 GiB heap 权重的常驻镜像 (2.1 + 2.0 = 4.1 GiB > 4 GiB 硬顶)。即使 patch 让 cache hit 跳过 memcpy, 也没有空间让镜像常驻。该 patch 只对小 mirror 集场景 (如五模型的 mask/激活镜像) 有效; Qwen3.5-9B 的 mirror 消除只能靠 scatter-gather / DMA 拉取, 让 DSP 直接读 system memory 的 heap 权重。
+mirror memcpy 开销占 TG wall time 的 78% (136.5 s / 174.4 s, 专门 profiling 基线)。Path-E mechanism 2 (cache hit 跳过 memcpy) 对 Qwen3.5-9B 无效: 临时 mirror 区每 call 释放不是单纯的设计疏忽, 而是容量所迫 -- 常驻权重已占 ~2.1 GiB, mempool 余量 ~1.5 GiB, 装不下 ~2 GiB heap 权重的常驻镜像 (2.1 + 2.0 = 4.1 GiB > 4 GiB 硬上限)。即使 patch 让 cache hit 跳过 memcpy, 也没有空间让镜像常驻。该 patch 只对小 mirror 集场景 (如五模型的 mask/激活镜像) 有效; Qwen3.5-9B 的 mirror 消除只能靠 scatter-gather / DMA 拉取, 让 DSP 直接读 system memory 的 heap 权重。
 
 p5/p12 = 136.5 s 的分解: 固定开销 (scan/descriptor/sync/dcinva, 随 call 数线性) 6400 x ~13 ms = ~83 s, mirror memcpy ~2 GiB/token x 256 token @ ~10 GB/s = ~51 s。dsp_exec (p10) = 33.7 s 是 DSP 真实计算 (17.1%), 其余 ~4.2 s 是 p1+p6+p8+p11 等。QCOM 端 unaccounted 0.0% 是时间归类结果 (`common_perf_print` 只有高层类别, `flush()` 阻塞等待计入 eval, 非 AP-DSP 完全 overlap, 详见 8.8 第4点), cgraph cache 99.2% hit 让 99% 的 decode 步走 cache 复用路径。
 
@@ -1887,21 +1854,21 @@ p5/p12 = 136.5 s 的分解: 固定开销 (scan/descriptor/sync/dcinva, 随 call 
 
 #### 8.5.1 QCOM dspqueue 机制
 
-QCOM 使用高通 Hexagon SDK 提供的 dspqueue 库 ([ggml-hexagon.cpp:41-42](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L41-L42)):
+QCOM 使用高通 Hexagon SDK 提供的 dspqueue 库 ([ggml-hexagon.cpp：dspqueue.h](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)):
 
 ```cpp
 #include <dspqueue.h>   // 持久化 AP-DSP 队列
 #include <rpcmem.h>
 ```
 
-启动时建一条常驻队列 ([line 1802-1813](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1802-L1813)):
+启动时建一条常驻队列 ([ggml-hexagon.cpp：ggml_hexagon_session::allocate](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)):
 
 ```cpp
 err = dspqueue_create(this->domain_id, 0, req_q_size, ...);
 // AP <-> DSP 之间一条持久化的 dspqueue, 单次创建, 多次复用
 ```
 
-`ggml_hexagon_session::enqueue_op` (line 1628-1633) 不直接走 DSP, 而是累积到本地 op_batch, 满了才 flush:
+`ggml_hexagon_session::enqueue_op` ([ggml-hexagon.cpp：ggml_hexagon_session::enqueue_op](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 不直接走 DSP, 而是累积到本地 op_batch, 满了才 flush:
 
 ```cpp
 void ggml_hexagon_session::enqueue_op(const htp_opnode & node) {
@@ -1912,14 +1879,14 @@ void ggml_hexagon_session::enqueue_op(const htp_opnode & node) {
 }
 ```
 
-`flush_batch` (line 1604-1626) 一次写整批:
+`flush_batch` ([ggml-hexagon.cpp：ggml_hexagon_session::flush_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 一次写整批:
 
 ```cpp
 int err = dspqueue_write(this->queue, 0, 1, &dbuf, sizeof(req), ...);
 // 一次写 N 个 op, dspqueue 内部排队, DSP 后台消费
 ```
 
-`dspqueue_read` (line 1577-1579) 读响应也是非阻塞的:
+`dspqueue_read` ([ggml-hexagon.cpp：ggml_hexagon_session::flush_pending](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 读响应也是非阻塞的:
 
 ```cpp
 int err = dspqueue_read(this->queue, &flags, 1, &n_dbufs, &dbuf, ..., timeo);
@@ -1928,7 +1895,7 @@ if (err == AEE_EEXPIRED || err == AEE_EWOULDBLOCK) {
 }
 ```
 
-QCOM 的 graph_compute 入口 ([line 3707-3715](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L3707-L3715)) 展示完整 producer-consumer 模式:
+QCOM 的 graph_compute 入口 ([ggml-hexagon.cpp：ggml_backend_hexagon_graph_compute](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 展示完整 producer-consumer 模式:
 
 ```cpp
 // Queue and execute
@@ -1940,11 +1907,11 @@ if (opt_opstage & HTP_OPSTAGE_QUEUE) {
 sess->flush();  // 末尾统一等
 ```
 
-AP 端把所有 op 入队后立刻返回, DSP 后台消费; AP 端在 DSP 跑 op 的同时可以准备下一批 buffer / 算参数。QCOM 的 FastRPC call 仅用于 open/close/get 等准备工作, AP 与 DSP 间数据交换通过读写 dspqueue ring buffer 触发, 不走 FastRPC 调用; JZ 每个 sub-graph 都走一次同步 FastRPC invoke, 这是 Qwen3.5-9B per-call overhead 214x 差距的根因。
+AP 端把所有 op 入队后立刻返回, DSP 后台消费; AP 端在 DSP 执行 op 的同时可以准备下一批 buffer / 算参数。QCOM 的 FastRPC call 仅用于 open/close/get 等准备工作, AP 与 DSP 间数据交换通过读写 dspqueue ring buffer 触发, 不走 FastRPC 调用; JZ 每个 sub-graph 都走一次同步 FastRPC invoke, 这是 Qwen3.5-9B per-call overhead 214x 差距的根因。
 
 #### 8.5.2 JZ 同步 FastRPC vs QCOM async
 
-JZ 的 [graph_compute_batch 入口](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5362-L5374) 每个 batch_call 对应一次 `ggml_dsp_execute_batch` (同步 FastRPC + 同步等 dspqueue_buffer):
+JZ 的 [ggml-hexagon-jz.cpp：ggmlhexagon_backend_graph_compute_batch](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) 每个 batch_call 对应一次 `ggml_dsp_execute_batch` (同步 FastRPC + 同步等 dspqueue_buffer):
 
 - 每个 sub-graph 一次 fastrpc_invoke (synchronous)
 - AP 端发完就阻塞等 DSP 返回
@@ -1958,7 +1925,7 @@ JZ 的 [graph_compute_batch 入口](file:///home/zhouwg/develop/ggml-hexagon/ggm
 |---|---:|---:|---:|---|
 | Hexagon sub-graph 提交次数 | 24 x 256 = 6144 次 FastRPC | N/A (QCOM 不输出 batch_calls) | N/A | JZ dump_perf_stats batch_calls=6144 |
 | per-call overhead | 21.4 ms (FastRPC + mirror memcpy) | ~0.1 ms (dspqueue_write 反推) | 214x | JZ dump_perf_stats avg=21369 us |
-| AP-DSP overlap | 否 (同步阻塞) | 是 (dspqueue 异步) | - | ggml-hexagon.cpp:3707-3715 |
+| AP-DSP overlap | 否 (同步阻塞) | 是 (dspqueue 异步) | - | [ggml-hexagon.cpp：ggml_backend_hexagon_graph_compute](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp) |
 | cgraph cache hit rate | 99.1% (6088/6144) | 99.2% (253/255 graphs reused) | ~1.0x | 接近但非完全一致 |
 | 每 token 提交成本 | 24 x 21.4 = 514 ms | N/A (call count 未知) | 214x (per-call) | Table-34 |
 | TG 总耗时 | 174.4 s | 33.1 s | 5.27x | JZ dump_perf_stats vs QCOM eval time |
@@ -1975,7 +1942,7 @@ JZ cgraph cache (99.1%, 6088/6144) 与 QCOM `graphs reused` (99.2%, 253/255) 命
 
 #### 8.5.4 JZ 净优势: lm-head on DSP
 
-除 JZ 与 QCOM 共有的 ssm_out split 外, QCOM 还有 JZ 没有的额外 lm_head split: QCOM `ggml_hexagon_supported_mul_mat` ([ggml-hexagon.cpp:2805-2808](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L2805-L2808)) 对 `ne[1] > 32768` 硬编码拒绝 lm_head (Qwen3.5-9B 的 output.weight 维度 248320 远超阈值)。
+除 JZ 与 QCOM 共有的 ssm_out split 外, QCOM 还有 JZ 没有的额外 lm_head split: QCOM `ggml_hexagon_supported_mul_mat` ([ggml-hexagon.cpp：ggml_hexagon_supported_mul_mat](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 对 `ne[1] > 32768` 硬编码拒绝 lm_head (Qwen3.5-9B 的 output.weight 维度 248320 远超阈值)。
 
 JZ 靠 Q6_K -> Q4_0 repack + mempool 连续 IOVA 把 795.70 MiB lm_head 留在 DSP 执行, 这是 JZ 的净优势。QCOM 端 lm_head 走 CPU, TG 端到端比 JZ 多 ~80 ms/token。Qwen3.5-9B 的 output.weight 是 Q6_K [4096, 248320] (全模型唯一 Q6_K 张量), 经 set_tensor repack 为 Q4_0 后省 250 MiB (795.70 -> 545.62)。这是 JZ single mempool 架构 (单一连续 IOVA 范围) 的核心优势: 让 lm_head 这类涉及整个 vocab 范围 embedding/logits 的算子留在 DSP 执行。
 
@@ -2005,11 +1972,11 @@ Qwen3.5-9B 性能修复是三条独立路径的叠加, 各自解决一个问题,
 | 4. 异步化提交 | 进一步压平 per-call overhead (~214x 差距真因) | 提交路径 | 叠加后 8-10 tok/s, 追平/超过 QCOM | 中 (改 fastrpc 路径) | 中 |
 | 远期. producer-consumer | AP 端 12 阶段合并为 descriptor 生产, DSP 端独立消费 | 提交路径 | 7 -> 8-10 tok/s (超 QCOM 1.0-1.3x) | 大 (动 12 阶段 pipeline) | 高 |
 
-步骤 0 是 Qwen3.5-9B 性能修复的"第一刀": 不先消除 24 个 CPU 段, 后续批提交/流水线无从合并 (25 段不合并, op_batch 能批的只是 descriptor 准备, 段间同步开销还在)。步骤 1b 是大模型 (> 4 GB) 的"容量前提"。1b / 1c / 1d 三选一不互斥: 1d 工程最干净但重构量最大, 1c 仍受 V79 4 GiB 总 VA 限制, **1b scatter-gather 是容量/mirror 维度的 clear win**。
+步骤 0 是 Qwen3.5-9B 性能修复的"第一刀": 不先消除 24 个 CPU 段, 后续批提交/流水线无从合并 (25 段不合并, op_batch 能批的只是 descriptor 准备, 段间同步开销还在)。步骤 1b 是大模型 (> 4 GB) 的"容量前提"。1b / 1c / 1d 三选一不互斥: 1d 工程最干净但重构量最大, 1c 仍受 V79 4 GiB 总 VA 限制, **1b scatter-gather 是容量/mirror 维度的明显更优**。
 
-per-buffer 替代单 mempool 方案不在主路径表: 它会推翻 JZ single mempool 架构优势 (失去 offload lmhead 能力, qwen1 / 2B / 8B 等 < 4 GiB 模型 TG 可能显著下降), 是架构层面 trade-off, 不是 clear win。待用户明确接受"放弃 JZ 架构优势换取 Qwen3.5-9B+ 容量"后再评估。
+per-buffer 替代单 mempool 方案不在主路径表: 它会推翻 JZ single mempool 架构优势 (失去 offload lmhead 能力, Qwen1.5-1.8B / 2B / 8B 等 < 4 GiB 模型 TG 可能显著下降), 是架构层面取舍, 不是明显更优。待用户明确接受"放弃 JZ 架构优势换取 Qwen3.5-9B+ 容量"后再评估。
 
-建议优先策略: 步骤 0 (Q5_K repack) 立即落地并过五模型 CI, 同步并行 1b (scatter-gather) 与 2 (op_batch), 实施期间持续验证 qwen1 / 2B / 8B 等 < 4 GiB 模型 TG 不退化。1c / 1d 作为更长线储备 (1-2 个月工时), 等 1b 决策后再评估。5 模型 CI (Table-11) 与 6 模型 CI AB test 关系: 5 模型 CI 跑 JZ 单后端 (无 QCOM 对比), 用于回归基线; 6 模型 CI AB test 跑 JZ vs QCOM 完整对比, 用于评估 JZ 净优势/劣势。两套 CI 互补, 不互斥。
+建议优先策略: 步骤 0 (Q5_K repack) 立即落地并过五模型 CI, 同步并行 1b (scatter-gather) 与 2 (op_batch), 实施期间持续验证 Qwen1.5-1.8B / 2B / 8B 等 < 4 GiB 模型 TG 不退化。1c / 1d 作为更长线储备 (1-2 个月工时), 等 1b 决策后再评估。5 模型 CI (Table-11) 与 6 模型 CI AB test 关系: 5 模型 CI 跑 JZ 单后端 (无 QCOM 对比), 用于回归基线; 6 模型 CI AB test 跑 JZ vs QCOM 完整对比, 用于评估 JZ 净优势/劣势。两套 CI 互补, 不互斥。
 
 #### 8.6.2 步骤 0: Q5_K repack
 
@@ -2019,19 +1986,19 @@ per-buffer 替代单 mempool 方案不在主路径表: 它会推翻 JZ single me
 - 收益确定: 24 个 split 直接消除, batch_calls 6144 -> 256, TG 1.48 -> ~2.7 tok/s
 - 是后续一切提交路径优化的前置条件 (不消除 24 个 CPU 段, 批提交/流水线无从合并)
 - 副作用可控: Q5_K -> Q4_0 是有损重量化 (与既有 Q4_K/Q6_K -> Q4_0 同性质), ssm_out 权重体积 264 -> 216 MiB, 加载期一次性转换; 需先做 CPU vs DSP 数值对比验证输出不乱码 (Qwen3.5-9B 乱码问题与 GATED_DELTA_NET 相关, repack 后该层输入分布变化需回归)
-- < 4 GiB 模型 (qwen1/2B/8B) 不含 Q5_K ssm_out, 完全不受影响 (五模型 CI 回归确认)
+- < 4 GiB 模型 (Qwen1.5-1.8B/2B/8B) 不含 Q5_K ssm_out, 完全不受影响 (五模型 CI 回归确认)
 
 #### 8.6.3 步骤 1b: Scatter-gather
 
-scatter-gather 是容量/mirror 根治路径 (clear win):
+scatter-gather 是容量/mirror 根治路径 (明显更优):
 
 - 保留 JZ single mempool 架构, 主 mempool 仍装 lmhead + 主要权重
 - 消除 heap 回退权重的 ~200 ms/token mirror memcpy, 叠加步骤 0 后 TG ~6-7 tok/s
 - 把可装模型上限从 4 GiB 提到 24 GiB (13B/20B 可装载)
-- < 4 GiB 模型 (qwen1/2B/8B) 继续用 single mempool, 完全不受影响
+- < 4 GiB 模型 (Qwen1.5-1.8B/2B/8B) 继续用 single mempool, 完全不受影响
 - 保留 lmhead offload 架构优势, Qwen3.5-9B lmhead 继续 DSP 执行
 - 实施成本集中在 DSP 端 entry.c scatter-gather 支持 (1-2 个月工时)
-- 24 个 ssm_out split 不在本路径范围: 它们是 Q5_K 类型拒绝, 由步骤 0 覆盖。scatter-gather 够不到 ssm_out.weight (从未进入 hexagon 权重块)
+- 24 个 ssm_out split 不在本路径范围: 它们是 Q5_K 类型拒绝, 由步骤 0 覆盖。scatter-gather 无法覆盖 ssm_out.weight (从未进入 hexagon 权重块)
 
 DMA 拉取路径的本质 (与 scatter-gather 等效): DSP 端 HAP_mmap2 映射 system memory 物理页, 第一次冷 DMA ~1 ms, 后续命中 L2 cache 0 搬运。weight 不在 mempool, mempool 占用为 0。需要 JZ 当前没有的支持: (1) buffer type 支持 cross-buffer view; (2) DSP 端 execute_op 支持 scatter-gather descriptor (远端 system memory 区域 + 任意 offset); (3) AP 不再为 heap 回退权重走临时 mirror; (4) cache coherency 协议扩展 (dc ivac)。
 
@@ -2052,7 +2019,7 @@ scatter-gather 与 Q5_K repack、异步化提交正交: 三者针对 Qwen3.5-9B 
 
 **短期 op_batch 累积 (1-2 周)**: 同一 batch_calls 内多个 sub-graph 合成一个 fastrpc descriptor, 复用现有 `ggml_dsp_execute_batch` 路径。TG 1.48 -> 2.5-3.5 tok/s。风险低, 改动小 (改 1 个函数), 不动 Hexagon SDK 调用约定, 仅在 AP 端做 descriptor 复用。注意步骤 0 落地后每 token Hexagon 段从 25 降到 1, op_batch 的"多段合一"收益被大部分覆盖, 更应理解为步骤 0 落地前的过渡手段。具体改动点: (1) `ggmlhexagon_backend_graph_compute_batch` 入口处增加 `op_batch_t` 本地累积; (2) `ggml_dsp_execute_batch` 改为支持 N-合-1 descriptor; (3) batch 边界 / `flush_batch` 时统一等一次 FastRPC 返回; (4) AP 侧的 p5/p12 (mirror) 流程合并到 batch 级。
 
-**中期 async FastRPC**: 异步 fastrpc_invoke, AP 端不阻塞, DSP 后台消费。TG 3.5 -> 6-7.7 tok/s。风险中, 需改 fastrpc 路径 + 错误处理, 5 模型 CI 全过。**当前阻塞**: JZ 代码已通过 `ggmlhexagon_is_async_fastrpc_supported()` ([ggml-hexagon-jz.cpp:1468-1492](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1468-L1492)) 查询 `ASYNC_FASTRPC_SUPPORT` 能力, 实测 `async fastrpc supported 0` -- API 接口已存在但底层驱动能力被关闭。这与高通上游 PR #26049 (将缓存维护逻辑下放到算子内部, 迫使 JZ 维护独立 kernels/ 目录) 是类似模式: 高通对社区开发者不友好, 限制底层能力开放。
+**中期 async FastRPC**: 异步 fastrpc_invoke, AP 端不阻塞, DSP 后台消费。TG 3.5 -> 6-7.7 tok/s。风险中, 需改 fastrpc 路径 + 错误处理, 5 模型 CI 全过。**当前阻塞**: JZ 代码已通过 `ggmlhexagon_is_async_fastrpc_supported()` ([ggml-hexagon-jz.cpp：ggmlhexagon_is_async_fastrpc_supported](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)) 查询 `ASYNC_FASTRPC_SUPPORT` 能力, 实测 `async fastrpc supported 0` -- API 接口已存在但底层驱动能力被关闭。这与高通上游 PR #26049 (将缓存维护逻辑下放到算子内部, 迫使 JZ 维护独立 kernels/ 目录) 是类似模式: 高通限制底层能力开放。
 
 **远期 producer-consumer 流水线 (重构)**: AP 端 12 阶段合并为 descriptor 生产, DSP 端独立消费, 移除 1-12 阶段间的隐式同步。TG 7 -> 8-10 tok/s (超过 QCOM 1.0-1.3x)。风险高, 动 12 阶段 pipeline, 配合 K/V 量化可到 9-12 tok/s。
 
@@ -2064,13 +2031,13 @@ QCOM 与 JZ 实际控制 buffer 拆分的关键参数 `get_max_size()`:
 
 | 架构选择 | get_max_size() 返回 | ggml core 拆 chunk | DSP 端 4 GiB VA window 行为 | 总可装 weight | offload lmhead | 适用模型 |
 |---|---|---|---|---|---|---|
-| QCOM per-chunk | 1 GiB (默认, ggml-hexagon.cpp:1760) | 多个 1 GiB chunk (最多 16 个) | scatter-gather / sliding window 让 chunk 不一次性 mmap 进 4 GiB VA | n_chunks * 1 GiB <= 16 GiB | 不可 (per-buffer 拆散) | 9B/13B/20B 都可 |
-| JZ single-mempool | ~4 GiB (ggml-hexagon-jz.cpp:5136) | 1 个 4 GiB chunk (> 4 GiB 触发 V79 user VA 上限) | 整个 mempool 一次性 mmap 进 4 GiB VA | 4 GiB (V79 user VA hard cap) | 可 (单一连续 IOVA) | 9B/13B/20B 都不可 |
+| QCOM per-chunk | 1 GiB (默认, [ggml-hexagon.cpp：opt_mbuf](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) | 多个 1 GiB chunk (最多 16 个) | scatter-gather / sliding window 让 chunk 不一次性 mmap 进 4 GiB VA | n_chunks * 1 GiB <= 16 GiB | 不可 (per-buffer 拆散) | 9B/13B/20B 都可 |
+| JZ single-mempool | ~4 GiB ([ggml-hexagon-jz.cpp：ggmlhexagon_init_rpcmempool](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp)) | 1 个 4 GiB chunk (> 4 GiB 触发 V79 user VA 上限) | 整个 mempool 一次性 mmap 进 4 GiB VA | 4 GiB (V79 user VA hard cap) | 可 (单一连续 IOVA) | 9B/13B/20B 都不可 |
 | JZ scatter-gather (步骤 1b) | ~4 GiB (主 mempool 不变) | 主 mempool 1 个 4 GiB + 辅助 region | 主 mempool 连续 + 辅助 region scatter-gather | n_regions * < 4 GiB | 可 (主 mempool 仍连续) | 9B/13B/20B 都可 |
 
 ggml core 内部 mempool 机制 ([ggml-alloc.c](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-alloc.c)): `ggml_dyn_tallocr` 是动态 tall allocator, 每个 buffer type 一个, 内部维护 `tallocr_chunk[]` 数组 (最多 `GGML_VBUFFER_MAX_CHUNKS = 16` 个 chunk)。每个 chunk 是一个独立 backend buffer, 通过 `ggml_backend_buft_alloc_buffer(buft, chunk_size)` 分配。新 chunk 大小 = `MAX(min_size, max_chunk_size)`, 其中 `max_chunk_size = MIN(get_max_size(), SIZE_MAX/2)`。单 tensor 太大超过 chunk 时, 整 chunk 扩到能装下。QCOM `get_max_size` 返回 1 GiB, 所以 chunk_size 最大 1 GiB; JZ `get_max_size` 返回 ~4 GiB, 所以 chunk_size 最大 4 GiB -- 但 JZ `alloc_buffer` 是 bump allocator, 多次调用仍从同一个 `ctx->rpc_mempool` 切块, 总容量不变。
 
-QCOM 实际 per-chunk 分配路径 ([ggml-hexagon.cpp:1065-1075](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1065-L1075)):
+QCOM 实际 per-chunk 分配路径 ([ggml-hexagon.cpp：ggml_backend_hexagon_buffer_type_alloc_buffer](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)):
 
 ```cpp
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
@@ -2087,17 +2054,17 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
 }
 ```
 
-这里的 `size` 是 ggml core 传下来的 chunk_size (不是 per-tensor size)。QCOM `get_max_size` 返回 1 GiB, 所以 chunk_size 最大 1 GiB, ggml core 在内部 tallocr 中按需创建多个 1 GiB chunk。QCOM 在 `ggml_hexagon_measure_max_vmem` 中通过 `sbuf_alloc` + `sbuf_free` 试探性创建/销毁多个 1 GiB shared buffer, 记录最大值到 `this->max_vmem` ([ggml-hexagon.cpp:1641-1668](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1641-L1668))。运行时 `alloc_buffer` 每次按 chunk_size 调 `sbuf_alloc` 单独分配, 不依赖单一预分配 heap。这种"per-chunk 独立分配"配合 DSP 端 `HAP_mmap2` 在 4 GiB VA window 内动态 mmap/unmap, 配合 HVX scatter-gather descriptor 跳过 user VA 限制, 让 QCOM 能装下 16 GiB 模型 (16 chunk x 1 GiB)。
+这里的 `size` 是 ggml core 传下来的 chunk_size (不是 per-tensor size)。QCOM `get_max_size` 返回 1 GiB, 所以 chunk_size 最大 1 GiB, ggml core 在内部 tallocr 中按需创建多个 1 GiB chunk。QCOM 在 `ggml_hexagon_measure_max_vmem` 中通过 `sbuf_alloc` + `sbuf_free` 试探性创建/销毁多个 1 GiB shared buffer, 记录最大值到 `this->max_vmem` ([ggml-hexagon.cpp：ggml_hexagon_measure_max_vmem](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp))。运行时 `alloc_buffer` 每次按 chunk_size 调 `sbuf_alloc` 单独分配, 不依赖单一预分配 heap。这种"per-chunk 独立分配"配合 DSP 端 `HAP_mmap2` 在 4 GiB VA window 内动态 mmap/unmap, 配合 HVX scatter-gather descriptor 跳过 user VA 限制, 让 QCOM 能装下 16 GiB 模型 (16 chunk x 1 GiB)。
 
-JZ 极简方案验证失败: 先前假设"改 `get_max_size` 为 1 GiB 让 ggml core 拆 chunk"是 1-2 行代码改动。但 JZ `alloc_buffer` 不是按 chunk 调 `rpcmem_alloc2` 分配独立 buffer, JZ 实际架构是"probe 阶段探测最大 mempool 单块 + 一次预分配大块 mempool + bump allocator 切块" ([ggml-hexagon-jz.cpp:1749-1759](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1749-L1759) probe, [line 1767-1768](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L1767-L1768) pre-allocate, [line 5000-5096](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp#L5000-L5096) alloc_buffer)。改 `get_max_size = 1 GiB` 的实际效果: ggml core 拆为多个 1 GiB chunk -> 调 `alloc_buffer` 多次 -> 每次仍然从同一个 `ctx->rpc_mempool` 切 1 GiB -> 总容量 4 GiB 没变 -> Qwen3.5-9B 5.10 GB 仍然装不下。
+JZ 极简方案验证失败: 先前假设"改 `get_max_size` 为 1 GiB 让 ggml core 拆 chunk"是 1-2 行代码改动。但 JZ `alloc_buffer` 不是按 chunk 调 `rpcmem_alloc2` 分配独立 buffer, JZ 实际架构是"probe 阶段探测最大 mempool 单块 + 一次预分配大块 mempool + bump allocator 切块" ([ggml-hexagon-jz.cpp：ggmlhexagon_init_rpcmempool](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) probe, [ggml-hexagon-jz.cpp：ggmlhexagon_probe_dspinfo](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) pre-allocate, [ggml-hexagon-jz.cpp：ggml_backend_hexagon_buffer_type_alloc_buffer](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp) alloc_buffer)。改 `get_max_size = 1 GiB` 的实际效果: ggml core 拆为多个 1 GiB chunk -> 调 `alloc_buffer` 多次 -> 每次仍然从同一个 `ctx->rpc_mempool` 切 1 GiB -> 总容量 4 GiB 没变 -> Qwen3.5-9B 5.10 GB 仍然装不下。
 
 JZ single-mempool 优化历史背景: JZ 之前的所有"single-mempool 优化" (mirror 机制、Phase 1-12 调度、p10 测量) 都是基于"所有 weight 在一个连续 IOVA 范围"的假设。这是因为 ggml core 默认行为是 `get_max_size = mempool_len` 时只创建一个 4 GiB 单 chunk。即使 ggml core 已支持多 chunk (`GGML_VBUFFER_MAX_CHUNKS = 16`), JZ 内部 `alloc_buffer` 仍按 bump allocator 切同一块 `ctx->rpc_mempool` -- 所以多 chunk 不会自动绕过 mempool 4 GiB hard cap。
 
-QCOM per-buffer 方案没有被 JZ 采纳的设计哲学原因: JZ 的 mirror 机制假设所有 weight 都在一个连续 IOVA 范围 (mirror 缓冲池也开在同一段), 简化 DSP 端 offset 计算; QCOM 无 mirror 机制 (mirror 是 JZ 自有设计), 故可直接 per-buffer 拆分无副作用。因此 JZ 走 scatter-gather 路径时, mirror 机制必须先扩展支持跨 buffer。
+JZ 未采纳 QCOM per-buffer 方案的原因: JZ 的 mirror 机制假设所有 weight 在同一连续 IOVA 范围 (mirror 缓冲池也开在同一段) 以简化 DSP 端 offset 计算; QCOM 无 mirror 机制 (mirror 是 JZ 自有设计), 可直接 per-buffer 拆分。因此 JZ 走 scatter-gather 路径时, mirror 机制必须先扩展支持跨 buffer。
 
-per-buffer 替代单 mempool 的 trade-off: 这是一个真正的 trade-off, 不是 clear win。JZ single mempool 架构 (单一连续 IOVA) 让 JZ 能 offload lmhead (lmhead 需要整个 vocab 范围的 embedding/logits tensor, 必须连续 IOVA); 改 per-buffer 后 lmhead 必须回 CPU, qwen1 / 2B / 8B 等 < 4 GiB 模型 TG 可能显著下降。
+per-buffer 替代单 mempool 的取舍: 这是一个真正的取舍, 不是明显更优。JZ single mempool 架构 (单一连续 IOVA) 让 JZ 能 offload lmhead (lmhead 需要整个 vocab 范围的 embedding/logits tensor, 必须连续 IOVA); 改 per-buffer 后 lmhead 必须回 CPU, Qwen1.5-1.8B / 2B / 8B 等 < 4 GiB 模型 TG 可能显著下降。
 
-**Table-41**: per-buffer 替代单 mempool 的 trade-off
+**Table-41**: per-buffer 替代单 mempool 的取舍
 
 | 维度 | JZ 当前 single mempool | JZ 改 per-buffer 后 |
 |---|---|---|
@@ -2105,9 +2072,9 @@ per-buffer 替代单 mempool 的 trade-off: 这是一个真正的 trade-off, 不
 | offload lmhead | 可 (单一连续 IOVA) | 会失去 (per-buffer 拆散) |
 | mirror 机制 | 简单 (一个 4 GiB region 一次 dcinva) | 复杂 (每个 buffer 独立 mirror) |
 | Phase 1-12 调度 | 简单 (单 mempool base addr) | 复杂 (per-buffer base addr 数组) |
-| qwen1 / 2B / 8B 等 < 4 GiB 模型 TG | 现有 baseline | 可能下降 (lmhead 回 CPU) |
+| Qwen1.5-1.8B / 2B / 8B 等 < 4 GiB 模型 TG | 现有 baseline | 可能下降 (lmhead 回 CPU) |
 
-净收益: 获得 Qwen3.5-9B+ 模型容量, 但放弃 JZ 架构优势 (offload lmhead)。scatter-gather (步骤 1b) 保留主 mempool, 不推翻 JZ 架构, 不失去 lmhead offload 能力, 是 clear win。
+净收益: 获得 Qwen3.5-9B+ 模型容量, 但放弃 JZ 架构优势 (offload lmhead)。scatter-gather (步骤 1b) 保留主 mempool, 不推翻 JZ 架构, 不失去 lmhead offload 能力, 是明显更优。
 
 #### 8.6.6 大模型扩展性矩阵
 
@@ -2167,42 +2134,49 @@ scatter-gather 把 weight 上限从 4 GB 提到 24 GB, 但 KV cache 仍是 4 GB 
 
 | 模型 | 权重 (Q4) | KV cache (4K ctx) | KV cache (8K ctx) | 16 GB 手机 | 24 GB 手机 |
 |---|---|---|---|---|---|
-| Qwen3.5-9B | 5.10 GB | 0.6 GB | 1.2 GB | 可装得下 | 可装得下 |
-| Qwen3.5-13B | 7.5 GB | 0.8 GB | 1.6 GB | 可装得下 | 可装得下 |
-| Qwen3.5-20B | 11 GB | 1.0 GB | 2.0 GB | 可装得下 (不需 K/V 量化) | 可装得下 |
-| Qwen3.5-32B | 18 GB | 1.6 GB | 3.2 GB | 超过 16 GB | 可装得下 (需 K/V 量化 8K ctx) |
+| Qwen3.5-9B | 5.10 GB | 0.6 GB | 1.2 GB | 可装载 | 可装载 |
+| Qwen3.5-13B | 7.5 GB | 0.8 GB | 1.6 GB | 可装载 | 可装载 |
+| Qwen3.5-20B | 11 GB | 1.0 GB | 2.0 GB | 可装载 (不需 K/V 量化) | 可装载 |
+| Qwen3.5-32B | 18 GB | 1.6 GB | 3.2 GB | 超过 16 GB | 可装载 (需 K/V 量化 8K ctx) |
 | Llama-3-70B | 38 GB | 2.8 GB | 5.6 GB | 超过 16 GB | 超过 24 GB |
 
 scatter-gather 让 16 GB 手机从"只能装 4 GB 模型"变成"可装 11 GB 模型" (Qwen3.5-9B / 13B / 20B 全覆盖)。scatter-gather + K/V 量化让 24 GB 手机可装 18 GB 模型 (Qwen3.5-32B), 突破 4 GiB KV cache 限制。70B 量级任何手机都装不下, 需要 weight 压缩到 Q2/Q3 (Llama-3-70B Q2 ~22 GB) 或 SSD offload。
 
 ### 8.7 与第七章对比
 
-Qwen1.5-1.8B (24 层 MHA 1:1, 脚本别名 `qwen1`) 与 Qwen3.5-9B (32 层 + delta-net 24) 在 JZ 优化路径上的关键差异:
+Qwen1.5-1.8B (24 层 MHA 1:1) 与 Qwen3.5-9B (32 层 + delta-net 24) 在 JZ 优化路径上的关键差异:
+
+**Table-46**: Qwen1.5-1.8B 与 Qwen3.5-9B JZ 优化路径对比
 
 | 维度 | Qwen1.5-1.8B (第七章) | Qwen3.5-9B (本章) |
 |---|---|---|
-| 首要瓶颈 | a-inv + bulk flush (60% wall, L2 8 MB 限制, 7.3/7.4 详) | 算子提交路径开销 (p5+p12 78% wall, 见 Table-34) |
+| 首要瓶颈 | a-inv + bulk flush (60% wall, L2 8 MB 限制, 7.3/7.4) | 算子提交路径开销 (p5+p12 78% wall, 见 Table-34) |
 | 算子瓶颈 | H3 KV invalidation 确认 (16241 us/batch, 7.2) | 24 个 ssm_out MUL_MAT split (Q5_K 根因, 8.3) |
 | 模型容量 | 1.2 GiB (Q4_0), 全装入 4 GB mempool | 5.03 GiB, 1996 MiB 回退 heap (8.4.2 详) |
 | QCOM 对比 | JZ TG 比 QCOM 快 1.61x | JZ TG 比 QCOM 慢 5.20x |
 | 主要优化方向 | K/V 量化 (Table-28 P1, 10-19% TG) | Q5_K repack 消除 split (Table-39 步骤 0) + 异步化提交 (Table-39 步骤 4) |
 | 短期可实施性 | 高 (改 cache 写入路径) | 高 (Q5_K repack 复用既有 Q4_K/Q6_K 机制) |
 
-两条路径不冲突: Qwen1.5-1.8B 走 cache 量化路线, Qwen3.5-9B 走 Q5_K repack 消除 split (步骤 0) + 异步化提交路线。可以分头推进, 最终在远期 (producer-consumer 流水线) 阶段汇合。
+两条路径不冲突: Qwen1.5-1.8B 走 cache 量化路线, Qwen3.5-9B 走 Q5_K repack 消除 graph split + 异步化提交路线。可以分头推进, 最终在远期 (producer-consumer 流水线) 阶段汇合。
 
 ### 8.8 本章结论
 
 1. **Qwen3.5-9B 5.20x TG 差距的真因是 214x per-call overhead, 不是 graph split 数量**。JZ 与 QCOM 的 Q5_K split 段数相同 (同一 upstream scheduler, QCOM validator 同样拒 Q5_K, 各 24 个 ssm_out split; QCOM 不输出 batch_calls), 但 QCOM 额外有 1 个 lm_head CPU split, 而 JZ 因 lm_head offload 到 DSP 无此 split (详见 8.5.4)。差距来自 per-call overhead: JZ per-call 走同步 FastRPC + mirror memcpy (21.4 ms), QCOM per-call 只是一次 dspqueue ring-buffer write (~0.1 ms 反推), per-call 差距 214x -> JZ 单 token 提交成本 514 ms (24 x 21.4)。扣除提交后 JZ ~162 ms 与 QCOM 130 ms 基本持平 (见 Table-34)。dspqueue 并未减少提交次数 (24 个 Q5_K split 仍需 24 次提交), 而是将 per-call overhead 降低 ~214x
 
-2. **Qwen3.5-9B PP&TG 三条正交修复路径**: Q5_K repack 消除 graph split (1.48 -> ~2.7 tok/s, ~30-50 行, 最高优先级, 是后续提交路径优化的前置条件, 已在 commit a7c586e70d195cc0a695fdb8adf58298632be0d6 实施并经验证) -> scatter-gather 消除 mirror memcpy + 扩容量 (-> ~6-7 tok/s, clear win, 保留 single mempool 架构) -> 异步化提交压 per-call overhead (-> 8-10 tok/s)。三条路径正交可叠加, op_batch 累积作为步骤 0 落地前的过渡 (1.48 -> 2.5-3.5 tok/s) 可并行
+2. **Qwen3.5-9B PP&TG 三条正交修复路径**: Q5_K repack 消除 graph split (1.48 -> ~2.7 tok/s, ~30-50 行, 最高优先级, 是后续提交路径优化的前置条件, 已在 commit a7c586e70d195cc0a695fdb8adf58298632be0d6 实施并经验证) -> scatter-gather 消除 mirror memcpy + 扩容量 (-> ~6-7 tok/s, 明显更优, 保留 single mempool 架构) -> 异步化提交压 per-call overhead (-> 8-10 tok/s)。三条路径正交可叠加, op_batch 累积作为步骤 0 落地前的过渡 (1.48 -> 2.5-3.5 tok/s) 可并行
 
 3. **Qwen3.5-9B TG 理论目标 8-10 tok/s, 追平/超过 QCOM 7.70**。配合第七章 Table-28 P0 (E 方向 AP per-call overhead 消除) + 本章修复路径, JZ Qwen3.5-9B TG 可从 1.48 逐步追到 8-10 tok/s。
 
-4. **QCOM 端 unaccounted 0.0% 是时间归类结果, 非 AP-DSP 完全 overlap**。QCOM `common_perf_print` 只有高层类别 (prompt eval / eval / sampling 等), 没有 JZ 的 p1-p12 细粒度分解, `graph_compute` 中 `flush()` 的阻塞等待计入 eval 类别, 故 unaccounted 为 0.0%。代码上 `graph_compute` ([ggml-hexagon.cpp:3708-3715](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L3708-L3715)) 先 enqueue 所有 op (非阻塞 dspqueue_write), 再调用 `flush()` ([ggml-hexagon.cpp:1636-1639](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp#L1636-L1639)) 阻塞等待 DSP 完成, AP 在 flush 期间不准备下一个 graph。dspqueue 的真正优势是 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy) 且无 mirror memcpy。JZ cgraph cache (99.1%) 与 QCOM `graphs reused` (99.2%) 命中率接近 (两者层级不同, Qwen3.5-9B cgraph 拓扑变化频率稳定), 差距不在 cache 命中率, 而在每次提交的 per-call overhead (cache hit 仅跳过 Phase 2 descriptor 重建, 不跳过 mirror memcpy + FastRPC 提交): JZ 174.4 s 中 ~130.9 s (75%) 是 p5/p12 mirror overhead, ~31.1 s (17.8%) 是 dsp_exec 真实计算, 其余是 p1/p6/p8/p11 等; QCOM 33.1 s 中无 mirror memcpy 开销, per-call overhead 低 214x。
+4. **QCOM 端 unaccounted 0.0% 是时间归类结果, 非 AP-DSP 完全 overlap**。QCOM `common_perf_print` 只有高层类别 (prompt eval / eval / sampling 等), 没有 JZ 的 p1-p12 细粒度分解, `graph_compute` 中 `flush()` 的阻塞等待计入 eval 类别, 故 unaccounted 为 0.0%。代码上 `graph_compute` ([ggml-hexagon.cpp：ggml_backend_hexagon_graph_compute](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 先 enqueue 所有 op (非阻塞 dspqueue_write), 再调用 `flush()` ([ggml-hexagon.cpp：ggml_hexagon_session::flush](file:///home/zhouwg/develop/ggml-hexagon/ggml/src/ggml-hexagon/ggml-hexagon.cpp)) 阻塞等待 DSP 完成, AP 在 flush 期间不准备下一个 graph。dspqueue 的真正优势是 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy) 且无 mirror memcpy。JZ cgraph cache (99.1%) 与 QCOM `graphs reused` (99.2%) 命中率接近 (两者层级不同, Qwen3.5-9B cgraph 拓扑变化频率稳定), 差距不在 cache 命中率, 而在每次提交的 per-call overhead (cache hit 仅跳过 Phase 2 descriptor 重建, 不跳过 mirror memcpy + FastRPC 提交): JZ 174.4 s 中 ~130.9 s (75%) 是 p5/p12 mirror overhead, ~31.1 s (17.8%) 是 dsp_exec 真实计算, 其余是 p1/p6/p8/p11 等; QCOM 33.1 s 中无 mirror memcpy 开销, per-call overhead 低 214x。
 
 ***
 
 ## 修订历史
+
+### 2026-08-11
+
+- Table-2 修正: "lm-head 常驻" -> "lm-head offload" (术语统一, 与 3.1 节标题/Table-8 一致; "常驻" 不准确, QCOM 权重亦常驻 rpcmem, 区别在于能否经济地 offload 计算到 DSP) (GLM-5.2, Assisted-by: Trae IDE)
+- 全文源文件引用从行号改为函数名: [文件名：函数名](file:///路径) 格式, 去掉 #L 行号锚点 (行号随源码变更失效, 函数名更稳定且对读者更有意义); 纯文本行号引用统一改为带链接格式; developer.md 引用保留行号 (文档文件, 非源文件) (GLM-5.2, Assisted-by: Trae IDE)
 
 ### 2026-08-10
 
@@ -2258,7 +2232,7 @@ Qwen1.5-1.8B (24 层 MHA 1:1, 脚本别名 `qwen1`) 与 Qwen3.5-9B (32 层 + del
 - 第三章源码核验 + Table-1/3 修正 (lm-head 类型 Q4 -> Q6_K, 内存模型对齐)
 - 第四章重构: PP 优先级重排 + Qwen1.5-1.8B 三重叠加根因分析
 - 新增第五章 force_opfusion_in_pp 实验与五模型 CI 验证（MiniMax-M3）
-- 五模型层数修正: gemma4 24->35, gemma4-e4b 35->42, qwen3 13->24
+- 五模型层数修正: Gemma4-E2B 24->35, Gemma4-E4B 35->42, qwen3 13->24
 - 全文 prose polish: em-dash 清除, 标点统一, ion 文档引用补充
 
 ### 2026-08-05
