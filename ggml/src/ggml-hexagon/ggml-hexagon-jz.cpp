@@ -322,9 +322,11 @@ struct ggml_backend_hexagon_context {
     char repack_buft_name[GGML_MAX_NAME];       // "hexagon-ion-buffer-<name>-REPACK"
 
     // Per-device hardware caps (probed at init, used by supports_op)
-    bool has_vtcm;  // domain has VTCM pages available
-    bool has_hvx;   // domain has HVX support
-    bool has_hmx;   // domain has HMX support
+    bool has_vtcm;                              // domain has VTCM pages available
+    bool has_hvx;                               // domain has HVX support
+    bool has_hmx;                               // domain has HMX support
+    bool has_async_fastrpc;                     // domain supports async FastRPC
+    bool has_extended_map;                      // domain supports extended (>=4 GiB) VA mapping
 
     // Cached htp_mm_kernel_params per (weight_data, ne11). For TG, the
     // precompute math produces identical results for every token, so we
@@ -438,7 +440,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7"},
+        .version                = {"0.99.7.1"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -644,11 +646,12 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
     GGMLHEXAGON_LOG_VERBOSE("device info: %s, dsp arch version 0x%x, system mem size %d MiB",
                              ctx->socinfo.soc_desc, dsp_version, total_mem / SIZE_IN_MB);
-    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d",
+    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d async_fastrpc=%d extended_map=%d",
                              ctx->device, ctx->name,
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
                              ctx->socinfo.vtcm_size_in_mb,
-                             (int)ctx->has_hvx, (int)ctx->has_hmx);
+                             (int)ctx->has_hvx, (int)ctx->has_hmx,
+                             (int)ctx->has_async_fastrpc, (int)ctx->has_extended_map);
     GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
                              ctx->max_layer_idx_seen + 1);
     GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
@@ -938,7 +941,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.1");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -1500,6 +1503,46 @@ bail:
     return false;
 }
 
+// Probe whether the DSP domain supports mapping buffers into the extended
+// (>=4 GiB) virtual address range. If 1, fastrpc_mmap can use
+// FASTRPC_MAP_FD_EXTENDED / FASTRPC_MAP_FD_DELAYED_EXTENDED to place buffers
+// beyond the 32-bit user VA ceiling, unlocking scatter-gather and sliding
+// window schemes that would otherwise hit the 4 GiB VA hard cap.
+static bool ggmlhexagon_is_extended_map_supported(int domain) {
+    int hexagon_error = AEE_SUCCESS;
+    if (remote_handle_control) {
+        if (domain == CDSP_DOMAIN_ID) {
+            struct remote_dsp_capability dsp_capability_extended_map;
+            dsp_capability_extended_map.domain       = (uint32_t)domain;
+            dsp_capability_extended_map.attribute_ID = EXTENDED_MAP_SUPPORT;
+            dsp_capability_extended_map.capability   = (uint32_t)0;
+            hexagon_error = remote_handle_control(DSPRPC_GET_DSP_INFO, &dsp_capability_extended_map, sizeof(struct remote_dsp_capability));
+            if ((hexagon_error & 0xFF) == (AEE_EUNSUPPORTEDAPI & 0xFF)) {
+                GGMLHEXAGON_LOG_WARN("FastRPC Capability API is not supported on this device");
+                hexagon_error = AEE_SUCCESS;
+                goto bail;
+            } else if (dsp_capability_extended_map.capability == 1) {
+                return true;
+            }
+
+            if (hexagon_error != AEE_SUCCESS){
+                GGMLHEXAGON_LOG_WARN("failed with error 0x%x", hexagon_error);
+                goto bail;
+            }
+        } else {
+            hexagon_error = AEE_EUNSUPPORTED;
+            GGMLHEXAGON_LOG_WARN("extended VA mapping is not supported on domain %d", domain);
+            goto bail;
+        }
+    } else {
+        hexagon_error = AEE_EUNSUPPORTEDAPI;
+        GGMLHEXAGON_LOG_WARN("remote_dsp_capability interface is not supported on this device");
+    }
+
+bail:
+    return false;
+}
+
 static void ggmlhexagon_set_rpc_latency(remote_handle64 handle, int qos, int latency) {
     int hexagon_error = AEE_SUCCESS;
     (void)latency;
@@ -1726,10 +1769,10 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
 
     int64_t t0_reg = ggml_time_us();
-    int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+    int reg_err = ggml_dsp_register_rpcmem(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
     int64_t dt_reg = ggml_time_us() - t0_reg;
     if (reg_err != AEE_SUCCESS) {
-        GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x, aborting backend init", reg_err);
+        GGMLHEXAGON_LOG_ERROR("dsp_register_rpcmem failed: 0x%x, aborting backend init", reg_err);
         fastrpc_munmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, ctx->rpc_mempool_len);
         rpcmem_free(ctx->rpc_mempool);
         ctx->rpc_mempool = nullptr;
@@ -1804,11 +1847,14 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     }
     GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
     //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
+    ctx->has_async_fastrpc  = ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id);
+    ctx->has_extended_map   = ggmlhexagon_is_extended_map_supported(ctx->domain_id);
     GGMLHEXAGON_LOG_ALWAYS("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
-                            "unsigned pd supported %d, async fastrpc supported %d",
+                            "unsigned pd supported %d, async fastrpc supported %d, extended va map supported %d",
                                 ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
                                 ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
-                                ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
+                                (int)ctx->has_async_fastrpc,
+                                (int)ctx->has_extended_map);
     return htp_arch;
 }
 
@@ -3081,6 +3127,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       has_vtcm(false),
       has_hvx(false),
       has_hmx(false),
+      has_async_fastrpc(false),
+      has_extended_map(false),
       warned_qkv_name(false) {
     snprintf(name, sizeof(name), "Hexagon-cDSP%d", dev_id);
     snprintf(desc, sizeof(desc), "Qualcomm NPU(CDSP%d)", dev_id);

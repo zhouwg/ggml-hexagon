@@ -1923,7 +1923,7 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
     return AEE_SUCCESS;
 }
 
-AEEResult ggml_dsp_register_ion(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
+AEEResult ggml_dsp_register_rpcmem(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
     g_dsp_ctx = (struct dsp_context *)h;
     if (!g_dsp_ctx) return AEE_EBADPARM;
     int32_t fd = (int32_t)ion_fd;
