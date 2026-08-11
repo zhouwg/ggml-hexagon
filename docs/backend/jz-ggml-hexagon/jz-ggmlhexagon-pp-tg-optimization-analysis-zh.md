@@ -1418,7 +1418,7 @@ Qwen1.5-1.8B 比 Gemma4-E2B 慢 14.6 ms/batch, 缓存维护多出 29 ms (56% of 
 
 #### 8.1.1 六模型 AB CI 性能对比
 
-2026-08-09 完整跑完六模型 AB CI 测试 (Qualcomm SnapDragon 8 Elite, dsp arch 0x79, system mem 24834 MiB, n_ctx=512, prompt eval 50-75 tokens, 生成 255 tokens)。Qwen3.5-9B 因推理耗时 + 功耗高 + 手机发热, rounds 强制 1 轮 (CI 脚本 hard cap), 其他 5 模型跑 3 轮取平均。原始 log 见 `log_abtest_all_20260809-140022.txt` (35949 行)。
+2026-08-11 完整跑完六模型 AB CI 测试 (Qualcomm SnapDragon 8 Elite, dsp arch 0x79, system mem 24834 MiB, n_ctx=512, prompt eval 50-75 tokens, 生成 255 tokens)。Qwen3.5-9B 因推理耗时 + 功耗高 + 手机发热, rounds 强制 1 轮 (CI 脚本 hard cap), 其他 5 模型跑 3 轮取平均。原始 log 见 `log_abtest_all_20260811-092810.txt` (36251 行)。
 
 **Table-29**: 六模型 AB CI 性能对比 (PP/TG 单位 tokens/s, total 单位 ms)
 
@@ -1426,73 +1426,73 @@ Qwen1.5-1.8B 比 Gemma4-E2B 慢 14.6 ms/batch, 缓存维护多出 29 ms (56% of 
 
 | 模型 (脚本别名) | n_layer | 后端 | PP (t/s) | TG (t/s) | total (ms) | batch_calls | JZ vs QCOM (TG) |
 |---|---:|---|---:|---:|---:|---:|:---:|
-| Qwen3.5-2B (qwen3-2b) | 24 | JZ   | 508.21 | 27.55 |   9632.96 |   256 | **2.02x** |
-| Qwen3.5-2B (qwen3-2b) | 24 | QCOM | 472.44 | 13.65 |  19026.71 |   N/A |  baseline |
-| Gemma4-E2B (Gemma4-E2B) | 35 | JZ   | 669.54 | 26.96 |   9861.10 |   256 | **1.08x** |
-| Gemma4-E2B (Gemma4-E2B) | 35 | QCOM | 432.13 | 24.92 |  10488.07 |   N/A |  baseline |
-| Gemma4-E4B (Gemma4-E4B) | 42 | JZ   | 411.91 | 15.04 |  17377.58 |   256 | **1.44x** |
-| Gemma4-E4B (Gemma4-E4B) | 42 | QCOM | 413.22 | 10.41 |  24754.51 |   N/A |  baseline |
-| Qwen1.5-1.8B (qwen1) | 24 | JZ   | 543.53 | 18.46 |  14088.33 |   256 | 0.68x |
-| Qwen1.5-1.8B (qwen1) | 24 | QCOM | 724.80 | 27.22 |   9678.25 |   N/A |  baseline |
-| Llama-3.2-1B (llama3) | 16 | JZ   | 992.48 | 42.59 |   6161.02 |   257 | **1.48x** |
-| Llama-3.2-1B (llama3) | 16 | QCOM | 1065.41 | 28.80 |   9103.72 |   N/A |  baseline |
-| Qwen3.5-9B (qwen3-9b) | 32 | JZ   |  26.55 |  1.51 | 170721.75 |  6144 | 0.23x |
-| Qwen3.5-9B (qwen3-9b) | 32 | QCOM | 116.10 |  6.65 |  38930.08 |   N/A |  baseline |
+| Qwen3.5-2B (qwen3-2b) | 24 | JZ   | 510.63 | 27.67 |   9316.99 |   256 | **1.93x** |
+| Qwen3.5-2B (qwen3-2b) | 24 | QCOM | 473.61 | 14.35 |  17887.49 |   N/A |  baseline |
+| Gemma4-E2B (Gemma4-E2B) | 35 | JZ   | 676.81 | 27.28 |   9433.11 |   256 | **1.11x** |
+| Gemma4-E2B (Gemma4-E2B) | 35 | QCOM | 473.35 | 24.58 |  10496.76 |   N/A |  baseline |
+| Gemma4-E4B (Gemma4-E4B) | 42 | JZ   | 394.94 | 14.87 |  17300.00 |   256 | **1.33x** |
+| Gemma4-E4B (Gemma4-E4B) | 42 | QCOM | 423.05 | 11.18 |  22933.60 |   N/A |  baseline |
+| Qwen1.5-1.8B (qwen1) | 24 | JZ   | 526.86 | 18.63 |  13783.47 |   256 | 0.71x |
+| Qwen1.5-1.8B (qwen1) | 24 | QCOM | 797.98 | 26.36 |   9782.51 |   N/A |  baseline |
+| Llama-3.2-1B (llama3) | 16 | JZ   | 998.55 | 42.96 |   6011.74 |   257 | **1.49x** |
+| Llama-3.2-1B (llama3) | 16 | QCOM | 1128.86 | 28.85 |   8905.02 |   N/A |  baseline |
+| Qwen3.5-9B (qwen3-9b) | 32 | JZ   |  35.76 |  1.48 | 174258.05 |  6144 | 0.22x |
+| Qwen3.5-9B (qwen3-9b) | 32 | QCOM | 120.80 |  6.61 |  39021.14 |   N/A |  baseline |
 
 **Table-30**: 六模型 AB CI TG 优势/劣势汇总 (按 JZ/QCOM TG 比值排序)
 
 | 模型 (脚本别名) | JZ TG | QCOM TG | JZ/QCOM | 类别 | 主因 |
 |---|---:|---:|:---:|---|---|
-| Qwen3.5-2B (qwen3-2b) | 27.55 | 13.65 | **2.02x** | JZ 强优势 | 24 层, batch_calls=256 无 split, mempool 充足 + lm-head offload |
-| Llama-3.2-1B (llama3) | 42.59 | 28.80 | **1.48x** | JZ 优势 | 16 层小模型, cgraph cache 几乎全 hit, lm-head offload 净收益主导 |
-| Gemma4-E4B (Gemma4-E4B) | 15.04 | 10.41 | **1.44x** | JZ 优势 | 42 层偏大, JZ mempool 仍可装下, lm-head offload + 连续 IOVA 净收益显著 |
-| Gemma4-E2B (Gemma4-E2B) | 26.96 | 24.92 | **1.08x** | JZ 优势 | 35 层中等模型, batch_calls=256 无 split, QCOM dspqueue 收益对 JZ 边际 |
-| Qwen1.5-1.8B (qwen1) | 18.46 | 27.22 | 0.68x | JZ 劣势 | MHA 1:1 每 token 大量 L2 invalidation, a-inv + bulk flush 占 60% wall, L2 8 MB 限制; K/V 量化可追平 |
-| Qwen3.5-9B (qwen3-9b) | 1.51 | 6.65 | 0.23x | JZ 大劣势 | 模型 5.03 GiB 超 4 GiB mempool 致 heap fallback + mirror memcpy overhead (78% wall), 24 个 Q5_K split 致 batch_calls=6144, per-call overhead 214x (JZ 21.4ms vs QCOM 0.1ms) |
+| Qwen3.5-2B (qwen3-2b) | 27.67 | 14.35 | **1.93x** | JZ 强优势 | 24 层, batch_calls=256 无 split, mempool 充足 + lm-head offload |
+| Llama-3.2-1B (llama3) | 42.96 | 28.85 | **1.49x** | JZ 优势 | 16 层小模型, cgraph cache 几乎全 hit, lm-head offload 净收益主导 |
+| Gemma4-E4B (Gemma4-E4B) | 14.87 | 11.18 | **1.33x** | JZ 优势 | 42 层偏大, JZ mempool 仍可装下, lm-head offload + 连续 IOVA 净收益显著 |
+| Gemma4-E2B (Gemma4-E2B) | 27.28 | 24.58 | **1.11x** | JZ 优势 | 35 层中等模型, batch_calls=256 无 split, QCOM dspqueue 收益对 JZ 边际 |
+| Qwen1.5-1.8B (qwen1) | 18.63 | 26.36 | 0.71x | JZ 劣势 | MHA 1:1 每 token 大量 L2 invalidation, a-inv + bulk flush 占 60% wall, L2 8 MB 限制; K/V 量化可追平 |
+| Qwen3.5-9B (qwen3-9b) | 1.48 | 6.61 | 0.22x | JZ 大劣势 | 模型 5.03 GiB 超 4 GiB mempool 致 heap fallback + mirror memcpy overhead (78% wall), 24 个 Q5_K split 致 batch_calls=6144, per-call overhead 214x (JZ 21.4ms vs QCOM 0.1ms) |
 
 关键观察:
 
-1. JZ TG 在 4/6 模型上领先 QCOM (Qwen3.5-2B / Llama-3.2-1B / Gemma4-E4B / Gemma4-E2B), 最大 2.02x。这 4 个模型共同特征是 batch_calls=256 (无 split, cgraph cache 全 hit) 且模型 < mempool 4 GiB, JZ 架构净优势 (lm-head offload + mempool 连续 IOVA) 完全释放
+1. JZ TG 在 4/6 模型上领先 QCOM (Qwen3.5-2B / Llama-3.2-1B / Gemma4-E4B / Gemma4-E2B), 最大 1.93x。这 4 个模型共同特征是 batch_calls=256 (无 split, cgraph cache 全 hit) 且模型 < mempool 4 GiB, JZ 架构净优势 (lm-head offload + mempool 连续 IOVA) 完全释放
 2. JZ TG 在 2/6 模型上落后 QCOM (Qwen1.5-1.8B / Qwen3.5-9B)。两个模型代表两种不同的 JZ 失败模式: (a) batch_calls=256 无 graph split 但 a-inv/bulk flush 拖慢单次调用性能; (b) batch_calls=6144 大量 graph split + per-call overhead 214x 放大
-3. PP 维度 JZ 在 5/6 模型上落后 QCOM (除 Gemma4-E4B 基本持平): QCOM dspqueue 的 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy), JZ 的 12 阶段同步 FastRPC 在 PP 短序列下 per-call 开销占比大。但对长生成 (TG), JZ 的开销被 255 段摊薄, dspqueue 收益变小, JZ 反而领先
+3. PP 维度 JZ 在 2/6 模型上反超 QCOM (Qwen3.5-2B / Gemma4-E2B, batch_calls=256 且 lm-head offload 净收益主导), 4/6 落后 (Gemma4-E4B / Qwen1.5-1.8B / Llama-3.2-1B / Qwen3.5-9B)。QCOM dspqueue 的 per-call overhead 极低 (~0.1 ms ring buffer write vs JZ 21.4 ms 同步 FastRPC + mirror memcpy), JZ 的 12 阶段同步 FastRPC 在 PP 短序列下 per-call 开销占比大。但对长生成 (TG), JZ 的开销被 255 段摊薄, dspqueue 收益变小, JZ 反而领先
 4. Qwen3.5-9B 是 JZ 第二个 TG/PP 同时落后 QCOM 的模型 (第一个是 Qwen1.5-1.8B), 也是首个双边失利差距达 5x 量级的模型
 
 **Table-31**: 六模型 AB CI 完整 3 轮单值明细 (Qwen3.5-9B 1 轮, 供审计与可复现验证)
 
 | 模型 | 后端 | round | PP (t/s) | TG (t/s) | total (ms) |
 |---|---|---:|---:|---:|---:|
-| Qwen3.5-2B (52+255 tok) | JZ   | 1 | 518.57 | 27.63 |   9584.63 |
-| Qwen3.5-2B | JZ   | 2 | 499.56 | 27.71 |   9573.46 |
-| Qwen3.5-2B | JZ   | 3 | 506.50 | 27.30 |   9740.79 |
-| Qwen3.5-2B | QCOM | 1 | 494.50 | 14.15 |  18338.34 |
-| Qwen3.5-2B | QCOM | 2 | 452.79 | 13.62 |  19051.96 |
-| Qwen3.5-2B | QCOM | 3 | 470.03 | 13.18 |  19689.82 |
-| Gemma4-E2B (58+255 tok) | JZ   | 1 | 663.65 | 26.94 |   9869.23 |
-| Gemma4-E2B | JZ   | 2 | 676.67 | 26.88 |   9862.48 |
-| Gemma4-E2B | JZ   | 3 | 668.30 | 27.07 |   9851.60 |
-| Gemma4-E2B | QCOM | 1 | 423.94 | 24.99 |  10464.74 |
-| Gemma4-E2B | QCOM | 2 | 443.26 | 24.92 |  10484.72 |
-| Gemma4-E2B | QCOM | 3 | 429.19 | 24.86 |  10514.75 |
-| Gemma4-E4B (58+255 tok) | JZ   | 1 | 412.54 | 15.19 |  17191.56 |
-| Gemma4-E4B | JZ   | 2 | 419.02 | 15.17 |  17225.30 |
-| Gemma4-E4B | JZ   | 3 | 404.16 | 14.75 |  17715.89 |
-| Gemma4-E4B | QCOM | 1 | 416.05 | 10.32 |  24973.29 |
-| Gemma4-E4B | QCOM | 2 | 407.60 | 10.49 |  24543.48 |
-| Gemma4-E4B | QCOM | 3 | 416.01 | 10.41 |  24746.75 |
-| Qwen1.5-1.8B (51+255 tok) | JZ   | 1 | 558.89 | 18.49 |  14054.64 |
-| Qwen1.5-1.8B | JZ   | 2 | 537.58 | 18.44 |  14112.54 |
-| Qwen1.5-1.8B | JZ   | 3 | 534.13 | 18.46 |  14097.81 |
-| Qwen1.5-1.8B | QCOM | 1 | 702.55 | 23.19 |  11272.03 |
-| Qwen1.5-1.8B | QCOM | 2 | 761.65 | 29.40 |   8833.12 |
-| Qwen1.5-1.8B | QCOM | 3 | 710.19 | 29.08 |   8929.59 |
-| Llama-3.2-1B (75+255 tok) | JZ   | 1 | 986.80 | 42.44 |   6192.23 |
-| Llama-3.2-1B | JZ   | 2 | 993.42 | 42.70 |   6135.74 |
-| Llama-3.2-1B | JZ   | 3 | 997.23 | 42.63 |   6155.09 |
-| Llama-3.2-1B | QCOM | 1 |  997.06 | 28.54 |   9190.24 |
-| Llama-3.2-1B | QCOM | 2 | 1088.23 | 28.19 |   9303.65 |
-| Llama-3.2-1B | QCOM | 3 | 1110.95 | 29.67 |   8817.27 |
-| Qwen3.5-9B (52+255 tok) | JZ   | 1 |  26.55 |  1.51 | 170721.75 |
-| Qwen3.5-9B | QCOM | 1 | 116.10 |  6.65 |  38930.08 |
+| Qwen3.5-2B (52+255 tok) | JZ   | 1 | 503.04 | 27.80 |   9274.52 |
+| Qwen3.5-2B | JZ   | 2 | 505.54 | 27.54 |   9362.60 |
+| Qwen3.5-2B | JZ   | 3 | 523.31 | 27.67 |   9313.87 |
+| Qwen3.5-2B | QCOM | 1 | 486.15 | 14.39 |  17821.85 |
+| Qwen3.5-2B | QCOM | 2 | 472.53 | 14.14 |  18148.82 |
+| Qwen3.5-2B | QCOM | 3 | 462.14 | 14.51 |  17691.80 |
+| Gemma4-E2B (58+255 tok) | JZ   | 1 | 673.15 | 27.28 |   9433.83 |
+| Gemma4-E2B | JZ   | 2 | 680.66 | 27.33 |   9416.97 |
+| Gemma4-E2B | JZ   | 3 | 676.63 | 27.24 |   9448.54 |
+| Gemma4-E2B | QCOM | 1 | 472.19 | 24.84 |  10389.38 |
+| Gemma4-E2B | QCOM | 2 | 475.14 | 24.57 |  10500.47 |
+| Gemma4-E2B | QCOM | 3 | 472.72 | 24.34 |  10600.44 |
+| Gemma4-E4B (58+255 tok) | JZ   | 1 | 401.27 | 14.95 |  17200.78 |
+| Gemma4-E4B | JZ   | 2 | 396.62 | 14.96 |  17193.68 |
+| Gemma4-E4B | JZ   | 3 | 386.94 | 14.69 |  17505.53 |
+| Gemma4-E4B | QCOM | 1 | 428.09 | 11.35 |  22592.92 |
+| Gemma4-E4B | QCOM | 2 | 410.64 | 11.11 |  23089.59 |
+| Gemma4-E4B | QCOM | 3 | 430.43 | 11.09 |  23118.29 |
+| Qwen1.5-1.8B (51+255 tok) | JZ   | 1 | 536.23 | 18.61 |  13795.01 |
+| Qwen1.5-1.8B | JZ   | 2 | 510.52 | 18.64 |  13781.22 |
+| Qwen1.5-1.8B | JZ   | 3 | 533.82 | 18.64 |  13774.17 |
+| Qwen1.5-1.8B | QCOM | 1 | 783.67 | 27.74 |   9257.62 |
+| Qwen1.5-1.8B | QCOM | 2 | 890.24 | 23.87 |  10738.09 |
+| Qwen1.5-1.8B | QCOM | 3 | 720.03 | 27.48 |   9351.82 |
+| Llama-3.2-1B (75+255 tok) | JZ   | 1 | 989.24 | 42.40 |   6089.98 |
+| Llama-3.2-1B | JZ   | 2 | 995.47 | 43.18 |   5981.45 |
+| Llama-3.2-1B | JZ   | 3 | 1010.95 | 43.30 |   5963.80 |
+| Llama-3.2-1B | QCOM | 1 | 1130.05 | 28.92 |   8883.28 |
+| Llama-3.2-1B | QCOM | 2 | 1131.44 | 28.80 |   8921.26 |
+| Llama-3.2-1B | QCOM | 3 | 1125.08 | 28.83 |   8910.51 |
+| Qwen3.5-9B (52+255 tok) | JZ   | 1 |  35.76 |  1.48 | 174258.05 |
+| Qwen3.5-9B | QCOM | 1 | 120.80 |  6.61 |  39021.14 |
 
 #### 8.1.2 Qwen3.5-9B 基线数据
 
@@ -2175,6 +2175,7 @@ Qwen1.5-1.8B (24 层 MHA 1:1) 与 Qwen3.5-9B (32 层 + delta-net 24) 在 JZ 优�
 
 ### 2026-08-11
 
+- Table-29/30/31 更新为最新六模型 AB CI 数据 (log_abtest_all_20260811-092810.txt, 36251 行); JZ TG 整体稳定, 4/6 模型领先 QCOM (最大 1.93x); 关键观察 3 修正 PP 描述 (原 "5/6 落后" 不准确, 实为 2/6 反超 + 4/6 落后); Qwen3.5-9B PP 从 26.55 提升到 35.76 (+34.6%), TG 1.48 与 profiling 数据一致 (GLM-5.2, Assisted-by: Trae IDE)
 - Table-2 修正: "lm-head 常驻" -> "lm-head offload" (术语统一, 与 3.1 节标题/Table-8 一致; "常驻" 不准确, QCOM 权重亦常驻 rpcmem, 区别在于能否经济地 offload 计算到 DSP) (GLM-5.2, Assisted-by: Trae IDE)
 - 全文源文件引用从行号改为函数名: [文件名：函数名](file:///路径) 格式, 去掉 #L 行号锚点 (行号随源码变更失效, 函数名更稳定且对读者更有意义); 纯文本行号引用统一改为带链接格式; developer.md 引用保留行号 (文档文件, 非源文件) (GLM-5.2, Assisted-by: Trae IDE)
 
