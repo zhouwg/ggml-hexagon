@@ -1,0 +1,5 @@
+# file‑permissions.yaml for pi
+# Only file‑tools are restricted. bash tool calls are NOT affected!
+domains:
+  - path: ./
+    permissions: [read, write, edit, find, grep, ls]
