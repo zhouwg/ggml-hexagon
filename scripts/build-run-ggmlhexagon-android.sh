@@ -511,6 +511,12 @@ function build_armcpu()
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-cpuonly.so
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-cpuonly.so
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-cpuonly.so
+
+    # fix issue CANNOT LINK EXECUTABLE "/data/local/tmp/llama-completion": library "libggml-hexagon.so" not found: needed by main executable
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/llama-bench                 ${PROJECT_ROOT_PATH}/out/ab-test/llama-bench-cpuonly
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/llama-completion            ${PROJECT_ROOT_PATH}/out/ab-test/llama-completion-cpuonly
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/llama-server                ${PROJECT_ROOT_PATH}/out/ab-test/llama-server-cpuonly
+
     show_pwd
 }
 
@@ -811,6 +817,17 @@ function update_cpu_libs()
     adb push ${ab_test_dir}/libllama-server-impl-cpuonly.so     ${REMOTE_PATH}/libllama-server-impl.so
     adb push ${ab_test_dir}/libmtmd-cpuonly.so                  ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-cpuonly.so      ${REMOTE_PATH}/libllama-bench-impl.so
+
+    # fix issue CANNOT LINK EXECUTABLE "/data/local/tmp/llama-completion": library "libggml-hexagon.so" not found: needed by main executable
+    # because there is a different linker procedure for Android‑CPU‑only builds
+    /bin/cp -f ${ab_test_dir}/llama-bench-cpuonly               ${LOCAL_BUILD_DIR}/bin/llama-bench
+    /bin/cp -f ${ab_test_dir}/llama-completion-cpuonly          ${LOCAL_BUILD_DIR}/bin/llama-completion
+    /bin/cp -f ${ab_test_dir}/llama-server-cpuonly              ${LOCAL_BUILD_DIR}/bin/llama-server
+
+    adb push ${ab_test_dir}/llama-bench-cpuonly                 ${REMOTE_PATH}/llama-bench
+    adb push ${ab_test_dir}/llama-completion-cpuonly            ${REMOTE_PATH}/llama-completion
+    adb push ${ab_test_dir}/llama-server-cpuonly                ${REMOTE_PATH}/llama-server
+
     # libggml-base.so / libggml-cpu.so are shared across builds, device-side kept as-is
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
     adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
