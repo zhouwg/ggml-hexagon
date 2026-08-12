@@ -203,11 +203,12 @@ extern "C" {
     };
 
     enum llama_load_mode {
-        LLAMA_LOAD_MODE_NONE       = 0, // no special loading mode
-        LLAMA_LOAD_MODE_MMAP       = 1, // memory map the model
-        LLAMA_LOAD_MODE_MLOCK      = 2, // force system to keep model in RAM rather than swapping or compressing
-        LLAMA_LOAD_MODE_MMAP_MLOCK = 3, // mmap + force system to keep model in RAM rather than swapping or compressing
-        LLAMA_LOAD_MODE_DIRECT_IO  = 4, // use direct I/O if available
+        LLAMA_LOAD_MODE_AUTO       = -1, // auto-detect based on device capabilities
+        LLAMA_LOAD_MODE_NONE       =  0, // no special loading mode
+        LLAMA_LOAD_MODE_MMAP       =  1, // memory map the model
+        LLAMA_LOAD_MODE_MLOCK      =  2, // force system to keep model in RAM rather than swapping or compressing
+        LLAMA_LOAD_MODE_MMAP_MLOCK =  3, // mmap + force system to keep model in RAM rather than swapping or compressing
+        LLAMA_LOAD_MODE_DIRECT_IO  =  4, // use direct I/O if available
     };
 
     LLAMA_API const char * llama_load_mode_name(enum llama_load_mode load_mode);
@@ -1324,8 +1325,6 @@ extern "C" {
     LLAMA_API void                   llama_sampler_apply (      struct llama_sampler * smpl, llama_token_data_array * cur_p);
     LLAMA_API void                   llama_sampler_reset (      struct llama_sampler * smpl);
     LLAMA_API struct llama_sampler * llama_sampler_clone (const struct llama_sampler * smpl);
-    // copy mutable sampler state without changing dst or its sampling graph bindings
-    // src and dst must have the same type and configuration
     LLAMA_API void                   llama_sampler_copy  (const struct llama_sampler * src, struct llama_sampler * dst);
     // important: do not free if the sampler has been added to a llama_sampler_chain (via llama_sampler_chain_add)
     LLAMA_API void                   llama_sampler_free  (      struct llama_sampler * smpl);
