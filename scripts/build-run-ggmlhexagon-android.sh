@@ -394,7 +394,7 @@ function build_arm64
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
     local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
@@ -418,6 +418,8 @@ function build_arm64
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-jz.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-jz.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-jz.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-jz.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-jz.so
         for skel in ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-v*.so; do
             [ -f "$skel" ] || continue
@@ -433,35 +435,6 @@ function build_arm64
     cd -
 }
 
-
-#build JZ's ggml-hexagon backend in debug mode
-function build_arm64_debug
-{
-    build_idl
-
-    #make AI Agent happy
-    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
-
-    #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
-    local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
-
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Debug -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=OFF -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
-    cd ${LOCAL_BUILD_DIR}
-    make -j${HOST_CPU_COUNTS}
-    #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
-    #build_extra_dsp_skels debug
-    #upload the new libggmldsp-skel.so on device side
-    prepare_ggmldsp
-    #push AP-side libs too (keep stub/skel in sync, see build_arm64 for rationale)
-    update_ggml_libs
-    commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
-    if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
-        commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
-    fi
-    show_pwd
-
-    cd -
-}
 
 #build Qualcomm's ggml-hexagon backend for performance comparison
 function build_arm64_qcom
@@ -487,6 +460,8 @@ function build_arm64_qcom
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-qcom.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-qcom.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-qcom.so
         /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-qcom.so
         for skel in ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-v*.so; do
             [ -f "$skel" ] || continue
@@ -533,6 +508,8 @@ function build_armcpu()
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-cpuonly.so
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-cpuonly.so
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-cpuonly.so
+    /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-cpuonly.so
     /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-cpuonly.so
     show_pwd
 }
@@ -747,6 +724,8 @@ function update_ggml_libs()
     adb push ${LOCAL_BUILD_DIR}/bin/libggml.so                      ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-common.so              ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so     ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so         ${REMOTE_PATH}/
+    adb push ${LOCAL_BUILD_DIR}/bin/libmtmd.so                      ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so          ${REMOTE_PATH}/
     adb push ${LOCAL_BUILD_DIR}/bin/libllama.so                     ${REMOTE_PATH}/
 }
@@ -766,6 +745,8 @@ function update_jz_libs()
     adb push ${ab_test_dir}/libllama-jz.so                 ${REMOTE_PATH}/libllama.so
     adb push ${ab_test_dir}/libllama-common-jz.so          ${REMOTE_PATH}/libllama-common.so
     adb push ${ab_test_dir}/libllama-completion-impl-jz.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-jz.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-jz.so                  ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-jz.so      ${REMOTE_PATH}/libllama-bench-impl.so
     for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
@@ -796,6 +777,8 @@ function update_qcom_libs()
     adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
     adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
     adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-qcom.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-qcom.so                  ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
     for skel in ${ab_test_dir}/libggml-htp-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
@@ -825,6 +808,8 @@ function update_cpu_libs()
     adb push ${ab_test_dir}/libllama-cpuonly.so                 ${REMOTE_PATH}/libllama.so
     adb push ${ab_test_dir}/libllama-common-cpuonly.so          ${REMOTE_PATH}/libllama-common.so
     adb push ${ab_test_dir}/libllama-completion-impl-cpuonly.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-cpuonly.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-cpuonly.so                  ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-cpuonly.so      ${REMOTE_PATH}/libllama-bench-impl.so
     # libggml-base.so / libggml-cpu.so are shared across builds, device-side kept as-is
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
@@ -970,8 +955,8 @@ function prepare_run_on_phone()
     adb shell "rm -f /data/local/tmp/${program}.farf"
     adb shell "touch /data/local/tmp/${program}.farf"
     adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
-    #observe cDSP's log with debug build:./scripts/build-run-android.sh build_debug
-    #adb logcat  | grep -iE "CDSP0"
+    #observe cDSP's log
+    #adb logcat  | grep "CDSP0"
 }
 
 
@@ -1003,6 +988,37 @@ function run_llamacli()
                && export GGML_HEXAGON_OPPOLL=1 \
                && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
 
+}
+
+
+function run_llamaserver()
+{
+    local model_name=""
+    local model_path=""
+    local server_running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --load-mode none -fa on -np 1 --host 0.0.0.0"
+
+    if [ $# -ge 1 ]; then
+        model_name="$1"
+        model_path=$(resolve_model_name "$model_name")
+        if [ -z "$model_path" ]; then
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            exit 1
+        fi
+    else
+        model_path="${GGUF_MODEL_NAME}"
+    fi
+
+    prepare_run_on_phone llama-server
+
+    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    echo "adb shell \"cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-server ${server_running_params} -m ${model_path} \""
+    adb shell "cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-server ${server_running_params} -m ${model_path} "
 }
 
 
@@ -1109,8 +1125,8 @@ function run_abtest()
 
     # sanity check: verify out/ab-test/ has all required .so from both builds
     local missing=""
-    local jz_libs="libggml-hexagon-jz.so libggml-jz.so libllama-jz.so libllama-common-jz.so libllama-completion-impl-jz.so libllama-bench-impl-jz.so"
-    local qcom_libs="libggml-hexagon-qcom.so libggml-qcom.so libllama-qcom.so libllama-common-qcom.so libllama-completion-impl-qcom.so libllama-bench-impl-qcom.so"
+    local jz_libs="libggml-hexagon-jz.so libggml-jz.so libllama-jz.so libllama-common-jz.so libllama-completion-impl-jz.so libllama-server-impl-jz.so libmtmd-jz.so libllama-bench-impl-jz.so"
+    local qcom_libs="libggml-hexagon-qcom.so libggml-qcom.so libllama-qcom.so libllama-common-qcom.so libllama-completion-impl-qcom.so libllama-server-impl-qcom.so libmtmd-qcom.so libllama-bench-impl-qcom.so"
     for f in ${jz_libs}; do
         [ ! -f ${ab_test_dir}/${f} ] && missing="${missing} ${f}"
     done
@@ -1153,6 +1169,8 @@ function run_abtest()
     adb push ${ab_test_dir}/libllama-jz.so                  ${REMOTE_PATH}/libllama.so
     adb push ${ab_test_dir}/libllama-common-jz.so           ${REMOTE_PATH}/libllama-common.so
     adb push ${ab_test_dir}/libllama-completion-impl-jz.so  ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-jz.so      ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-jz.so                   ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-jz.so       ${REMOTE_PATH}/libllama-bench-impl.so
     for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
@@ -1184,6 +1202,8 @@ function run_abtest()
     adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
     adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
     adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-qcom.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-qcom.so                  ${REMOTE_PATH}/libmtmd.so
     adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
     for skel in ${ab_test_dir}/libggml-htp-*.so; do
         [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
@@ -1601,7 +1621,6 @@ function show_usage()
     echo "  $0 update_ggml_libs (incremental: push AP-side libs from bin/ to device only; keep DSP skels as-is)"
 
     echo "  $0 build            (build JZ's ggml-hexagon backend)"
-    echo "  $0 build_debug      (build JZ's ggml-hexagon backend in debug mode)"
     echo "  $0 build_qcom       (build Qualcomm's ggml-hexagon backend for performance comparison)"
     echo "  $0 build_armcpu     (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
@@ -1611,6 +1630,10 @@ function show_usage()
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
     echo "  $0 run_llamacli"
     echo "  $0 run_llamabench"
+
+    echo "  $0 run_llamaserver"
+    echo "  In a disconnected environment, download the pre-built UI from a llama.cpp
+    release at https://github.com/ggml-org/llama.cpp/releases and extract to tools/ui/dist."
 
     echo "  $0 run_llamacli_all     (batch test 6 models = 6 tests)"
     echo "    Log capture example:"
@@ -1738,6 +1761,9 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_llamacli" ]; then
         run_llamacli
         exit 0
+    elif [ "$1" == "run_llamaserver" ]; then
+        run_llamaserver
+        exit 0
     elif [ "$1" == "run_stresstest" ]; then
         run_stresstest
         exit 0
@@ -1794,6 +1820,14 @@ elif [ $# == 2 ]; then
         exit 0
     elif [ "$1" == "run_abtest_all" ]; then
         run_abtest_all "$2"
+        exit 0
+    elif [ "$1" == "run_llamaserver" ]; then
+        if [ -z "$(resolve_model_name "$2")" ]; then
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            show_usage
+            exit 1
+        fi
+        run_llamaserver "$2"
         exit 0
     else
         show_usage

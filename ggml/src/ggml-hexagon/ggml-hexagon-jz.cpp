@@ -6638,6 +6638,7 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
             /* .host_buffer           = */ false,
             /* .buffer_from_host_ptr  = */ false,
             /* .events                = */ false,
+            /* .mmap_support          = */ false,
     };
 }
 
