@@ -7,15 +7,13 @@
 	import { Loader2 } from '@lucide/svelte';
 	import { MarkdownContent, SyntaxHighlightedCode } from '$lib/components/app';
 	import { MAX_HEIGHT_CODE_BLOCK } from '$lib/constants';
-	import { getBuiltinToolUi } from '$lib/constants/built-in-tools';
 	import { AttachmentType, FileTypeText, MimeTypeAudio, ToolResultKind } from '$lib/enums';
-	import type { DatabaseMessageExtra } from '$lib/types';
+	import type { AgenticSection, DatabaseMessageExtra, ToolResultLine } from '$lib/types';
 	import {
-		type AgenticSection,
 		classifyToolResult,
 		formatJsonPretty,
-		parseToolResultWithMedia,
-		type ToolResultLine
+		getBuiltinToolUi,
+		parseToolResultWithMedia
 	} from '$lib/utils';
 	import { createBase64DataUrl } from '$lib/utils/data-url';
 
