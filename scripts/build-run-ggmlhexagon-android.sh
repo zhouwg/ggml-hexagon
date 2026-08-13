@@ -83,21 +83,9 @@ HTP_ARCH_VERSIONS="v73 v75 v79 v81"              # all
 HTP_ARCH_VERSION=${HTP_ARCH_VERSIONS%% *}
 
 ######## part-2: prompt and LLM models ########
+#supported models will be downloadded automatically in check_prebuilt_models() when running this script at the first time
 
-#the following LLM models has verified(works fine) with the JZ's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
-#1.12 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
-
-#1.2 GiB
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
-
-#1.2 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
-
-#737 MiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf
-
-#2.9 GiB, will be downloadded automatically via this script when running this script at the first time
+#2.9 GiB, default model, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
@@ -108,17 +96,19 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
 #   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
 #   llama3      -> Llama-3.2-1B-Instruct-Q4_0.gguf
+#   nanbeige-3b -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
 #   (default)   -> gemma-4-E2B-it-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
-        qwen3-2b)   echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
-        qwen3-9b)   echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
-        gemma4-e2b) echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
-        gemma4-e4b) echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
-        qwen1)      echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
-        llama3)     echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
-        *)          echo "" ; return 1 ;;
+        qwen3-2b)           echo "/sdcard/Qwen3.5-2B-Q4_0.gguf" ;;
+        qwen3-9b)           echo "/sdcard/Qwen3.5-9B-Q4_0.gguf" ;;
+        gemma4-e2b)         echo "/sdcard/gemma-4-E2B-it-Q4_0.gguf" ;;
+        gemma4-e4b)         echo "/sdcard/gemma-4-E4B_q4_0-it.gguf" ;;
+        qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
+        llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
+        nanbeige-3b)        echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf";;
+        *)                  echo "" ; return 1 ;;
     esac
 }
 
@@ -651,6 +641,20 @@ function check_prebuilt_models()
     #737 MiB
     check_and_download_model Llama-3.2-1B-Instruct-Q4_0.gguf     https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_0.gguf
 
+    #2.4 GiB
+    check_and_download_model Nanbeige_Nanbeige4.2-3B-Q4_0.gguf   https://huggingface.com/bartowski/Nanbeige_Nanbeige4.2-3B-GGUF/resolve/main/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
+
+    #4.2 GiB
+    #FIXME: does not work with JZ's ggml-hexagon
+    #check_and_download_model Nanbeige_Nanbeige4.2-3B-Q8_0.gguf   https://huggingface.co/bartowski/Nanbeige_Nanbeige4.2-3B-GGUF/resolve/main/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
+
+    #1.1 GiB
+    #FIXME: does not work with JZ's ggml-hexagon
+    #check_and_download_model MiniCPM5-1B-Q8_0.gguf               https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q8_0.gguf
+
+    #635 MiB
+    #FIXME: does not work with JZ's ggml-hexagon
+    #check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
     set -e
 }
 

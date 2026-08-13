@@ -4892,31 +4892,6 @@ static void ggml_backend_hexagon_buffer_clear(ggml_backend_buffer_t buffer, uint
     }
 }
 
-static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-    for (size_t copy = 0; copy < n_copies; copy++) {
-        memcpy((char *)tensor->data + offset + copy * stride_tensor, (const char *)data + copy * stride_data, size);
-    }
-
-    ggml_backend_hexagon_buffer_context * bctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
-    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
-        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
-        const char * dp   = (const char *)tensor->data + offset;
-        const char * base = (const char *)hctx->rpc_mempool;
-        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
-            hctx->weights_dirty = true;
-        }
-    }
-}
-
-static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-    // get_tensor_2d is only used for non-quantized tensor access (views, broadcasting),
-    // so raw memcpy is correct. Quantized weights use get_tensor() for inverse-repack.
-    GGML_UNUSED(buffer);
-    for (size_t copy = 0; copy < n_copies; copy++) {
-        memcpy((char *)data + copy * stride_data, (const char *)tensor->data + offset + copy * stride_tensor, size);
-    }
-}
-
 static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .free_buffer     = */ ggml_backend_hexagon_buffer_free_buffer,
         /* .get_base        = */ ggml_backend_hexagon_buffer_get_base,
@@ -4924,8 +4899,8 @@ static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .memset_tensor   = */ ggml_backend_hexagon_buffer_memset_tensor,
         /* .set_tensor      = */ ggml_backend_hexagon_buffer_set_tensor,
         /* .get_tensor      = */ ggml_backend_hexagon_buffer_get_tensor,
-        /* .set_tensor_2d   = */ ggml_backend_hexagon_buffer_set_tensor_2d,
-        /* .get_tensor_2d   = */ ggml_backend_hexagon_buffer_get_tensor_2d,
+        /* .set_tensor_2d   = */ nullptr,
+        /* .get_tensor_2d   = */ nullptr,
         /* .cpy_tensor      = */ ggml_backend_hexagon_buffer_cpy_tensor,
         /* .clear           = */ ggml_backend_hexagon_buffer_clear,
         /* .reset           = */ nullptr,
