@@ -1046,57 +1046,6 @@ static void ggmlhexagon_check_valid_appcfg() {
     }
 }
 
-// Check if a ggml_type is allowed by the enabled_types config filter
-// Returns true if the type is in the enabled list, or if the list is empty (all types allowed)
-// Only applies to quantized types and F16/BF16; F32 is always allowed
-static bool ggmlhexagon_type_is_enabled(enum ggml_type type) {
-    if (g_hexagon_appcfg.enabled_types.empty()) {
-        return true;
-    }
-    // F32 is always allowed
-    if (type == GGML_TYPE_F32) {
-        return true;
-    }
-    const char * type_name = ggml_type_name(type);
-    if (type_name == NULL) {
-        return false;
-    }
-    // Check if type_name appears as a whole word in the comma-separated list
-    const std::string & list = g_hexagon_appcfg.enabled_types;
-    size_t pos = 0;
-    while (pos < list.size()) {
-        size_t end = list.find(',', pos);
-        if (end == std::string::npos) end = list.size();
-        std::string token = list.substr(pos, end - pos);
-        // trim whitespace
-        size_t start = token.find_first_not_of(" \t");
-        size_t last = token.find_last_not_of(" \t");
-        if (start != std::string::npos && last != std::string::npos) {
-            token = token.substr(start, last - start + 1);
-        }
-        // "all" keyword enables all types
-        if (token.size() == 3 &&
-            tolower((unsigned char)token[0]) == 'a' &&
-            tolower((unsigned char)token[1]) == 'l' &&
-            tolower((unsigned char)token[2]) == 'l') {
-            return true;
-        }
-        // case-insensitive compare (ggml_type_name returns lowercase, cfg may use Q4_0 or q4_0)
-        if (token.size() == strlen(type_name)) {
-            bool match = true;
-            for (size_t i = 0; i < token.size(); ++i) {
-                if (tolower((unsigned char)token[i]) != tolower((unsigned char)type_name[i])) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return true;
-        }
-        pos = end + 1;
-    }
-    return false;
-}
-
 // Set the runtime library path where DSP skeleton .so files (libggmldsp-skel-v*.so)
 // and ggml-hexagon.cfg are located. Must be called before any hexagon backend
 // registration to take effect.
@@ -3958,15 +3907,6 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         return false;
     }
 
-    if (!ggmlhexagon_type_is_enabled(src0->type)) {
-        // Q4_K/Q5_K/Q6_K are stored as Q4_0 (see set_tensor); inherit Q4_0's enablement
-        if (!(src0->type == GGML_TYPE_Q4_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0)) &&
-            !(src0->type == GGML_TYPE_Q5_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0)) &&
-            !(src0->type == GGML_TYPE_Q6_K && ggmlhexagon_type_is_enabled(GGML_TYPE_Q4_0))) {
-            return false;
-        }
-    }
-
     switch (src0->type) {
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q4_0:
@@ -4736,62 +4676,62 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q4_0:
             case GGML_TYPE_IQ4_NL:  // identical block layout to Q4_0
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             case GGML_TYPE_Q4_1:
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q4_1_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             case GGML_TYPE_Q8_0: {
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q8_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             }
             case GGML_TYPE_MXFP4:
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_mxfp4_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             case GGML_TYPE_BF16:
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_bf16_to_f16(tensor, data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             case GGML_TYPE_Q4_K:
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             case GGML_TYPE_Q5_K: {
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q5k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
                     // weight lives on heap (model too big for mempool); CPU fallback needs raw Q5_K bytes
@@ -4801,20 +4741,20 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             }
             case GGML_TYPE_Q6_K:
                 if (dp >= base && dp < end) {
-                    GGMLHEXAGON_LOG_ALWAYS("repack");
+                    GGMLHEXAGON_LOG_DEBUG("repack");
                     repack_q6k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
-                    GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
                 }
                 break;
             default:
-                GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                 memcpy((char *)tensor->data + offset, data, size);
                 break;
         }
     } else {
-        GGMLHEXAGON_LOG_ALWAYS("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+        GGMLHEXAGON_LOG_DEBUG("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
                                (unsigned long long)hctx->set_tensor_call_count, tensor->name, (int)tensor->type, ggml_type_name(tensor->type),
                                (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
@@ -4846,7 +4786,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
 static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                                                const ggml_tensor * tensor,
                                                void * data, size_t offset, size_t size) {
-    GGMLHEXAGON_LOG_ALWAYS("enter %s", __FUNCTION__);
+    GGMLHEXAGON_LOG_DEBUG("enter %s", __FUNCTION__);
     // Un-repack tiled layout back to canonical GGML format only when
     // the tensor lives in the repack buffer.
     if (ggml_backend_buffer_is_hexagon_repack(buffer)) {
@@ -4863,55 +4803,55 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q4_0:
                 case GGML_TYPE_IQ4_NL:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_q4_0_to_buf(data, tensor, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
                 case GGML_TYPE_Q4_1:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_q4_1_to_buf(data, tensor, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
                 case GGML_TYPE_Q8_0:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_q8_0_to_buf(data, tensor, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
                 case GGML_TYPE_MXFP4:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_mxfp4_to_buf(data, tensor, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
                 case GGML_TYPE_BF16:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_f16_to_bf16(tensor, data, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
                 case GGML_TYPE_Q4_K:
                     if (dp >= base && dp < end) {
-                        GGMLHEXAGON_LOG_ALWAYS("unpack");
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
                     } else {
-                        GGMLHEXAGON_LOG_ALWAYS("cpu buffer");
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
                     }
                     return;
@@ -4922,7 +4862,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                     break;
             }
         } else {
-            GGMLHEXAGON_LOG_ALWAYS("size %zu, nbytes %zu", size, ggml_nbytes(tensor));
+            GGMLHEXAGON_LOG_DEBUG("size %zu, nbytes %zu", size, ggml_nbytes(tensor));
         }
     }
     memcpy(data, (const char *)tensor->data + offset, size);
