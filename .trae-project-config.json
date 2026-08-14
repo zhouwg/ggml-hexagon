@@ -40,8 +40,8 @@
         }
       },
       "test_matrix": {
-        "models": ["gemma4", "qwen3", "qwen3-mtp", "qwen1", "llama3"],
-        "total_tests": 5
+        "models": ["qwen1", "llama3", "qwen3-2b", "gemma4-e2b", "nanbeige-3b", "gemma4-e4b", "qwen3-9b"],
+        "total_tests": 7
       },
       "validation_criteria": {
         "pp_tg_valid": {
@@ -59,17 +59,19 @@
           "check": "Scan output for the same sentence appearing 3+ times consecutively. A single repeated sentence is OK; endless looping is a bug.",
           "action_on_failure": "The commit MUST NOT proceed. This indicates a sampling or logits corruption issue."
         },
-        "all_5_tests_pass": {
-          "description": "All 5 tests (5 models) MUST pass all 3 validation criteria above. Any single failure blocks the commit.",
+        "all_7_tests_pass": {
+          "description": "All 7 tests (7 models) MUST pass all 3 validation criteria above. Any single failure blocks the commit.",
           "summary_table_format": "| # | Model | PP (tok/s) | TG (tok/s) | Output OK | Status |"
         }
       },
       "commands": [
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3-mtp",
         "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen1",
-        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3"
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli llama3",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3-2b",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4-e2b",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli nanbeige-3b",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4-e4b",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli qwen3-9b"
       ]
     },
     "commit_message_rules": {
@@ -254,7 +256,8 @@
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
     "phone_connected_locally": "adb connects to the Android phone locally",
     "default_verify_target": "source-built libggmldsp-skel.so, run ./scripts/build-run-ggmlhexagon-android.sh build",
-    "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom"
+    "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom",
+    "JZ vs QCOM AB test performance report": "Performance reports should follow the format of docs/backend/jz-ggml-hexagon/abtest-analysis-20260814-1407-en.md"
   },
   "hexagon_implementations": {
     "description": "JZ and Qualcomm use SEPARATE DSP kernel directories. JZ uses kernels/ (independent fork, primary development target); Qualcomm uses htp/ (tracks upstream master). They differ in ARM-AP source file, DSP entry-point source file, and DSP kernel directory.",

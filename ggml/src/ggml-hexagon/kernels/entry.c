@@ -415,8 +415,6 @@ static inline void weight_inval_unmark(const void * ptr) {
 /* DSP-side cache optimization: prior_dst tracking (bit 1) + bulk flush (bit 2).
  *
  * Both are gated by g_dsp_ctx->dsp_cache_mode and operate on per-batch state.
- * They use simple range lists (no hash bitmap) to avoid the ptr-based hash
- * collision bug from the earlier commit that caused qwen3 garbled output.
  *
  * - bit 1 (skip dcinva for prior dst): when the next op's src is the *same*
  *   tensor as a small dst of an earlier op in the same batch, and its range is
@@ -443,7 +441,6 @@ static inline void weight_inval_unmark(const void * ptr) {
  * scoped and reset on model reload (via execute_batch 0xFFFC bit 4) so
  * new weights at reused ION addresses are properly invalidated.
  */
-/* True iff [q_base, q_base+q_len) is fully contained in [r_base, r_base+r_len). */
 static inline bool dsp_range_contains(const void * r_base, size_t r_len,
                                       const void * q_base, size_t q_len) {
     if (!r_base || !q_base || q_len == 0) return false;
@@ -2383,8 +2380,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             } else {
                 ggml_dsp_cache_flush_range(g_dsp_ctx->dst_dt_buf[k].data, g_dsp_ctx->dst_dt_buf[k].data_len);
             }
-            /* Mark dst tensor as dirty: next time it's used as src,
-             * it must be re-invalidated. */
+            /* Mark dst tensor as dirty: next time it's used as src, it must be re-invalidated. */
             g_dsp_ctx->batch_tensor_needs_inval[op->dst_idx[k]] = 1;
             if (g_dsp_ctx->dsp_cache_mode & 0x1) {
                 weight_inval_unmark(g_dsp_ctx->dst_dt_buf[k].data);

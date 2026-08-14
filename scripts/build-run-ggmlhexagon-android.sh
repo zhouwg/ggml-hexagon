@@ -95,10 +95,10 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
 #   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
 #   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
+#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   (default)           -> gemma-4-E2B-it-Q4_0.gguf
 #FIXME: does not work with JZ's ggml-hexagon
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
-#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 function resolve_model_name()
 {

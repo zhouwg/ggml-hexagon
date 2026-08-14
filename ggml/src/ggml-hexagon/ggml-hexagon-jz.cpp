@@ -6167,16 +6167,14 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     if (ranges[i].first <= cur_end || ranges[i].first - cur_end <= merge_gap) {
                         if (ranges[i].second > cur_end) cur_end = ranges[i].second;
                     } else {
-                        cpu_dcache_flush_range(ctx, 0,
-                            (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                        cpu_dcache_flush_range(ctx, 0, (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
                         flush_bytes += cur_end - cur_start;
                         n_flush++;
                         cur_start = ranges[i].first;
                         cur_end   = ranges[i].second;
                     }
                 }
-                cpu_dcache_flush_range(ctx, 0,
-                    (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
+                cpu_dcache_flush_range(ctx, 0, (char *)ctx->rpc_mempool + cur_start, cur_end - cur_start);
                 flush_bytes += cur_end - cur_start;
                 n_flush++;
             }
