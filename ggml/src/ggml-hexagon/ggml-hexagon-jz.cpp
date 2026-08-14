@@ -314,9 +314,11 @@ struct ggml_backend_hexagon_context {
     char repack_buft_name[GGML_MAX_NAME];       // "hexagon-ion-buffer-<name>-REPACK"
 
     // Per-device hardware caps (probed at init, used by supports_op)
-    bool has_vtcm;  // domain has VTCM pages available
-    bool has_hvx;   // domain has HVX support
-    bool has_hmx;   // domain has HMX support
+    bool has_vtcm;                              // domain has VTCM pages available
+    bool has_hvx;                               // domain has HVX support
+    bool has_hmx;                               // domain has HMX support
+    bool has_async_fastrpc;                     // domain supports async FastRPC
+    bool has_extended_map;                      // domain supports extended (>=4 GiB) VA mapping
 
     // Cached htp_mm_kernel_params per (weight_data, ne11). For TG, the
     // precompute math produces identical results for every token, so we
@@ -357,6 +359,8 @@ struct ggml_backend_hexagon_context {
 
     // QKV fusion: one-shot warning state moved from function-static to ctx member
     bool warned_qkv_name;
+
+    uint64_t set_tensor_call_count;
 
     ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev);
     ~ggml_backend_hexagon_context();
@@ -430,7 +434,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7"},
+        .version                = {"0.99.7.2"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -636,11 +640,12 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
     GGMLHEXAGON_LOG_VERBOSE("device info: %s, dsp arch version 0x%x, system mem size %d MiB",
                              ctx->socinfo.soc_desc, dsp_version, total_mem / SIZE_IN_MB);
-    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d",
+    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d async_fastrpc=%d extended_map=%d",
                              ctx->device, ctx->name,
                              ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
                              ctx->socinfo.vtcm_size_in_mb,
-                             (int)ctx->has_hvx, (int)ctx->has_hmx);
+                             (int)ctx->has_hvx, (int)ctx->has_hmx,
+                             (int)ctx->has_async_fastrpc, (int)ctx->has_extended_map);
     GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
                              ctx->max_layer_idx_seen + 1);
     GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p10=%lld us cum_graph=%lld us avg_p10=%lld us avg_graph=%lld us",
@@ -930,7 +935,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.2");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -1190,7 +1195,6 @@ static bool ggmlhexagon_is_metadata_op(enum ggml_op op) {
         case GGML_OP_RESHAPE:
         case GGML_OP_PERMUTE:
         case GGML_OP_TRANSPOSE:
-        case GGML_OP_REPEAT:
             return true;
         default:
             return false;
@@ -1492,6 +1496,46 @@ bail:
     return false;
 }
 
+// Probe whether the DSP domain supports mapping buffers into the extended
+// (>=4 GiB) virtual address range. If 1, fastrpc_mmap can use
+// FASTRPC_MAP_FD_EXTENDED / FASTRPC_MAP_FD_DELAYED_EXTENDED to place buffers
+// beyond the 32-bit user VA ceiling, unlocking scatter-gather and sliding
+// window schemes that would otherwise hit the 4 GiB VA hard cap.
+static bool ggmlhexagon_is_extended_map_supported(int domain) {
+    int hexagon_error = AEE_SUCCESS;
+    if (remote_handle_control) {
+        if (domain == CDSP_DOMAIN_ID) {
+            struct remote_dsp_capability dsp_capability_extended_map;
+            dsp_capability_extended_map.domain       = (uint32_t)domain;
+            dsp_capability_extended_map.attribute_ID = EXTENDED_MAP_SUPPORT;
+            dsp_capability_extended_map.capability   = (uint32_t)0;
+            hexagon_error = remote_handle_control(DSPRPC_GET_DSP_INFO, &dsp_capability_extended_map, sizeof(struct remote_dsp_capability));
+            if ((hexagon_error & 0xFF) == (AEE_EUNSUPPORTEDAPI & 0xFF)) {
+                GGMLHEXAGON_LOG_WARN("FastRPC Capability API is not supported on this device");
+                hexagon_error = AEE_SUCCESS;
+                goto bail;
+            } else if (dsp_capability_extended_map.capability == 1) {
+                return true;
+            }
+
+            if (hexagon_error != AEE_SUCCESS){
+                GGMLHEXAGON_LOG_WARN("failed with error 0x%x", hexagon_error);
+                goto bail;
+            }
+        } else {
+            hexagon_error = AEE_EUNSUPPORTED;
+            GGMLHEXAGON_LOG_WARN("extended VA mapping is not supported on domain %d", domain);
+            goto bail;
+        }
+    } else {
+        hexagon_error = AEE_EUNSUPPORTEDAPI;
+        GGMLHEXAGON_LOG_WARN("remote_dsp_capability interface is not supported on this device");
+    }
+
+bail:
+    return false;
+}
+
 static void ggmlhexagon_set_rpc_latency(remote_handle64 handle, int qos, int latency) {
     int hexagon_error = AEE_SUCCESS;
     (void)latency;
@@ -1718,10 +1762,10 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
 
     int64_t t0_reg = ggml_time_us();
-    int reg_err = ggml_dsp_register_ion(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+    int reg_err = ggml_dsp_register_rpcmem(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
     int64_t dt_reg = ggml_time_us() - t0_reg;
     if (reg_err != AEE_SUCCESS) {
-        GGMLHEXAGON_LOG_ERROR("dsp_register_ion failed: 0x%x, aborting backend init", reg_err);
+        GGMLHEXAGON_LOG_ERROR("dsp_register_rpcmem failed: 0x%x, aborting backend init", reg_err);
         fastrpc_munmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, ctx->rpc_mempool_len);
         rpcmem_free(ctx->rpc_mempool);
         ctx->rpc_mempool = nullptr;
@@ -1796,11 +1840,14 @@ static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
     }
     GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
     //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
+    ctx->has_async_fastrpc  = ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id);
+    ctx->has_extended_map   = ggmlhexagon_is_extended_map_supported(ctx->domain_id);
     GGMLHEXAGON_LOG_ALWAYS("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
-                            "unsigned pd supported %d, async fastrpc supported %d",
+                            "unsigned pd supported %d, async fastrpc supported %d, extended va map supported %d",
                                 ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
                                 ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
-                                ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id));
+                                (int)ctx->has_async_fastrpc,
+                                (int)ctx->has_extended_map);
     return htp_arch;
 }
 
@@ -3073,7 +3120,10 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       has_vtcm(false),
       has_hvx(false),
       has_hmx(false),
-      warned_qkv_name(false) {
+      has_async_fastrpc(false),
+      has_extended_map(false),
+      warned_qkv_name(false),
+      set_tensor_call_count(0) {
     snprintf(name, sizeof(name), "Hexagon-cDSP%d", dev_id);
     snprintf(desc, sizeof(desc), "Qualcomm NPU(CDSP%d)", dev_id);
     snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
@@ -3531,9 +3581,19 @@ static bool hexagon_validate_concat(ggml_backend_hexagon_context * ctx, const gg
 static bool hexagon_validate_repeat(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
-    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
-        src0->type != GGML_TYPE_I32 && src0->type != GGML_TYPE_I16)
-        return false;
+    const ggml_tensor * dst  = op;
+
+    if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) return false;
+
+    if (src0->type != dst->type) return false;
+
+    if (dst->ne[0] % src0->ne[0] != 0) return false;
+    if (dst->ne[1] % src0->ne[1] != 0) return false;
+    if (dst->ne[2] % src0->ne[2] != 0) return false;
+    if (dst->ne[3] % src0->ne[3] != 0) return false;
+
+    if (ggml_is_transposed(src0) || ggml_is_transposed(dst)) return false;
+
     return true;
 }
 
@@ -3776,14 +3836,12 @@ static void init_op_validators(void) {
 }
 
 static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const struct ggml_tensor * op_tensor) {
-    if (!ggmlhexagon_is_metadata_op(op_tensor->op)) {
-        if (!ggmlhexagon_op_buffers_belong_to_dev(dev, op_tensor)) {
-            return false;
-        }
-    }
-
     if (ggmlhexagon_is_metadata_op(op_tensor->op)) {
         return true;
+    }
+
+    if (!ggmlhexagon_op_buffers_belong_to_dev(dev, op_tensor)) {
+        return false;
     }
 
     init_op_validators();
@@ -3801,53 +3859,48 @@ struct ggml_backend_hexagon_buffer_context {
         if (buffer) {
             if (is_ion_buffer) {
                 if (backend_ctx && backend_ctx->rpc_mempool) {
-                    {
-                        // Mark the mempool region as free so it can be reused
-                        const char * buf_ptr = (const char *)buffer;
-                        const char * pool_base = (const char *)backend_ctx->rpc_mempool;
-                        if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
-                            size_t buf_offset = (size_t)(buf_ptr - pool_base);
-                            for (size_t ri = 0; ri < backend_ctx->ion_regions.size(); ri++) {
-                                auto & r = backend_ctx->ion_regions[ri];
-                                if (r.in_use && r.offset == buf_offset) {
-                                    r.in_use = false;
-                                    GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d region offset=%zu size=%zu",
-                                                          backend_ctx->device, r.offset, r.size);
-                                    // Coalesce with adjacent free regions to reduce external fragmentation
-                                    // 1) Merge with next region if free and contiguous
-                                    if (ri + 1 < backend_ctx->ion_regions.size()) {
-                                        auto & next = backend_ctx->ion_regions[ri + 1];
-                                        if (!next.in_use && r.offset + r.size == next.offset) {
-                                            GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-next: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
-                                                                  backend_ctx->device, r.offset, r.size, next.offset, next.size, r.size + next.size);
-                                            r.size += next.size;
-                                            backend_ctx->ion_regions.erase(
-                                                backend_ctx->ion_regions.begin() + ri + 1);
-                                        }
+                    // Mark the mempool region as free so it can be reused
+                    const char * buf_ptr = (const char *)buffer;
+                    const char * pool_base = (const char *)backend_ctx->rpc_mempool;
+                    if (buf_ptr >= pool_base && buf_ptr < pool_base + (ptrdiff_t)backend_ctx->rpc_mempool_len) {
+                        size_t buf_offset = (size_t)(buf_ptr - pool_base);
+                        for (size_t ri = 0; ri < backend_ctx->ion_regions.size(); ri++) {
+                            auto & r = backend_ctx->ion_regions[ri];
+                            if (r.in_use && r.offset == buf_offset) {
+                                r.in_use = false;
+                                GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d region offset=%zu size=%zu",
+                                                      backend_ctx->device, r.offset, r.size);
+                                // Coalesce with adjacent free regions to reduce external fragmentation
+                                // 1) Merge with next region if free and contiguous
+                                if (ri + 1 < backend_ctx->ion_regions.size()) {
+                                    auto & next = backend_ctx->ion_regions[ri + 1];
+                                    if (!next.in_use && r.offset + r.size == next.offset) {
+                                        GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-next: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
+                                                              backend_ctx->device, r.offset, r.size, next.offset, next.size, r.size + next.size);
+                                        r.size += next.size;
+                                        backend_ctx->ion_regions.erase(
+                                            backend_ctx->ion_regions.begin() + ri + 1);
                                     }
-                                    // 2) Merge with previous region if free and contiguous
-                                    if (ri > 0) {
-                                        auto & prev = backend_ctx->ion_regions[ri - 1];
-                                        if (!prev.in_use && prev.offset + prev.size == r.offset) {
-                                            GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-prev: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
-                                                                  backend_ctx->device, prev.offset, prev.size, r.offset, r.size, prev.size + r.size);
-                                            prev.size += r.size;
-                                            backend_ctx->ion_regions.erase(
-                                                backend_ctx->ion_regions.begin() + ri);
-                                        }
-                                    }
-                                    break;
                                 }
+                                // 2) Merge with previous region if free and contiguous
+                                if (ri > 0) {
+                                    auto & prev = backend_ctx->ion_regions[ri - 1];
+                                    if (!prev.in_use && prev.offset + prev.size == r.offset) {
+                                        GGMLHEXAGON_LOG_ALWAYS("[FREE] device=%d merge-prev: offset=%zu size=%zu + offset=%zu size=%zu -> size=%zu",
+                                                              backend_ctx->device, prev.offset, prev.size, r.offset, r.size, prev.size + r.size);
+                                        prev.size += r.size;
+                                        backend_ctx->ion_regions.erase(
+                                            backend_ctx->ion_regions.begin() + ri);
+                                    }
+                                }
+                                break;
                             }
                         }
                     }
                 }
             } else {
-#if defined(_WIN32)
-                _aligned_free(buffer);
-#else
-                free(buffer);
-#endif
+                GGMLHEXAGON_LOG_ALWAYS("it shouldn't come here");
+                GGML_ASSERT(1 == 0);
             }
         }
     }
@@ -3872,6 +3925,7 @@ static void ggml_backend_hexagon_buffer_free_buffer(ggml_backend_buffer_t buffer
         bctx->tiled_ion_offsets.clear();
         bctx->warned_non_repack.clear();
         bctx->warned_qkv_name = false;
+        bctx->set_tensor_call_count = 0;
         bctx->dsp_need_weight_inval_reset = true;
     }
     delete ctx;
@@ -4622,22 +4676,23 @@ static void repack_tiled_q4_0_to_q4k_buf(void * dst_data, const ggml_tensor * t,
     GGML_UNUSED(size);
 }
 
+// Repack quantized types into tiled (HMX) layout only when the tensor
+// lives in the repack buffer (e.g. weights loaded from GGUF). Tensors
+// in the main buffer (e.g. test-backend-ops allocations) stay in canonical GGML format.
 static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                                                ggml_tensor * tensor, const void * data,
                                                size_t offset, size_t size) {
-    // Repack quantized types into tiled (HMX) layout only when the tensor
-    // lives in the repack buffer (e.g. weights loaded from GGUF). Tensors
-    // in the main buffer (e.g. test-backend-ops allocations) stay in
-    // canonical GGML format.
-    static uint64_t set_tensor_call_count = 0;
-    bool is_repack = ggml_backend_buffer_is_hexagon_repack(buffer);
-    if (set_tensor_call_count < 10 || is_repack) {
-        GGMLHEXAGON_LOG_INFO("[SET_TENSOR] #%llu name=%s type=%d ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
-                               (unsigned long long)set_tensor_call_count, tensor->name, (int)tensor->type,
+    ggml_backend_hexagon_buffer_context * bctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
+    ggml_backend_hexagon_context * hctx        = (ggml_backend_hexagon_context *)buffer->buft->context;
+    bool is_repack                             = ggml_backend_buffer_is_hexagon_repack(buffer);
+    if (is_repack) {
+        GGMLHEXAGON_LOG_ALWAYS("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+                               (unsigned long long)hctx->set_tensor_call_count, tensor->name, (int)tensor->type, ggml_type_name(tensor->type),
                                (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
                                ggml_nbytes(tensor), (int)is_repack, offset, size);
     }
-    set_tensor_call_count++;
+    hctx->set_tensor_call_count++;
+
     // Track max layer index from the last contiguous digit run in tensor name.
     // Supports multiple naming conventions:
     //   ffn_gate-12          (qwen3, dash separator)
@@ -4671,46 +4726,61 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             }
         }
     }
+
     if (is_repack) {
+        const char * dp                     = (const char *)tensor->data;
+        const char * base                   = (const char *)hctx->rpc_mempool;
+        const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
+        GGML_ASSERT(offset == 0);
+        GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+
         switch (tensor->type) {
             case GGML_TYPE_Q4_0:
             case GGML_TYPE_IQ4_NL:  // identical block layout to Q4_0
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                if (dp >= base && dp < end) {
+                    repack_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
             case GGML_TYPE_Q4_1:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q4_1_tiled_to_buf(tensor, data, tensor->data);
+                if (dp >= base && dp < end) {
+                    repack_q4_1_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
-            case GGML_TYPE_Q8_0:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q8_0_tiled_to_buf(tensor, data, tensor->data);
+            case GGML_TYPE_Q8_0: {
+                if (dp >= base && dp < end) {
+                    repack_q8_0_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
+            }
             case GGML_TYPE_MXFP4:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_mxfp4_tiled_to_buf(tensor, data, tensor->data);
+                if (dp >= base && dp < end) {
+                    repack_mxfp4_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
             case GGML_TYPE_BF16:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_bf16_to_f16(tensor, data);
+                if (dp >= base && dp < end) {
+                    repack_bf16_to_f16(tensor, data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
             case GGML_TYPE_Q4_K:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                if (dp >= base && dp < end) {
+                    repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
             case GGML_TYPE_Q5_K: {
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                ggml_backend_hexagon_context * sctx = (ggml_backend_hexagon_context *) buffer->buft->context;
-                const char * dp   = (const char *)tensor->data;
-                const char * base = (const char *)sctx->rpc_mempool;
-                if (dp >= base && dp < base + (ptrdiff_t)sctx->rpc_mempool_len) {
+                if (dp >= base && dp < end) {
                     repack_q5k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
                 } else {
                     // weight lives on heap (model too big for mempool); CPU fallback needs raw Q5_K bytes
@@ -4719,15 +4789,21 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                 break;
             }
             case GGML_TYPE_Q6_K:
-                GGML_ASSERT(offset == 0);
-                GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
-                repack_q6k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                if (dp >= base && dp < end) {
+                    repack_q6k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                } else {
+                    memcpy(tensor->data, data, size);
+                }
                 break;
             default:
                 memcpy((char *)tensor->data + offset, data, size);
                 break;
         }
     } else {
+        GGMLHEXAGON_LOG_DEBUG("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+                               (unsigned long long)hctx->set_tensor_call_count, tensor->name, (int)tensor->type, ggml_type_name(tensor->type),
+                               (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
+                               ggml_nbytes(tensor), (int)is_repack, offset, size);
         memcpy((char *)tensor->data + offset, data, size);
     }
 
@@ -4736,39 +4812,19 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     // cold-state cache-clean cost from the first inference batch to model-load
     // time. Do NOT clear weights_dirty here: non-repack weights (F32/F16/BF16)
     // that were written earlier in the load sequence still need Phase 9 flush.
-    ggml_backend_hexagon_buffer_context * bctx =
-        (ggml_backend_hexagon_buffer_context *)buffer->context;
-    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
-        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
-        const char * dp   = (const char *)tensor->data + offset;
-        const char * base = (const char *)hctx->rpc_mempool;
-        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+    if (bctx->is_ion_buffer) {
+        const char * dp                     = (const char *)tensor->data + offset;
+        const char * base                   = (const char *)hctx->rpc_mempool;
+        const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
+        if (dp >= base && dp < end) {
             if (is_repack) {
                 size_t flush_len = ggml_hexagon_repacked_size(tensor->type, tensor->ne[0], tensor->ne[1],
                                                               tensor->ne[2], tensor->ne[3]);
                 if (flush_len == 0) flush_len = ggml_nbytes(tensor);
-                cpu_dcache_flush_range(hctx, hctx->rpc_mempool_handle,
-                                       tensor->data, flush_len);
+                cpu_dcache_flush_range(hctx, hctx->rpc_mempool_handle, tensor->data, flush_len);
             } else {
                 hctx->weights_dirty = true;
             }
-        }
-    }
-}
-
-static void ggml_backend_hexagon_buffer_memset_tensor(ggml_backend_buffer_t buffer,
-                                                  struct ggml_tensor * tensor,
-                                                  uint8_t value, size_t offset, size_t size) {
-    memset((char *)tensor->data + offset, value, size);
-
-    ggml_backend_hexagon_buffer_context * bctx =
-        (ggml_backend_hexagon_buffer_context *)buffer->context;
-    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
-        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
-        const char * dp   = (const char *)tensor->data + offset;
-        const char * base = (const char *)hctx->rpc_mempool;
-        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
-            hctx->weights_dirty = true;
         }
     }
 }
@@ -4779,26 +4835,58 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
     // Un-repack tiled layout back to canonical GGML format only when
     // the tensor lives in the repack buffer.
     if (ggml_backend_buffer_is_hexagon_repack(buffer)) {
-        if (offset == 0 && size == ggml_nbytes(tensor)) {
+        // In CPU-fallback mode (model exceeds mempool) weights are stored raw,
+        // so a plain memcpy is the correct read-back.
+        ggml_backend_hexagon_context * hctx = (ggml_backend_hexagon_context *)buffer->buft->context;
+        const char * dp                     = (const char *)tensor->data;
+        const char * base                   = (const char *)hctx->rpc_mempool;
+        const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
+        GGML_ASSERT(offset == 0);
+        GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
+        if (size == ggml_nbytes(tensor)) {
             switch (tensor->type) {
                 case GGML_TYPE_Q4_0:
                 case GGML_TYPE_IQ4_NL:
-                    repack_tiled_q4_0_to_buf(data, tensor, size);
+                    if (dp >= base && dp < end) {
+                        repack_tiled_q4_0_to_buf(data, tensor, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 case GGML_TYPE_Q4_1:
-                    repack_tiled_q4_1_to_buf(data, tensor, size);
+                    if (dp >= base && dp < end) {
+                        repack_tiled_q4_1_to_buf(data, tensor, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 case GGML_TYPE_Q8_0:
-                    repack_tiled_q8_0_to_buf(data, tensor, size);
+                    if (dp >= base && dp < end) {
+                        repack_tiled_q8_0_to_buf(data, tensor, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 case GGML_TYPE_MXFP4:
-                    repack_tiled_mxfp4_to_buf(data, tensor, size);
+                    if (dp >= base && dp < end) {
+                        repack_tiled_mxfp4_to_buf(data, tensor, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 case GGML_TYPE_BF16:
-                    repack_f16_to_bf16(tensor, data, size);
+                    if (dp >= base && dp < end) {
+                        repack_f16_to_bf16(tensor, data, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 case GGML_TYPE_Q4_K:
-                    repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
+                    if (dp >= base && dp < end) {
+                        repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
+                    } else {
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
                     return;
                 // Q6_K get_tensor (tiled Q4_0 -> Q6_K) not implemented;
                 // falls through to raw memcpy. Inference is unaffected since
@@ -4810,6 +4898,22 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
     }
     memcpy(data, (const char *)tensor->data + offset, size);
     GGML_UNUSED(buffer);
+}
+
+static void ggml_backend_hexagon_buffer_memset_tensor(ggml_backend_buffer_t buffer,
+                                                  struct ggml_tensor * tensor,
+                                                  uint8_t value, size_t offset, size_t size) {
+    memset((char *)tensor->data + offset, value, size);
+
+    ggml_backend_hexagon_buffer_context * bctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
+    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
+        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
+        const char * dp   = (const char *)tensor->data + offset;
+        const char * base = (const char *)hctx->rpc_mempool;
+        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
+            hctx->weights_dirty = true;
+        }
+    }
 }
 
 static bool ggml_backend_hexagon_buffer_cpy_tensor(ggml_backend_buffer_t buffer,
@@ -4836,31 +4940,6 @@ static void ggml_backend_hexagon_buffer_clear(ggml_backend_buffer_t buffer, uint
     }
 }
 
-static void ggml_backend_hexagon_buffer_set_tensor_2d(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-    for (size_t copy = 0; copy < n_copies; copy++) {
-        memcpy((char *)tensor->data + offset + copy * stride_tensor, (const char *)data + copy * stride_data, size);
-    }
-
-    ggml_backend_hexagon_buffer_context * bctx = (ggml_backend_hexagon_buffer_context *)buffer->context;
-    if (bctx && bctx->is_ion_buffer && bctx->backend_ctx) {
-        ggml_backend_hexagon_context * hctx = bctx->backend_ctx;
-        const char * dp   = (const char *)tensor->data + offset;
-        const char * base = (const char *)hctx->rpc_mempool;
-        if (dp >= base && dp < base + (ptrdiff_t)hctx->rpc_mempool_len) {
-            hctx->weights_dirty = true;
-        }
-    }
-}
-
-static void ggml_backend_hexagon_buffer_get_tensor_2d(ggml_backend_buffer_t buffer, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data) {
-    // get_tensor_2d is only used for non-quantized tensor access (views, broadcasting),
-    // so raw memcpy is correct. Quantized weights use get_tensor() for inverse-repack.
-    GGML_UNUSED(buffer);
-    for (size_t copy = 0; copy < n_copies; copy++) {
-        memcpy((char *)data + copy * stride_data, (const char *)tensor->data + offset + copy * stride_tensor, size);
-    }
-}
-
 static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .free_buffer     = */ ggml_backend_hexagon_buffer_free_buffer,
         /* .get_base        = */ ggml_backend_hexagon_buffer_get_base,
@@ -4868,8 +4947,8 @@ static ggml_backend_buffer_i ggml_backend_hexagon_buffer_interface = {
         /* .memset_tensor   = */ ggml_backend_hexagon_buffer_memset_tensor,
         /* .set_tensor      = */ ggml_backend_hexagon_buffer_set_tensor,
         /* .get_tensor      = */ ggml_backend_hexagon_buffer_get_tensor,
-        /* .set_tensor_2d   = */ ggml_backend_hexagon_buffer_set_tensor_2d,
-        /* .get_tensor_2d   = */ ggml_backend_hexagon_buffer_get_tensor_2d,
+        /* .set_tensor_2d   = */ nullptr,
+        /* .get_tensor_2d   = */ nullptr,
         /* .cpy_tensor      = */ ggml_backend_hexagon_buffer_cpy_tensor,
         /* .clear           = */ ggml_backend_hexagon_buffer_clear,
         /* .reset           = */ nullptr,
@@ -4886,8 +4965,7 @@ static const char * ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_ty
     return "hexagon-ion-buffer";
 }
 
-static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
-           ggml_backend_buffer_type_t buft, size_t size) {
+static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(buft->context);
     GGML_ASSERT(nullptr != ctx);
     GGMLHEXAGON_LOG_ALWAYS("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
@@ -4971,21 +5049,11 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(
             ctx->ion_regions.push_back(new_region);
             GGMLHEXAGON_LOG_ALWAYS("[ALLOC] device=%d new region: offset=%zu size=%zu", ctx->device, aligned_offset, size_aligned);
         } else {
-            GGMLHEXAGON_LOG_ALWAYS("device=%d ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to system memory",
+            GGMLHEXAGON_LOG_ALWAYS("device=%d ion pool exhausted: needed %zu MiB, remaining %zu MiB -- falling back to CPU buffer",
                                  ctx->device, size_aligned / SIZE_IN_MB,
                                  (data_limit - ctx->rpc_mempool_usage) / SIZE_IN_MB);
-            // ggml_aligned_malloc() uses 64-byte alignment, but this buffer type
-            // advertises 128-byte alignment (get_alignment returns 128). Use
-            // platform-specific aligned allocation with explicit 128-byte alignment.
-#if defined(_WIN32)
-            buffer_ctx->buffer = _aligned_malloc(size_aligned, 128);
-#else
-            void * ptr = nullptr;
-            if (posix_memalign(&ptr, 128, size_aligned) != 0) ptr = nullptr;
-            buffer_ctx->buffer = ptr;
-#endif
-            buffer_ctx->buffer_size = size_aligned;
-            buffer_ctx->is_ion_buffer = false;
+            delete buffer_ctx;
+            return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size_aligned);
         }
     }
 
@@ -5041,7 +5109,6 @@ static size_t ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffe
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_Q4_K:
         case GGML_TYPE_Q6_K:
-            return ggml_hexagon_repacked_size(tensor->type, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
         case GGML_TYPE_Q5_K: {
             size_t repacked = ggml_hexagon_repacked_size(tensor->type, tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
             size_t raw      = ggml_nbytes(tensor);
@@ -6582,6 +6649,7 @@ static void ggml_backend_hexagon_device_get_props(ggml_backend_dev_t dev,
             /* .host_buffer           = */ false,
             /* .buffer_from_host_ptr  = */ false,
             /* .events                = */ false,
+            /* .mmap_support          = */ false,
     };
 }
 
