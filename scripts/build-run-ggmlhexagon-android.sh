@@ -3,8 +3,6 @@
 # This single-source file is part of JZ's ggml-hexagon.
 # 2024--2026 The ggml authors
 # GitHub:  https://github.com/zhouwg/ggml-hexagon
-# Any copies or derivative works of this file shall preserve the above attribution information,
-# including the copyright notice and the GitHub repository URL.
 #
 # this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
 #
@@ -1052,6 +1050,10 @@ function run_llamaserver()
 
 
 #running llama-server-for-pi on Snapdragon-based Android phone
+#TODO: llama_server: failed to initialize router models: subprocess is not enabled on this build
+#root-cause:
+# line 104 in the top-level CMakeLists.txt
+# subprocess spawning isn't a supported/sandbox-friendly operation on mobile OSes or in WASM
 function run_llamaserver_for_pi()
 {
     local server_for_pi_running_params=" --models-dir /sdcard/ --no-models-autoload -ngl 999 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 -fa on -np 1 --jinja --host 0.0.0.0 --api-key my-local-llama-key"
