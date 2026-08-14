@@ -90,14 +90,18 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli <alias>
-#   qwen3-2b    -> Qwen3.5-2B-Q4_0.gguf
-#   qwen3-9b    -> Qwen3.5-9B-Q4_0.gguf
-#   gemma4-e2b  -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
-#   gemma4-e4b  -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
-#   qwen1       -> qwen1_5-1_8b-chat-q4_0.gguf
-#   llama3      -> Llama-3.2-1B-Instruct-Q4_0.gguf
-#   nanbeige-3b -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
-#   (default)   -> gemma-4-E2B-it-Q4_0.gguf
+#   qwen3-2b            -> Qwen3.5-2B-Q4_0.gguf
+#   qwen3-9b            -> Qwen3.5-9B-Q4_0.gguf
+#   gemma4-e2b          -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB, fits entirely in ION mempool)
+#   gemma4-e4b          -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, triggers mirror/eviction for stress testing)
+#   qwen1               -> qwen1_5-1_8b-chat-q4_0.gguf
+#   llama3              -> Llama-3.2-1B-Instruct-Q4_0.gguf
+#   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
+#   (default)           -> gemma-4-E2B-it-Q4_0.gguf
+#FIXME: does not work with JZ's ggml-hexagon
+#   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
+#   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
+#   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 function resolve_model_name()
 {
     case "$1" in
@@ -108,6 +112,9 @@ function resolve_model_name()
         qwen1)              echo "/sdcard/qwen1_5-1_8b-chat-q4_0.gguf" ;;
         llama3)             echo "/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf" ;;
         nanbeige-3b)        echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf";;
+        nanbeige-3b-q80)    echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf";;
+        minicpm5-1b)        echo "/sdcard/minicpm5-1b-q4_0.gguf";;
+        minicpm5-1b-q80)    echo "/sdcard/MiniCPM5-1B-Q8_0.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
 }
@@ -1012,6 +1019,7 @@ function run_llamacli()
 }
 
 
+#running llama-server on Snapdragon-based Android phone
 function run_llamaserver()
 {
     local model_name=""
@@ -1040,6 +1048,23 @@ function run_llamaserver()
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
                && ${REMOTE_PATH}/llama-server ${server_running_params} -m ${model_path} "
+}
+
+
+#running llama-server-for-pi on Snapdragon-based Android phone
+function run_llamaserver_for_pi()
+{
+    local server_for_pi_running_params=" --models-dir /sdcard/ --no-models-autoload -ngl 999 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 -fa on -np 1 --jinja --host 0.0.0.0 --api-key my-local-llama-key"
+    prepare_run_on_phone llama-server
+    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    echo "adb shell \"cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+           && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-server ${server_for_pi_running_params} \""
+    adb shell "cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-server ${server_for_pi_running_params} "
 }
 
 
@@ -1298,7 +1323,7 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen3-2b gemma4-e2b gemma4-e4b qwen1 llama3 qwen3-9b"
+    local all_models="qwen1 llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
     local total=6
     local idx=0
 
@@ -1656,6 +1681,8 @@ function show_usage()
     echo "  In a disconnected environment, download the pre-built UI from a llama.cpp
     release at https://github.com/ggml-org/llama.cpp/releases and extract to tools/ui/dist."
 
+    echo "  $0 run_llamaserver_for_pi"
+
     echo "  $0 run_llamacli_all     (batch test 6 models = 6 tests)"
     echo "    Log capture example:"
     echo "      $0 run_llamacli_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1784,6 +1811,9 @@ elif [ $# == 1 ]; then
         exit 0
     elif [ "$1" == "run_llamaserver" ]; then
         run_llamaserver
+        exit 0
+    elif [ "$1" == "run_llamaserver_for_pi" ]; then
+        run_llamaserver_for_pi
         exit 0
     elif [ "$1" == "run_stresstest" ]; then
         run_stresstest
