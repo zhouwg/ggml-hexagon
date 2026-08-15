@@ -97,7 +97,6 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   nanbeige-3b         -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
 #   minicpm5-1b         -> minicpm5-1b-q4_0.gguf
 #   (default)           -> gemma-4-E2B-it-Q4_0.gguf
-#FIXME: does not work with JZ's ggml-hexagon
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 function resolve_model_name()
@@ -650,16 +649,13 @@ function check_prebuilt_models()
     check_and_download_model Nanbeige_Nanbeige4.2-3B-Q4_0.gguf   https://huggingface.com/bartowski/Nanbeige_Nanbeige4.2-3B-GGUF/resolve/main/Nanbeige_Nanbeige4.2-3B-Q4_0.gguf
 
     #4.2 GiB
-    #FIXME: does not work with JZ's ggml-hexagon
     #check_and_download_model Nanbeige_Nanbeige4.2-3B-Q8_0.gguf   https://huggingface.co/bartowski/Nanbeige_Nanbeige4.2-3B-GGUF/resolve/main/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
 
     #1.1 GiB
-    #FIXME: does not work with JZ's ggml-hexagon
     #check_and_download_model MiniCPM5-1B-Q8_0.gguf               https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q8_0.gguf
 
     #635 MiB
-    #FIXME: does not work with JZ's ggml-hexagon
-    #check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
+    check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
     set -e
 }
 
@@ -1311,13 +1307,13 @@ function run_abtest()
 
 function run_abtest_all()
 {
-    # Run AB test across all 6 supported models.
+    # Run AB test across all 8 supported models.
     # Usage: run_abtest_all [rounds]
     #   rounds: default 3 (per model); qwen3-9b is hard-capped to 1 (slow + high power, phone gets hot)
     #
     # Example:
     #   $0 run_abtest_all
-    #   $0 run_abtest_all 5
+    #   $0 run_abtest_all 3
     #   $0 run_abtest_all 2>&1 | tee log_abtest_all_$(date +%Y%m%d-%H%M%S).txt
 
     local rounds=3
@@ -1325,8 +1321,8 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen1 llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
-    local total=6
+    local all_models="qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
+    local total=8
     local idx=0
 
     for model_alias in ${all_models}; do
@@ -1474,10 +1470,10 @@ function run_ubatchtest()
 
 function run_ubatchtest_all()
 {
-    # Batch ubatch sweep across 6 models x 5 ubatches = 30 tests.
+    # Batch ubatch sweep across 5 models x 8 ubatches = 40 tests.
     # No arguments. Similar in spirit to run_llamacli_all.
-    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b" "qwen3-9b")
-    local ubatch_sizes=(32 64 128 512 1024)
+    local models=("gemma4-e2b" "qwen3-2b" "qwen1" "llama3" "gemma4-e4b")
+    local ubatch_sizes=(8 16 22 32 64 128 512 1024)
 
     # re-join ubatch sizes back into a comma-separated string for run_ubatchtest
     local ubatch_csv
@@ -1703,7 +1699,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
-    echo "    Batch AB test across all 6 models (qwen3-2b, gemma4-e2b, gemma4-e4b, qwen1, llama3, qwen3-9b)."
+    echo "    Batch AB test across all 8 models (qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
     echo "    rounds: default 3"
     echo "    Log capture example:"
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
@@ -1735,20 +1731,19 @@ function show_usage()
     echo "  $0 run_ubatchtest  [model_alias] [ubatch_csv]"
     echo "    Sweep --ubatch-size values, dump raw per-ubatch logs (no in-shell parsing)."
     echo "    model_alias:  gemma4-e2b (default) | qwen3-2b | qwen3-9b | gemma4-e4b | qwen1 | llama3"
-    echo "    ubatch_csv:   32,64,128,512,1024 (default)"
+    echo "    ubatch_csv:   8,16,22,32,64,128,512,1024 (default)"
     echo "    Examples:"
-    echo "      $0 run_ubatchtest                          # gemma4-e2b + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3-2b                 # qwen3-2b + 32/64/128/512/1024"
-    echo "      $0 run_ubatchtest qwen3-2b 32,128,512      # qwen3-2b + 32/128/512"
-    echo "      $0 run_ubatchtest qwen3-2b 64              # qwen3-2b + 64"
+    echo "      $0 run_ubatchtest                          # gemma4-e2b + 8/16/22/32/64/128/512/1024"
+    echo "      $0 run_ubatchtest qwen3-2b                 # qwen3-2b   + 8/16/22/32/64/128/512/1024"
+    echo "      $0 run_ubatchtest gemma4-e4b               # gemma4-e4b + 8/16/22/32/64/128/512/1024"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
     echo "  $0 run_ubatchtest_all"
-    echo "    Batch ubatch sweep across 5 models x 5 ubatches = 25 tests."
-    echo "    models:    gemma4-e2b, qwen3-2b, qwen1"
-    echo "    ubatches:  32, 64, 128, 512, 1024"
+    echo "    Batch ubatch sweep across 5 models x 8 ubatches = 40 tests."
+    echo "    models:    gemma4-e2b, qwen3-2b, qwen1, llama3, gemma4-e4b"
+    echo "    ubatches:  8, 16, 22, 32, 64, 128, 512, 1024"
     echo "    Log capture example:"
     echo "      $0 run_ubatchtest_all 2>&1 | tee log_ci_\$(date +%Y%m%d-%H%M%S).txt"
 }

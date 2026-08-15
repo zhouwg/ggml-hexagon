@@ -119,35 +119,14 @@
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
 // =================================================================================================
-#ifdef NDEBUG
-#define GGMLHEXAGON_DEBUG                               0
-#else
-#define GGMLHEXAGON_DEBUG                               1
-#endif
-
 #ifndef PROJECT_NAME
 #define PROJECT_NAME                                    "ggml-hexagon"
 #endif
-
-#define GGMLHEXAGON_LOGBUF_LEN                          4096
-#define GGMLHEXAGON_TMPBUF_LEN                          256
 
 #define GGML_HEXAGON_MAX_DEVICES                        16
 #define GGML_HEXAGON_BACKEND_NAME                       "hexagon"
 
 #define GGML_DSP_IDL_VERSION                            "0.0.2"
-
-#define GGMLHEXAGON_LOG_ALWAYS(...)                     ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_NONE , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_ERROR(...)                      ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_ERROR, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_WARN(...)                       ggmlhexagon_log_internal(GGML_LOG_LEVEL_WARN , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_INFO(...)                       ggmlhexagon_log_internal(GGML_LOG_LEVEL_INFO , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_VERBOSE(...)                    ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_CONT , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-
-#if GGMLHEXAGON_DEBUG
-#define GGMLHEXAGON_LOG_DEBUG(...)                      ggmlhexagon_log_internal(GGML_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#else
-#define GGMLHEXAGON_LOG_DEBUG(...)
-#endif
 
 #define SIZE_IN_MB                                      (1 << 20)
 
@@ -550,7 +529,7 @@ static void ggmlhexagon_get_timestring(char * p_currenttime) {
     snprintf(p_currenttime, GGMLHEXAGON_TMPBUF_LEN, "%s", time_to_string(tp).c_str());
 }
 
-static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, const char * func, int line, const char * format, ...) {
+void ggmlhexagon_log_internal(int level, const char * file, const char * func, int line, const char * format, ...) {
     static std::mutex ggmlhexagon_log_internal_mutex;
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
 
@@ -590,7 +569,7 @@ static void ggmlhexagon_log_internal(ggml_log_level level, const char * file, co
 //   - GGML_LOG_LEVEL_NONE  (ALWAYS)    -> adb logcat only
 //   - GGML_LOG_LEVEL_ERROR             -> adb logcat + terminal
 //   - GGML_LOG_LEVEL_CONT  (VERBOSE)   -> adb logcat + terminal
-static void ggmlhexagon_log_always_internal(ggml_log_level level, const char * file, const char * func, int line, const char * format, ...) {
+void ggmlhexagon_log_always_internal(int level, const char * file, const char * func, int line, const char * format, ...) {
     static std::mutex s_log_mutex;
     static char s_log_buf[GGMLHEXAGON_LOGBUF_LEN];
 
@@ -3379,7 +3358,9 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     // Force the pipelined path for plain MUL_MAT (MUL_MAT_ID keeps the
     // non-pipelined setting, matching upstream): the synchronous (m<=32)
     // branch yields corrupted, non-deterministic output in this integration
-    // (observed with ubatch<=32); upstream's own backend is unaffected.
+    // (observed with ubatch<=32 for Qwen3.5-2B-Q4_0.gguf)
+    // Qualcomm uses the following logic to decide whether to enable HMX pipeline:
+    // const bool pipeline = is_matmul_id ? false : htp_mm_hmx_pipeline(ne11);
     const bool pipeline = is_matmul_id ? false : true;
     const int n_threads = (int) ctx->n_threads;
     const int ne10      = src1->ne[0];
@@ -3392,6 +3373,8 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     size_t vtcm_size            = 0;
     bool use_grouped            = false;
     int act_threads_selected    = 0;
+
+    GGMLHEXAGON_LOG_DEBUG("ne00 %d, ne01 %d, ne02 %d, ne10 %d, ne11 %d, ne12 %d", src0->ne[0], src0->ne[1], src0->ne[2], src1->ne[0], src1->ne[1], src1->ne[2]);
 
     if (is_batched_val && wtype == GGML_TYPE_F16 && group_size > 1) {
         // Try grouped path first
@@ -3438,6 +3421,11 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     } else {
         kparams->kernel_type = HTP_MM_KERNEL_HMX_2D;
     }
+    GGMLHEXAGON_LOG_DEBUG("wtype=%d k=%lld n=%lld m=%lld pip=%d mc=%d nc=%d act=%d vtcm=%d nt=%d",
+            (int) wtype, (long long) src0->ne[0], (long long) src0->ne[1], (long long) ne11,
+            (int) pipeline, kparams->m_chunk, kparams->n_chunk, kparams->n_act_threads,
+            kparams->vtcm_size, ctx->n_threads);
+
     return true;
 }
 
@@ -4624,7 +4612,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
     ggml_backend_hexagon_context * hctx        = (ggml_backend_hexagon_context *)buffer->buft->context;
     bool is_repack                             = ggml_backend_buffer_is_hexagon_repack(buffer);
     if (is_repack) {
-        GGMLHEXAGON_LOG_ALWAYS("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
+        GGMLHEXAGON_LOG_DEBUG("[SET_TENSOR] #%llu name=%s type=%d(%s) ne=[%d,%d,%d,%d] nbytes=%zu is_repack=%d offset=%zu size=%zu\n",
                                (unsigned long long)hctx->set_tensor_call_count, tensor->name, (int)tensor->type, ggml_type_name(tensor->type),
                                (int)tensor->ne[0], (int)tensor->ne[1], (int)tensor->ne[2], (int)tensor->ne[3],
                                ggml_nbytes(tensor), (int)is_repack, offset, size);

@@ -60,8 +60,6 @@
 // =================================================================================================
 #define DSP_CACHE_LINE_SIZE             64
 
-#define GGMLHEXAGON_LOGBUF_LEN          4096
-
 #define DEFAULT_VTCM_SIZE               (8 * 1024 * 1024)
 
 #define HEX_OP_PROF_DUMP_INTERVAL       25
@@ -75,18 +73,6 @@
 // Max dst len for prior-dst skip (bit 1): single cacheline only.
 // Larger ranges risk stale L2 reads from async DMA/HMX paths.
 #define PRIOR_DST_MAX_LEN               DSP_CACHE_LINE_SIZE
-
-#ifndef NDEBUG
-#define GGMLHEXAGON_LOG_DEBUG(...)      ggml_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#define GGMLHEXAGON_LOG_WARN(...)       ggml_log_internal(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-#else
-#define GGMLHEXAGON_LOG_DEBUG(...)
-#define GGMLHEXAGON_LOG_WARN(...)
-#endif
-
-#define GGMLHEXAGON_LOG_INFO(...)       ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
-
-#define GGMLHEXAGON_LOG_ERROR(...)      ggml_log_always(GGMLHEXAGON_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
 
 #define INVAL_SRC_IF_NEEDED(op_i, src_idx, dt_ptr, tensor_idx) do {                             \
     if (dt_ptr) {                                                                               \
@@ -129,14 +115,6 @@
     }                                                                                           \
 } while (0)
 
-enum ggmlhexagon_log_level {
-    GGMLHEXAGON_LOG_LEVEL_NONE  = 0,
-    GGMLHEXAGON_LOG_LEVEL_DEBUG = 1,
-    GGMLHEXAGON_LOG_LEVEL_WARN  = 2,
-    GGMLHEXAGON_LOG_LEVEL_ERROR = 3,
-    GGMLHEXAGON_LOG_LEVEL_INFO  = 4,
-};
-
 static struct dsp_context * g_dsp_ctx = NULL;
 
 // =================================================================================================
@@ -153,43 +131,37 @@ int64_t ggml_time_us(void) {
     return (uint64_t)(count) * 10ull / 192ull;
 }
 
-#ifndef NDEBUG
-static void ggml_log_internal(int level, const char *file, const char *func, int line, const char *format, ...) {
-    static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
-    va_list args;
-    va_start(args, format);
-    int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ",
-                              func, line);
-    if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
-        va_end(args);
-        return;
-    }
-    int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix,
-                        GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
-    if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
-        FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_internal_buf);
-    }
-    va_end(args);
-}
-#endif // NDEBUG
-
-static void ggml_log_always(int level, const char *file, const char *func, int line, const char *format, ...) {
+void ggmlhexagon_log_internal(int level, const char *file, const char *func, int line, const char *format, ...) {
     if (!g_dsp_ctx || !g_dsp_ctx->dump_diag_info) {
         return;
     }
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
     va_list args;
     va_start(args, format);
-    int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ",
-                              func, line);
+    int len_prefix = snprintf(s_ggmlhexagon_log_internal_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
     if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
         va_end(args);
         return;
     }
-    int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix,
-                        GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
+    int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
     if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
         FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_internal_buf);
+    }
+    va_end(args);
+}
+
+void ggmlhexagon_log_always_internal(int level, const char *file, const char *func, int line, const char *format, ...) {
+    static char s_ggmlhexagon_log_buf[GGMLHEXAGON_LOGBUF_LEN];
+    va_list args;
+    va_start(args, format);
+    int len_prefix = snprintf(s_ggmlhexagon_log_buf, GGMLHEXAGON_LOGBUF_LEN, "[%s, %d]: ", func, line);
+    if (len_prefix < 0 || (size_t)len_prefix >= GGMLHEXAGON_LOGBUF_LEN) {
+        va_end(args);
+        return;
+    }
+    int len = vsnprintf(s_ggmlhexagon_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
+    if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
+        FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_buf);
     }
     va_end(args);
 }
@@ -1507,6 +1479,9 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
 
     printf("uri %s\n", uri);
+    GGMLHEXAGON_LOG_INFO("uri    = %s\n", uri);
+    GGMLHEXAGON_LOG_ALWAYS("uri  = %s\n", uri);
+    GGMLHEXAGON_LOG_ERROR("uri   = %s\n", uri);
 
     unsigned int api_version = qurt_api_version();
     printf("qurt_api_version            = 0x%x\n", api_version);
@@ -1522,6 +1497,8 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     printf("qurt_hardware_thread_counts = %d\n", mhwt.max_hthreads);
     ctx->max_hw_threads = mhwt.max_hthreads;
     ctx->thread_counts = mhwt.max_hthreads;
+    uint32_t hw_nhvx = (qurt_hvx_get_units() >> 8) & 0xFF;
+    printf("hw_nhvx = %lu\n", hw_nhvx);
 
     /* Step 1: Power up HVX and HMX */
     int power_result = power_on_hvx_hmx(ctx);
@@ -2262,6 +2239,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             dsp_queues_suspend();
             return AEE_EUNSUPPORTED;
         }
+
+        GGMLHEXAGON_LOG_DEBUG("ion-op %u: htp_op=%u opcode=%d", i, htp_op, op->opcode);
 
         struct htp_ops_context octx;
 
