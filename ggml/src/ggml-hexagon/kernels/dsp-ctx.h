@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <stddef.h>
 
+#include "ggml.h"
+
 #ifdef  __cplusplus
 extern "C" {
 #endif
@@ -51,6 +53,21 @@ extern "C" {
 
 #ifndef HEX_OP_PROF_BUCKETS
 #define HEX_OP_PROF_BUCKETS             64
+#endif
+
+#define GGMLHEXAGON_LOGBUF_LEN          4096
+#define GGMLHEXAGON_TMPBUF_LEN          256
+
+#define GGMLHEXAGON_LOG_ALWAYS(...)     ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_NONE , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_ERROR(...)      ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_ERROR, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_VERBOSE(...)    ggmlhexagon_log_always_internal(GGML_LOG_LEVEL_CONT , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_WARN(...)       ggmlhexagon_log_internal(GGML_LOG_LEVEL_WARN , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#define GGMLHEXAGON_LOG_INFO(...)       ggmlhexagon_log_internal(GGML_LOG_LEVEL_INFO , __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+
+#ifndef NDEBUG
+#define GGMLHEXAGON_LOG_DEBUG(...)      ggmlhexagon_log_internal(GGML_LOG_LEVEL_DEBUG, __FILE__, __FUNCTION__, __LINE__, __VA_ARGS__)
+#else
+#define GGMLHEXAGON_LOG_DEBUG(...)
 #endif
 
 // Forward declarations for types used in dsp_context.
@@ -262,6 +279,9 @@ struct dsp_context {
     uint64_t nonop_queue_us;
 #endif
 };
+
+void ggmlhexagon_log_internal(int log_level, const char * file, const char * func, int line, const char * format, ...);
+void ggmlhexagon_log_always_internal(int log_level, const char * file, const char * func, int line, const char * format, ...);
 
 #ifdef  __cplusplus
 }

@@ -76,28 +76,12 @@ HTP_ARCH_VERSIONS="v73 v75 v79 v81"              # all
 HTP_ARCH_VERSION=${HTP_ARCH_VERSIONS%% *}
 
 ######## part-2: prompt and LLM models ########
-
-#the following LLM models has verified(works fine) with the JZ's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
-#1.12 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/qwen1_5-1_8b-chat-q4_0.gguf
-
-#1.2 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-2B-Q4_0.gguf
-
 #2.9 GiB, will be downloadded automatically via this script when running this script at the first time
 GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 
-#4.9 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/gemma-4-E4B_q4_0-it.gguf
-
-#5.1 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Qwen3.5-9B-Q4_0.gguf
-
-#0.7 GiB, will be downloadded automatically via this script when running this script at the first time
-GGUF_MODEL_NAME=/sdcard/Llama-3.2-1B-Instruct-Q4_0.gguf
-
 # Model aliases for quick testing of multiple models
 # Usage: ./scripts/build-run-ggmlhexagon-android.sh run_llamacli_jz <alias>
+# the following LLM models has verified(works fine) with the JZ's ggml-hexagon backend on a Snapdragon 8Elite based Android phone
 #   qwen3-2b    -> Qwen3.5-2B-Q4_0.gguf
 #   qwen3-9b    -> Qwen3.5-9B-Q4_0.gguf
 #   gemma4-e2b  -> gemma-4-E2B-it-Q4_0.gguf
@@ -726,7 +710,7 @@ function update_qcom_libs()
 }
 
 
-#detect build type from build output: hexagon-jz, hexagon-qcom, or cpu-only
+#detect build type from build output: hexagon-jz, hexagon-qcom
 function detect_build_type()
 {
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
@@ -737,8 +721,6 @@ function detect_build_type()
         fi
     elif ls ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so 1>/dev/null 2>&1; then
         echo "hexagon-qcom"
-    else
-        echo "cpu-only"
     fi
 }
 
@@ -835,11 +817,6 @@ function prepare_run_on_phone()
         hexagon-qcom)
             prepare_ggmlhtp
             adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
-            ;;
-        cpu-only)
-            adb shell rm -f ${REMOTE_PATH}/libggml-hexagon.so
-            adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
-            adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
             ;;
     esac
 
