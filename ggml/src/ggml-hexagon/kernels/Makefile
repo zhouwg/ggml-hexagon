@@ -41,15 +41,15 @@ ALL:$(OBJS)
 #   fatal error: Do not know how to promote this operator's result!
 # Workaround: lower optimization to -O2 (avoids the freeze-generating pass).
 flash-attn-ops.o: flash-attn-ops.c
-		@echo "${HEXAGON_CC} $(filter-out -O3,$(CFLAGS)) -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<"
-		${HEXAGON_CC} $(filter-out -O3,$(CFLAGS)) -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<
+		@echo "${HEXAGON_CC} $(filter-out -O3 -ffast-math,$(CFLAGS)) -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<"
+		${HEXAGON_CC} $(filter-out -O3 -ffast-math,$(CFLAGS)) -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<
 		@echo "\n"
 
 # -O3 miscompiles the HMX matmul paths (garbled q8_0/q4_0 output on partial m chunks,
 # see docs/backend/jz-ggml-hexagon/garble-matrix.md). Qualcomm's htp toolchain builds
 # release at -O2 only, so align to the validated config. Do not raise back to -O3.
 matmul-ops.o: matmul-ops.c
-		${HEXAGON_CC} $(filter-out -O3,$(CFLAGS)) -ffast-math -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<
+		${HEXAGON_CC} $(filter-out -O3 -ffast-math,$(CFLAGS)) -O2 ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<
 
 %.o:%.S
 		@echo "${HEXAGON_CC} ${CFLAGS} ${DEBUG_FLAG} -D__FILENAME__=\"$<\" -o $@ -c $<"
