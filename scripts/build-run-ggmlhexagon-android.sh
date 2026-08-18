@@ -40,7 +40,7 @@ TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
 ANDROID_PLATFORM=android-34
-ANDROID_NDK_VERSION=r28
+ANDROID_NDK_VERSION=r29
 ANDROID_NDK_NAME=android-ndk-${ANDROID_NDK_VERSION}
 ANDROID_NDK_FULLNAME=${ANDROID_NDK_NAME}-linux.zip
 ANDROID_NDK=${TOOLCHAIN_PATH}/${ANDROID_NDK_NAME}
@@ -413,9 +413,9 @@ function build_arm64
             if ls ${PGO_HOST_DIR}/*.profraw 1>/dev/null 2>&1; then
                 ${llvm_profdata} merge ${PGO_HOST_DIR}/*.profraw -o "${PROFDATA_FILE}"
                 echo "[PGO] Merged to ${PROFDATA_FILE} ($(du -h "${PROFDATA_FILE}" | cut -f1))"
-                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=30
-                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=50 2>&1 | head -60
-                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -all-functions
+                #./prebuilts/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=30
+                #./prebuilts/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=50 2>&1 | head -60
+                #./prebuilts/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -all-functions
             else
                 echo "[PGO] ERROR: No .profraw files found in ${PGO_HOST_DIR}"
                 echo "[PGO] Run PGO_GENERATE=1 build first, then adb pull the profiles"

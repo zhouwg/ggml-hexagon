@@ -446,7 +446,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7.3"},
+        .version                = {"0.99.7.4"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -622,6 +622,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
 
     GGMLHEXAGON_LOG_VERBOSE("ggml_hexagon_version:             %s", g_hexagon_appcfg.version);
     ggmlhexagon_get_timestring(timestamp);
+    GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", "ALL");
     GGMLHEXAGON_LOG_VERBOSE("offload MUL_MAT types:            %s", g_hexagon_appcfg.enabled_types.empty() ? "ALL" : g_hexagon_appcfg.enabled_types.c_str());
     GGMLHEXAGON_LOG_VERBOSE("thread_counts on CDSP:            %d", g_hexagon_appcfg.thread_counts);
     GGMLHEXAGON_LOG_VERBOSE("ion_sync_mode:                    %d", g_hexagon_appcfg.ion_sync_mode);
@@ -632,10 +633,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(DSP):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
-    if (NULL != ctx) {
-        GGMLHEXAGON_LOG_VERBOSE("ggml-dsp use hmx:                 %d", ctx->has_hmx);
-    }
-    GGMLHEXAGON_LOG_VERBOSE("enabled_ops:                      %s", "ALL");
+    GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d", g_hexagon_appcfg.enable_opfusion);
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
 
@@ -716,7 +714,7 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
         const double qkv_pct  = total > 0 ? 100.0 * (3 * ctx->n_fused_qkv_cum) / total : 0.0;
         const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
         const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
-        GGMLHEXAGON_LOG_ALWAYS("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
+        GGMLHEXAGON_LOG_VERBOSE("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
                                "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
                                (unsigned long long)ctx->n_mul_mat_total_cum,
                                (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
@@ -735,18 +733,18 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
                              + ctx->n_hmx_basic_fail_permuted
                              + ctx->n_hmx_basic_fail_small_n;
         if (basic_total > 0) {
-            GGMLHEXAGON_LOG_ALWAYS("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
+            GGMLHEXAGON_LOG_VERBOSE("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
                                      (unsigned long long)basic_total,
                                      (unsigned long long)ctx->n_hmx_basic_pass,
                                      basic_total > 0 ? 100.0 * ctx->n_hmx_basic_pass / basic_total : 0.0);
-            GGMLHEXAGON_LOG_ALWAYS("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
+            GGMLHEXAGON_LOG_VERBOSE("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
                                      (unsigned long long)ctx->n_hmx_basic_fail_ne01,
                                      (unsigned long long)ctx->n_hmx_basic_fail_ne00,
                                      (unsigned long long)ctx->n_hmx_basic_fail_wtype,
                                      (unsigned long long)ctx->n_hmx_basic_fail_batched,
                                      (unsigned long long)ctx->n_hmx_basic_fail_permuted,
                                      (unsigned long long)ctx->n_hmx_basic_fail_small_n);
-            GGMLHEXAGON_LOG_ALWAYS("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
+            GGMLHEXAGON_LOG_VERBOSE("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
                                      (unsigned long long)ctx->n_hmx_vtcm_pass,
                                      (unsigned long long)ctx->n_hmx_vtcm_fail,
                                      ctx->n_hmx_basic_pass > 0
@@ -947,7 +945,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.3");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.4");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
