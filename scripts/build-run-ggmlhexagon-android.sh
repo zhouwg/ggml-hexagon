@@ -388,7 +388,48 @@ function build_arm64
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
     local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${arm_cpu_flags}" -DCMAKE_CXX_FLAGS="${arm_cpu_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+    # --- PGO support (Profile-Guided Optimization) ---
+    # 2-stage build: generate profiles on device, then rebuild with -fprofile-use.
+    # Step 1: PGO_GENERATE=1 build (run workload on device, profiles written to PGO_DIR on device)
+    # PGO_GENERATE=1  ./scripts/build-run-ggmlhexagon-android.sh build
+    # Step 2: Pull profiles from device to host, then PGO_USE=1 rebuild
+    # adb pull /data/local/tmp/pgo ./pgo-data
+    # PGO_USE=1 ./scripts/build-run-android.sh build
+    local pgo_flags=""
+    if [ "${PGO_GENERATE}" = "1" ]; then
+        PGO_DIR="${PGO_DIR:-/data/local/tmp/pgo}"
+        pgo_flags="-fprofile-generate=${PGO_DIR} -fno-profile-use"
+        echo "[PGO] Instrumented build: profiles will be written to ${PGO_DIR} on device"
+        echo "[PGO] After running workload, pull profiles: adb pull ${PGO_DIR} <host_dir>"
+        echo "[PGO] Then rebuild with PGO_USE=1 and -DPGO_HOST_DIR=<host_dir>"
+    elif [ "${PGO_USE}" = "1" ]; then
+        PGO_HOST_DIR="${PGO_HOST_DIR:-${PROJECT_ROOT_PATH}/pgo-data}"
+        local PROFDATA_FILE="${PGO_HOST_DIR}/default.profdata"
+        local llvm_profdata="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata"
+
+        # Auto-merge raw profiles if .profdata doesn't exist
+        if [ ! -f "${PROFDATA_FILE}" ]; then
+            echo "[PGO] Merging raw profiles from ${PGO_HOST_DIR}..."
+            if ls ${PGO_HOST_DIR}/*.profraw 1>/dev/null 2>&1; then
+                ${llvm_profdata} merge ${PGO_HOST_DIR}/*.profraw -o "${PROFDATA_FILE}"
+                echo "[PGO] Merged to ${PROFDATA_FILE} ($(du -h "${PROFDATA_FILE}" | cut -f1))"
+                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=30
+                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -topn=50 2>&1 | head -60
+                #./prebuilts/android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-profdata show ./pgo-data/default.profdata -all-functions
+            else
+                echo "[PGO] ERROR: No .profraw files found in ${PGO_HOST_DIR}"
+                echo "[PGO] Run PGO_GENERATE=1 build first, then adb pull the profiles"
+                exit 1
+            fi
+        else
+            echo "[PGO] Using existing merged profile: ${PROFDATA_FILE}"
+        fi
+        pgo_flags="-fprofile-use=${PROFDATA_FILE}"
+    fi
+
+    local extra_flags="${arm_cpu_flags} ${pgo_flags}"
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed

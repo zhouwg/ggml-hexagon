@@ -6047,35 +6047,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     // Flush CPU cache to DRAM so DSP can read AP-written data.
     {
-        // Collect per-tensor dirty ranges and flush them individually (merged).
-        // A single continuous [min, max] range would also flush the holes
-        // between low-offset activations and high-offset weights (~940MB of
-        // wasted cache-line writes when only a few MB are actually dirty).
-        std::vector<std::pair<uint32_t, uint32_t>> ranges;
-        ranges.reserve(n_tensors + mirrors.size() + (size_t)cgraph->n_nodes + 4);
-
-        // Track data pointers already flushed to avoid duplicate ranges
-        // from the cgraph->nodes loop (which overlaps heavily with tensor_src).
-        std::unordered_set<const void *> flushed_ptrs;
-        flushed_ptrs.reserve(n_tensors + 16);
-
-        // Diagnostic counters (per-call, reset every batch) so we can see which
-        // source is dominating the flush cost. Logged once per call.
-        uint64_t dbg_bytes_tensor = 0, dbg_bytes_mirror = 0;
-        uint64_t dbg_bytes_repack_ion = 0, dbg_bytes_batch = 0, dbg_bytes_cgraph = 0;
-        uint32_t dbg_ranges_tensor = 0, dbg_ranges_cgraph = 0;
-        (void)dbg_bytes_tensor; (void)dbg_bytes_mirror;
-        (void)dbg_bytes_repack_ion; (void)dbg_bytes_batch; (void)dbg_bytes_cgraph;
-        (void)dbg_ranges_tensor; (void)dbg_ranges_cgraph;
-
-        auto add_range = [&](uint32_t off, uint32_t len) {
-            if (len > 0) ranges.push_back({off, off + len});
-        };
-
         // ion_sync_mode=1 path: skip the per-tensor/cgraph range scans
         // entirely; the DMA_BUF_IOCTL_SYNC below handles cache coherency
-        // for the whole mempool. The scan work is pure overhead in this
-        // mode (the collected ranges are never used to drive a DC CVAC).
+        // for the whole mempool.
         if (!do_dc_cvac) {
             if (do_ion_sync) {
                 int ion_fd = ctx->rpc_mempool_handle;
@@ -6087,6 +6061,30 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                   g_hexagon_appcfg.ion_sync_mode, was_weights_dirty);
             (void)was_weights_dirty;
         } else {
+            // Collect per-tensor dirty ranges and flush them individually (merged).
+            // A single continuous [min, max] range would also flush the holes
+            // between low-offset activations and high-offset weights (~940MB of
+            // wasted cache-line writes when only a few MB are actually dirty).
+            std::vector<std::pair<uint32_t, uint32_t>> ranges;
+            ranges.reserve(n_tensors + mirrors.size() + (size_t)cgraph->n_nodes + 4);
+
+            // Track data pointers already flushed to avoid duplicate ranges
+            // from the cgraph->nodes loop (which overlaps heavily with tensor_src).
+            std::unordered_set<const void *> flushed_ptrs;
+            flushed_ptrs.reserve(n_tensors + 16);
+
+            // Diagnostic counters (per-call, reset every batch) so we can see which
+            // source is dominating the flush cost. Logged once per call.
+            uint64_t dbg_bytes_tensor = 0, dbg_bytes_mirror = 0;
+            uint64_t dbg_bytes_repack_ion = 0, dbg_bytes_batch = 0, dbg_bytes_cgraph = 0;
+            uint32_t dbg_ranges_tensor = 0, dbg_ranges_cgraph = 0;
+            (void)dbg_bytes_tensor; (void)dbg_bytes_mirror;
+            (void)dbg_bytes_repack_ion; (void)dbg_bytes_batch; (void)dbg_bytes_cgraph;
+            (void)dbg_ranges_tensor; (void)dbg_ranges_cgraph;
+
+            auto add_range = [&](uint32_t off, uint32_t len) {
+                if (len > 0) ranges.push_back({off, off + len});
+            };
 
             for (uint32_t i = 0; i < n_tensors; i++) {
                 ggml_tensor * t = tensor_src[i];

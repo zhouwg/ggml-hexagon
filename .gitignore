@@ -178,3 +178,4 @@ ubatchtest_*.log
 stability_logs*
 docs/backend/jz-ggml-hexagon/*.md
 scripts/*.py
+pgo-data/
