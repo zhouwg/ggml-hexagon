@@ -529,7 +529,8 @@ int32_t llama_chat_apply_template(
         return res;
     }
     if (buf && length > 0) {
-        strncpy(buf, formatted_chat.c_str(), length);
+        strncpy(buf, formatted_chat.c_str(), length - 1);
+        buf[length -1 ] = '\0';
     }
     return res;
 }
