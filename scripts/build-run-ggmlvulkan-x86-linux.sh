@@ -102,59 +102,12 @@ function check_commands_in_host()
 }
 
 
-function check_android_phone()
-{
-    local device_raw
-    device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
-
-    if [[ -z "$device_raw" ]]; then
-        adb kill-server >/dev/null 2>&1
-        sleep 0.1
-        adb start-server >/dev/null 2>&1
-        device_raw=$(adb devices 2>/dev/null | grep -v "List of devices" | awk 'NF>0')
-        if [[ -z "$device_raw" ]]; then
-            echo "No Android device detected."
-            echo "Please check if phone is connected properly.Exiting"
-            exit 1
-        fi
-    fi
-
-    if echo "$device_raw" | grep -q "no permissions"; then
-        echo "Device detected but has NO PERMISSIONS."
-        echo "Please check if phone is connected properly.Exiting"
-        exit 1
-    fi
-
-    if echo "$device_raw" | grep -q "unauthorized"; then
-        echo "Device detected but UNAUTHORIZED."
-        echo "Please check if phone is connected properly.Exiting"
-        exit 1
-    fi
-
-    if echo "$device_raw" | grep -q "offline"; then
-        echo "Device is OFFLINE."
-        echo "Please check if phone is connected properly.Exiting"
-        exit 1
-    fi
-
-    if echo "$device_raw" | awk '{print $2}' | grep -qx "device"; then
-        local sn=$(echo "$device_raw" | awk '{print $1}')
-        echo "Android device connected successfully: $sn"
-        return 0
-    fi
-
-    echo "Unknown device error."
-    echo "Please check if phone is connected properly.Exiting"
-    exit 1
-}
-
-
 function build_x86_linux
 {
 
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_vulkan_x86_linux
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=1 -DLLAMA_CUDA=OFF -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=1 -DLLAMA_CUDA=OFF -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
     cd ${LOCAL_BUILD_DIR}
     make -j${HOST_CPU_COUNTS}
     show_pwd
@@ -218,7 +171,6 @@ function check_prebuilt_models()
     #2.9 GiB
     check_and_download_model gemma-4-E2B-it-Q4_0.gguf     https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf
 
-    # gemma-4-E4B_q4_0-it.gguf (4.9 GiB) is a stress-test model that triggers mirror/eviction in the 4GB ION mempool.
     check_and_download_model gemma-4-E4B_q4_0-it.gguf     https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf
 
     #737 MiB
@@ -379,14 +331,14 @@ function show_usage()
     echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
     echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
     echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf (2.9 GiB)"
-    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB, stress test for mirror/eviction)"
+    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf (4.9 GiB)"
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
     echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
     echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
-    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b (mirror stress test)"
+    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b"
     echo -e "\n"
 }
 
