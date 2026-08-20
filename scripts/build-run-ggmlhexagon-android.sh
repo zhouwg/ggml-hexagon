@@ -1362,7 +1362,8 @@ function run_abtest_all()
         rounds=$1
     fi
 
-    local all_models="qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
+    #local all_models="qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b"
+    local all_models="gemma4-e2b gemma4-e4b qwen3-2b nanbeige-3b qwen1 minicpm5-1b llama3 qwen3-9b"
     local total=8
     local idx=0
 
