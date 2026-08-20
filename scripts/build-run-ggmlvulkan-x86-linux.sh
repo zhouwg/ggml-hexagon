@@ -18,14 +18,19 @@ VERBOSE=ON
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlvulkan-x86-linux
 
 #running path on local x86-linux
-REMOTE_PATH=${LOCAL_BUILD_DIR}/bin/
+LOCAL_PATH=${LOCAL_BUILD_DIR}/bin/
 
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
+
+VULKAN_SDK_VERSION=1.4.304.1
+VULKAN_SDK_NAME=vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz
+VULKAN_SDK_URL=https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/${VULKAN_SDK_NAME}
+VULKAN_SDK_PATH=${TOOLCHAIN_PATH}/Vulkan_SDK
 
 ######## part-2: prompt and LLM models ########
 #supported models will be downloadded automatically in check_prebuilt_models() when running this script at the first time
 
-LLM_PATH=/media/zhouwg/0893c374-f64c-4121-9192-21e7fd97edef/LLM/
+LLM_PATH=/media/zhouwg/0893c374-f64c-4121-9192-21e7fd97edef/LLM
 GGUF_MODEL_NAME=${LLM_PATH}/gemma-4-E2B-it-Q4_0.gguf
 
 # Model aliases for quick testing of multiple models
@@ -41,6 +46,7 @@ GGUF_MODEL_NAME=${LLM_PATH}/gemma-4-E2B-it-Q4_0.gguf
 #   (default)           -> gemma-4-E2B-it-Q4_0.gguf
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
+#   qwen3-27b           -> Qwen3.8-27B-Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
@@ -54,6 +60,7 @@ function resolve_model_name()
         nanbeige-3b-q80)    echo "/${LLM_PATH}/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf";;
         minicpm5-1b)        echo "/${LLM_PATH}/minicpm5-1b-q4_0.gguf";;
         minicpm5-1b-q80)    echo "/${LLM_PATH}/MiniCPM5-1B-Q8_0.gguf";;
+        qwen3-27b)          echo "/${LLM_PATH}/Qwen3.8-27B-Q4_0.gguf" ;;
         *)                  echo "" ; return 1 ;;
     esac
 }
@@ -104,7 +111,6 @@ function check_commands_in_host()
 
 function build_x86_linux
 {
-
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_vulkan_x86_linux
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=1 -DLLAMA_CUDA=OFF -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
@@ -128,9 +134,45 @@ function build_ggml_vulkan_x86_linux()
 {
     show_pwd
     dump_vars
-    remove_temp_dir
-    rm -f ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    #remove_temp_dir
     build_x86_linux
+}
+
+
+function check_and_download_vulkan_sdk()
+{
+    is_vulkan_sdk_exist=1
+
+    if [ ! -d ${VULKAN_SDK_PATH} ]; then
+        echo -e "VULKAN_SDK_PATH ${VULKAN_SDK_PATH} not exist\n"
+        is_vulkan_sdk_exist=0
+    fi
+
+    if [ ${is_vulkan_sdk_exist} -eq 0 ]; then
+        mkdir -p ${VULKAN_SDK_PATH}
+        cd ${VULKAN_SDK_PATH}
+
+        if [ ! -f ${VULKAN_SDK_NAME} ]; then
+            echo -e "download vulkan sdk from ${VULKAN_SDK_URL}...\n"
+            wget --no-config --quiet --show-progress -O ${VULKAN_SDK_PATH}/${VULKAN_SDK_NAME} ${VULKAN_SDK_URL}
+            if [ $? -ne 0 ]; then
+                printf "failed to download Vulkan SDK to %s \n" "${VULKAN_SDK_PATH}"
+                exit 1
+            fi
+        fi
+        printf "decompress ${VULKAN_SDK_NAME}..."
+        tar Jxf ${VULKAN_SDK_NAME}
+    else
+        printf "VULKAN SDK already exist:    ${VULKAN_SDK_PATH} \n\n"
+    fi
+
+    export VULKAN_SDK=${VULKAN_SDK_PATH}/${VULKAN_SDK_VERSION}/x86_64
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${VULKAN_SDK}/lib
+    export PATH=$PATH:${VULKAN_SDK}/bin
+    export VK_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d
+    export VK_ADD_LAYER_PATH=$VULKAN_SDK/share/vulkan/explicit_layer.d
+    export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$VULKAN_SDK/lib/pkgconfig/
+    export CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH:$VULKAN_SDK:$VULKAN_SDK/lib/VulkanLoader
 }
 
 
@@ -209,32 +251,32 @@ function run_llamacli()
 
     local vulkan_running_envs="export GGML_VK_MEMORY_LOGGER=1 export GGML_VK_PERF_LOGGER=1"
     local vulkan_running_envs=" "
-    echo "cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p ${PROMPT_STRING@Q}"
-    cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+    echo "cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/llama-completion ${running_params} -m ${model_path} -p ${PROMPT_STRING@Q}"
+    cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
                && ${vulkan_running_envs} \
-               && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p "${PROMPT_STRING}"
+               && ${LOCAL_PATH}/llama-completion ${running_params} -m ${model_path} -p "${PROMPT_STRING}"
 
 }
 
 
 function run_llamabench()
 {
-    echo "cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}"
+    echo "cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}"
 
-    cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}
+    cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}
 }
 
 
 function run_llamacli_all()
 {
-    local models=("qwen1" "minicpm5-1b" "llama3" "qwen3-2b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b")
+    local models=("qwen1" "minicpm5-1b" "llama3" "qwen3-2b" "gemma4-e2b" "nanbeige-3b" "gemma4-e4b" "qwen3-9b" "qwen3-27b")
 
     local total=${#models[@]}
     local count=0
@@ -261,14 +303,14 @@ function run_test-ops()
 {
     prog_name=test-backend-ops
 
-    echo "cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} test"
+    echo "cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} test"
 
 
-    cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} test
+    cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} test
 
 }
 
@@ -278,14 +320,14 @@ function run_test-op()
     prog_name=test-backend-ops
     prog_param="-o ${opname}"
 
-    echo "cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} test ${prog_param}"
+    echo "cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} test ${prog_param}"
 
     echo "\n"
-    cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} test ${prog_param}
+    cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} test ${prog_param}
 
 }
 
@@ -294,14 +336,14 @@ function run_perf-op()
 {
     prog_name=test-backend-ops
 
-    echo "cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname}"
+    echo "cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} perf -o ${opname}"
 
     echo "\n"
-    cd ${REMOTE_PATH} \
-               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
-               && ${REMOTE_PATH}/${prog_name} perf -o ${opname}
+    cd ${LOCAL_PATH} \
+               && export LD_LIBRARY_PATH=${LOCAL_PATH} \
+               && ${LOCAL_PATH}/${prog_name} perf -o ${opname}
 
 }
 
@@ -335,8 +377,11 @@ function show_usage()
     echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
     echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    qwen3-27b     -> Qwen3.8-27B-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
+    echo "    $0 run_llamacli qwen3-9b     # test qwen3-9b"
+    echo "    $0 run_llamacli qwen3-27b    # test qwen3-27b"
     echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
     echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b"
     echo -e "\n"
@@ -346,10 +391,11 @@ function show_usage()
 ######## part-4: entry point  ########
 
 show_pwd
-dump_vars
-
 check_commands_in_host
+check_and_download_vulkan_sdk
 #check_prebuilt_models
+
+dump_vars
 
 if [ $# == 0 ]; then
     show_usage
