@@ -169,6 +169,7 @@ refs/
 .ccache/
 .ccache_qcom/
 .ccache_cpu/
+.ccache_vulkan_x86_linux/
 tags
 *.me
 *.bk
