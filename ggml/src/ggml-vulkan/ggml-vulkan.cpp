@@ -3607,18 +3607,7 @@ static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size) {
     } catch (const vk::SystemError& e) {
         std::cerr << "ggml_vulkan: Device memory allocation of size " << size << " failed." << std::endl;
         std::cerr << "ggml_vulkan: " << e.what() << std::endl;
-
-        // final fallback: try pure host-visible system memory (no DEVICE_LOCAL requirement)
-        // this helps small-VRAM GPUs (e.g. GT730-2G) avoid device-local allocation failures
-        try {
-            GGML_LOG_WARN("ggml_vulkan: falling back to host-visible buffer for size %zu (device-local allocation failed: %s)\n", size, e.what());
-            return ggml_vk_create_buffer(device, size, {
-                vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
-            });
-        } catch (const vk::SystemError& e_fallback) {
-            GGML_LOG_WARN("ggml_vulkan: host-visible allocation also failed (%s)\n", e_fallback.what());
-            throw e_fallback;
-        }
+        throw e;
     }
 
     return buf;

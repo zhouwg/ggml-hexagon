@@ -250,7 +250,7 @@ function run_llamacli()
     fi
 
     local vulkan_running_envs="export GGML_VK_MEMORY_LOGGER=1 export GGML_VK_PERF_LOGGER=1"
-    local vulkan_running_envs=" "
+    local vulkan_running_envs="export GGML_VK_ALLOW_SYSMEM_FALLBACK=1"
     echo "cd ${LOCAL_PATH} \
                && export LD_LIBRARY_PATH=${LOCAL_PATH} \
                && ${LOCAL_PATH}/llama-completion ${running_params} -m ${model_path} -p ${PROMPT_STRING@Q}"
