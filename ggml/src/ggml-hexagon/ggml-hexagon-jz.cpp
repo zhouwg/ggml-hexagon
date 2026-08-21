@@ -4127,14 +4127,30 @@ static bool hexagon_validate_sqr_sqrt(ggml_backend_hexagon_context * ctx, const 
 
 static bool hexagon_validate_rope(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
+    const int32_t * op_params = &op->op_params[0];
+
+    // ggml_rope_set_offset: HVX kernels need a VLEN-aligned window start (32 f32 elems)
+    if (op_params[15] % 32 != 0) {
+        return false;
+    }
+
+    int mode = op_params[2];
+    if (mode == GGML_ROPE_TYPE_VISION) {
+        const int n_dims = op_params[1];
+        if (n_dims != (int) (op->src[0]->ne[0] / 2)) {
+            return false;
+        }
+    }
+    if (mode & 1) {
+        return false;
+    }
+
     const ggml_tensor * src0 = op->src[0];
     const ggml_tensor * src1 = op->src[1];
     if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
         return false;
     if (!src1 || src1->type != GGML_TYPE_I32)
         return false;
-    const int32_t mode = op->op_params[2];
-    if (mode == 24) return false;
     return true;
 }
 
