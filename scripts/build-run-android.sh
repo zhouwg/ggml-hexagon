@@ -1,1 +1,0 @@
-build-run-ggmlhexagon-android.sh

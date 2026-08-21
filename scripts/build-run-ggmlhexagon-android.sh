@@ -33,9 +33,7 @@ REMOTE_PATH=/data/local/tmp
 #path of built artifacts
 LOCAL_BUILD_DIR=${PROJECT_ROOT_PATH}/out/ggmlhexagon-android
 
-#path of toolchain, for purpose of share same toolchain in multiple instance of ggml-hexagon
 TOOLCHAIN_PATH=${PROJECT_ROOT_PATH}/prebuilts
-#TOOLCHAIN_PATH=/home/zhouwg/develop/ggml-hexagon/prebuilts
 
 #Android NDK can be found at:
 #https://developer.android.com/ndk/downloads
@@ -808,6 +806,7 @@ function update_jz_libs()
         adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
     adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
     echo "jz" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
@@ -840,6 +839,7 @@ function update_qcom_libs()
         adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
     echo "qcom" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
@@ -877,6 +877,7 @@ function update_cpu_libs()
     # libggml-base.so / libggml-cpu.so are shared across builds, device-side kept as-is
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
     adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+    adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     adb shell "rm -f ${REMOTE_PATH}/libggml-hexagon.so"
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
     adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
@@ -1000,6 +1001,7 @@ function prepare_run_on_phone()
             adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
             adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
             adb shell rm -f ${REMOTE_PATH}/libggml-opencl.so
+            adb shell rm -f ${REMOTE_PATH}/libggml-vulkan.so
             ;;
     esac
 
@@ -1020,6 +1022,17 @@ function prepare_run_on_phone()
     adb shell "echo 0x1c > /data/local/tmp/${program}.farf"
     #observe cDSP's log
     #adb logcat  | grep "CDSP0"
+}
+
+
+function run_llamaversion()
+{
+    prepare_run_on_phone llama-cli
+
+    adb shell "cd ${REMOTE_PATH} \
+               && export LD_LIBRARY_PATH=${REMOTE_PATH} \
+               && export GGML_HEXAGON_OPPOLL=1 \
+               && ${REMOTE_PATH}/llama-completion --version"
 }
 
 
@@ -1265,6 +1278,7 @@ function run_abtest()
         adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
     adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
 
@@ -1298,6 +1312,7 @@ function run_abtest()
         adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
 
@@ -1613,93 +1628,11 @@ function run_perf-op()
 }
 
 
-function print_oplist()
-{
-oplist="DUP
-    ADD
-    ADD1
-    ACC
-    SUB
-    MUL
-    DIV
-    SQR
-    SQRT
-    LOG
-    SIN
-    COS
-    SUM
-    SUM_ROWS
-    MEAN
-    ARGMAX
-    COUNT_EQUAL
-    REPEAT
-    REPEAT_BACK
-    CONCAT
-    SILU_BACK
-    NORM
-    RMS_NORM
-    RMS_NORM_BACK
-    GROUP_NORM
-
-    MUL_MAT
-    MUL_MAT_ID
-    OUT_PROD
-
-    SCALE
-    SET
-    CPY
-    CONT
-    RESHAPE
-    VIEW
-    PERMUTE
-    TRANSPOSE
-    GET_ROWS
-    GET_ROWS_BACK
-    DIAG
-    DIAG_MASK_INF
-    DIAG_MASK_ZERO
-    SOFT_MAX
-    SOFT_MAX_BACK
-    ROPE
-    ROPE_BACK
-    CLAMP
-    CONV_TRANSPOSE_1D
-    IM2COL
-    IM2COL_BACK
-    CONV_TRANSPOSE_2D
-    POOL_1D
-    POOL_2D
-    POOL_2D_BACK
-    UPSCALE
-    PAD
-    PAD_REFLECT_1D
-    ARANGE
-    TIMESTEP_EMBEDDING
-    ARGSORT
-    LEAKY_RELU
-
-    FLASH_ATTN_EXT
-    FLASH_ATTN_BACK
-    SSM_CONV
-    SSM_SCAN
-    WIN_PART
-    WIN_UNPART
-    GET_REL_POS
-    ADD_REL_POS
-    RWKV_WKV6
-    GATED_LINEAR_ATTN"
-
-echo "opname list: "
-echo ${oplist}
-}
-
-
 function show_usage()
 {
     echo -e "\n"
     echo "Usage:"
     echo "  $0 help"
-    echo "  $0 print_oplist"
 
     echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device, for build)"
     echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device, for build_qcom)"
@@ -1716,6 +1649,7 @@ function show_usage()
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
     echo "  $0 run_llamacli"
     echo "  $0 run_llamabench"
+    echo "  $0 run_llamaversion"
 
     echo "  $0 run_llamaserver"
     echo "  In a disconnected environment, download the pre-built UI from a llama.cpp
@@ -1812,9 +1746,6 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "help" ]; then
         show_usage
         exit 1
-    elif [ "$1" == "print_oplist" ]; then
-        print_oplist
-        exit 1
     elif [ "$1" == "update_ggml_libs" ]; then
         update_ggml_libs
         exit 1
@@ -1848,6 +1779,9 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "run_llamacli" ]; then
         run_llamacli
         exit 0
+    elif [ "$1" == "run_llamaversion" ]; then
+        run_llamaversion
+        exit 0
     elif [ "$1" == "run_llamaserver" ]; then
         run_llamaserver
         exit 0
@@ -1880,9 +1814,6 @@ elif [ $# == 1 ]; then
         exit 1
     fi
 elif [ $# == 2 ]; then
-#TODO: check opname in oplist
-#opname can be found via print_oplist:
-
     if [ "$1" == "run_testop" ]; then
         opname=$2
         run_test-op
