@@ -3904,7 +3904,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         {
             // src0 (weights) must be repacked. In test-backend-ops tensors
             // are allocated in the main buffer, so this filters quantized MUL_MAT test cases
-            if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
+            if (!src0->buffer || !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
                 return false;
             }
 
@@ -3935,7 +3935,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         {
             // src0 (weights) must be repacked. In test-backend-ops tensors
             // are allocated in the main buffer, so this filters quantized MUL_MAT test cases
-            if (src0->buffer && !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
+            if (!src0->buffer || !ggml_backend_buffer_is_hexagon_repack(src0->buffer)) {
                 return false;
             }
 
