@@ -1,36 +1,3 @@
-/*
- * This single-source file is part of JZ's ggml-hexagon.
- * 2024--2026 The ggml authors
- * GitHub:  https://github.com/zhouwg/ggml-hexagon
- */
-
-/*
-   This is free and unencumbered software released into the public domain.
-
-   Anyone is free to copy, modify, publish, use, compile, sell, or
-   distribute this software, either in source code form or as a compiled
-   binary, for any purpose, commercial or non-commercial, and by any
-   means.
-
-   In jurisdictions that recognize copyright laws, the author or authors
-   of this software dedicate any and all copyright interest in the
-   software to the public domain. We make this dedication for the benefit
-   of the public at large and to the detriment of our heirs and
-   successors. We intend this dedication to be an overt act of
-   relinquishment in perpetuity of all present and future rights to this
-   software under copyright law.
-
-   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-   IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-   OTHER DEALINGS IN THE SOFTWARE.
-
-   For more information, please refer to <http://unlicense.org/>
-*/
-
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -135,6 +102,8 @@ void ggmlhexagon_log_internal(int level, const char *file, const char *func, int
     if (!g_dsp_ctx || !g_dsp_ctx->dump_diag_info) {
         return;
     }
+    GGML_UNUSED(level);
+    GGML_UNUSED(file);
     static char s_ggmlhexagon_log_internal_buf[GGMLHEXAGON_LOGBUF_LEN];
     va_list args;
     va_start(args, format);
@@ -144,13 +113,15 @@ void ggmlhexagon_log_internal(int level, const char *file, const char *func, int
         return;
     }
     int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
-    if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
+    if (len >= 0 && len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
         FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_internal_buf);
     }
     va_end(args);
 }
 
 void ggmlhexagon_log_always_internal(int level, const char *file, const char *func, int line, const char *format, ...) {
+    GGML_UNUSED(level);
+    GGML_UNUSED(file);
     static char s_ggmlhexagon_log_buf[GGMLHEXAGON_LOGBUF_LEN];
     va_list args;
     va_start(args, format);
@@ -160,7 +131,7 @@ void ggmlhexagon_log_always_internal(int level, const char *file, const char *fu
         return;
     }
     int len = vsnprintf(s_ggmlhexagon_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
-    if (len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
+    if (len >= 0 && len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
         FARF(ALWAYS, "%s\n", s_ggmlhexagon_log_buf);
     }
     va_end(args);
@@ -402,7 +373,8 @@ static inline void weight_inval_unmark(const void * ptr) {
  *   when bit 2 is on, regardless of bit 1.
  *
  * State is reset at the start of every batch (next batch sees empty lists).
- * Both lists are sized for the worst case: 256 ops/batch * 4 dst/op.
+ * Both lists are sized for the worst case: DSP_OPT_MAX_TENSORS * 4 ops/batch
+ * * HTP_OP_MAX_OUTPUTS dst/op (= DSP_OPT_MAX_BATCH_DSTS entries).
  *
  * Hexagon FastRPC domain processes calls one at a time; g_dsp_ctx is set
  * from the handle parameter at every entry point, so per-session state is
@@ -576,6 +548,10 @@ static int vtcm_release_callback(unsigned int rctx, void * state) {
 // =================================================================================================
 static int power_on_hvx_hmx(struct dsp_context * ctx) {
     HAP_power_request_t req;
+
+    /* Note: ctx->power_ctx is left NULL (calloc) and passed as the context
+     * argument; HAP_power_set treats it as reserved on single-PD sessions,
+     * matching Qualcomm's original implementation. */
 
     /* Set client class */
     memset(&req, 0, sizeof(req));
@@ -1001,7 +977,9 @@ static void build_htp_octx(
 }
 
 // Try HMX precompute (simple 2D path). Mirrors ggml_hexagon_precompute_hmx_mm_params
-// without the grouped batched path (we don't use MUL_MAT_ID).
+// minus the grouped batched path: this DSP-side fallback handles plain MUL_MAT
+// only; MUL_MAT_ID and fused matmuls rely on AP-precomputed kernel_params
+// (kernel_type != 0) and are never rebuilt here.
 // Returns true on success, false to fall back to HVX.
 static bool build_mm_hmx_params(struct htp_ops_context * octx,
                                 struct htp_mm_kernel_params * kparams) {
@@ -1123,7 +1101,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
 
     // If AP side already precomputed kernel params (kernel_type != 0),
     // skip DSP-side recomputation. The AP side uses the same HMX-first
-    // then HVX-fallback policy (ggml_hexagon_precompute_matmul_params)
+    // then HVX-fallback policy (ggml_hexagon_precompute_mm_params)
     // as this function, and may have precomputed HMX chunk sizes that
     // the DSP-side build_mm_hmx_params would otherwise recompute.
     if (kparams->kernel_type != 0) {
@@ -1145,7 +1123,7 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
     kparams->n_threads   = octx->n_threads;
     kparams->n_prefetch  = 16;
 
-    // Try HMX first (mirrors ggml_hexagon_precompute_matmul_params: HMX-first, HVX-fallback)
+    // Try HMX first (mirrors ggml_hexagon_precompute_mm_params: HMX-first, HVX-fallback)
     if (g_dsp_ctx->hmx_available && build_mm_hmx_params(octx, kparams)) {
         goto mm_finalize;
     }
@@ -1280,129 +1258,6 @@ mm_finalize:
     return 0;
 }
 
-// Build htp_fa_kernel_params on DSP side for FLASH_ATTN_EXT.
-// Mirrors ggml_hexagon_precompute_flash_attn_params on AP side, using
-// DSP-side globals (g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts, g_dsp_ctx->hmx_available).
-static int build_fa_kernel_params(struct htp_ops_context * octx) {
-    const struct htp_tensor * q  = octx->src[0];
-    const struct htp_tensor * k  = octx->src[1];
-    const struct htp_tensor * v  = octx->src[2];
-    const struct htp_tensor * mask = octx->src[3];
-    const struct htp_tensor * dst = octx->dst;
-    if (!q || !k || !v || !dst) return -1;
-    /* Guard against division by zero in G = q->ne[2]/n_kv_heads and
-     * broadcast_rk2/rk3/rv2/rv3 (all use k/v ne[2],ne[3] as divisors) */
-    if (k->ne[2] == 0 || k->ne[3] == 0 || v->ne[2] == 0 || v->ne[3] == 0) {
-        GGMLHEXAGON_LOG_ERROR("build_fa: zero divisor k[%u,%u] v[%u,%u]",
-                              k->ne[2], k->ne[3], v->ne[2], v->ne[3]);
-        return -1;
-    }
-    FARF(ALWAYS, "build_fa: DK=%u DV=%u neq1=%u nek1=%u G=%u ktype=%d vtype=%d hmx=%d",
-         q->ne[0], v->ne[0], q->ne[1], k->ne[1], q->ne[2]/k->ne[2],
-         k->type, v->type, g_dsp_ctx->hmx_available);
-
-    struct htp_fa_kernel_params * kparams =
-        (struct htp_fa_kernel_params *) octx->kernel_params;
-    memset(kparams, 0, sizeof(*kparams));
-
-    const uint32_t DK = q->ne[0];
-    const uint32_t DV = v->ne[0];
-    const uint32_t neq1 = q->ne[1];
-    const uint32_t nek1 = k->ne[1];
-    const uint32_t n_kv_heads = k->ne[2];
-    const uint32_t G = q->ne[2] / n_kv_heads;
-
-    float scale = 1.0f, max_bias = 0.0f, logit_softcap = 0.0f;
-    memcpy(&scale,         &octx->op_params[0], sizeof(float));
-    memcpy(&max_bias,      &octx->op_params[1], sizeof(float));
-    memcpy(&logit_softcap, &octx->op_params[2], sizeof(float));
-    if (logit_softcap != 0.0f) scale /= logit_softcap;
-
-    kparams->scale         = scale;
-    kparams->max_bias      = max_bias;
-    kparams->logit_softcap = logit_softcap;
-    kparams->is_q_fp32     = (q->type == HTP_TYPE_F32) ? 1 : 0;
-    kparams->is_dst_fp32   = (dst->type == HTP_TYPE_F32) ? 1 : 0;
-    kparams->G             = G;
-
-    // ALiBi: find largest power of 2 <= n_head, then compute slope bases.
-    // AP uses std::pow(2, -x); here we use 2^x = exp(x * ln2) to avoid powf.
-    // Always computed (matches AP): when max_bias = 0, m0 = m1 = 1.0.
-    const float ln2 = 0.6931471805599453f;
-    uint32_t n_head_log2 = 1;
-    while (n_head_log2 * 2u <= q->ne[2]) n_head_log2 *= 2;
-    kparams->n_head_log2 = n_head_log2;
-    kparams->m0 = expf(-ln2 * max_bias / (float)n_head_log2);
-    kparams->m1 = expf(-ln2 * (max_bias * 0.5f) / (float)n_head_log2);
-
-    // HMX eligibility: k/v F16, DK/DV divisible by 64, enough tokens.
-    bool hmx_eligible = false;
-    if (g_dsp_ctx->hmx_available && k->type == HTP_TYPE_F16 && v->type == HTP_TYPE_F16) {
-        if (DK % 64 == 0 && DV % 64 == 0 && !(DK <= 128 && neq1 < 5)) {
-            hmx_eligible = true;
-        }
-    }
-
-    if (hmx_eligible) {
-        size_t Br = 0, Bc = 0;
-        int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
-                                         g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts,
-                                         kparams->is_q_fp32 != 0);
-        if (ret == 0) {
-            kparams->kernel_type = HTP_FA_KERNEL_HMX;
-            kparams->Br          = (uint16_t)Br;
-            kparams->Bc          = (uint16_t)Bc;
-            kparams->n_kv_blocks = (uint16_t)((nek1 + Bc - 1) / Bc);
-            kparams->n_threads   = (kparams->n_kv_blocks >= 3 && g_dsp_ctx->thread_counts >= 2)
-                                    ? (uint8_t)g_dsp_ctx->thread_counts : 1;
-            kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
-            kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && g_dsp_ctx->thread_counts >= 2) ? 1 : 0;
-            kparams->vtcm_size       = (uint32_t)hmx_fa_compute_vtcm_usage(
-                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0,
-                kparams->is_q_fp32 != 0);
-
-            const size_t row_vec_bytes = hex_align_up(Bc * sizeof(uint16_t), 256);
-            kparams->u.hmx.row_buf_stride = row_vec_bytes / 128;
-            const size_t m_line_bytes = hex_align_up(Bc * sizeof(uint16_t), 128);
-            kparams->u.hmx.mask_buf_row_stride = m_line_bytes / sizeof(uint16_t);
-            kparams->u.hmx.mask_broadcast = (mask && mask->ne[2] == 1) ? 1 : 0;
-            kparams->u.hmx.div_G = init_fastdiv_values(G);
-            if (mask) {
-                kparams->src3_div2 = init_fastdiv_values(mask->ne[2]);
-                kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
-            }
-            kparams->qrows = 0;
-            kparams->qrows_per_thread = 0;
-            return 0;
-        }
-    }
-
-    // Fallback to HVX
-    kparams->kernel_type    = HTP_FA_KERNEL_HVX;
-    kparams->Br             = 1;
-    kparams->Bc             = 64;
-    kparams->n_kv_blocks    = (uint16_t)((k->ne[1] + 64 - 1) / 64);
-    kparams->n_threads      = (uint8_t)g_dsp_ctx->thread_counts;
-    kparams->vtcm_size      = (uint32_t)hvx_fa_compute_vtcm_usage(
-        DK, DV, kparams->is_q_fp32 != 0, mask != NULL, g_dsp_ctx->thread_counts);
-
-    kparams->u.hvx.size_q_row_padded = hex_round_up(q->ne[0] * (kparams->is_q_fp32 ? 4 : 2), 128);
-    kparams->u.hvx.size_k_row_padded = hex_round_up(k->ne[0] * 2, 128);
-    kparams->u.hvx.size_v_row_padded = hex_round_up(v->ne[0] * 2, 128);
-    kparams->u.hvx.src0_div21     = init_fastdiv_values(q->ne[2] * q->ne[1]);
-    kparams->u.hvx.src0_div1      = init_fastdiv_values(q->ne[1]);
-    kparams->broadcast_rk2   = init_fastdiv_values(q->ne[2] / k->ne[2]);
-    kparams->broadcast_rk3   = init_fastdiv_values(q->ne[3] / k->ne[3]);
-    kparams->broadcast_rv2   = init_fastdiv_values(q->ne[2] / v->ne[2]);
-    kparams->broadcast_rv3   = init_fastdiv_values(q->ne[3] / v->ne[3]);
-    if (mask) {
-        kparams->src3_div2 = init_fastdiv_values(mask->ne[2]);
-        kparams->src3_div3 = init_fastdiv_values(mask->ne[3]);
-    }
-    kparams->qrows           = q->ne[1] * q->ne[2] * q->ne[3];
-    kparams->qrows_per_thread = (kparams->qrows + g_dsp_ctx->thread_counts - 1) / g_dsp_ctx->thread_counts;
-    return 0;
-}
 // end translation layer }
 
 
@@ -1459,9 +1314,9 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     ctx->thread_prio = qurt_thread_get_priority(qurt_thread_get_id());
     *handle = (remote_handle64)ctx;
 
-    // Reset first-touch invalidate bitmap so a fresh session starts with
-    // no weight regions marked. The bitmap is session-scoped: AP will
-    // re-mirror weights at model load and their ION offsets are stable
+    // Reset the first-touch weight tracking so a fresh session starts with
+    // no weights marked. Tracking is session-scoped: AP repacks/writes
+    // weights into the mempool at model load and their offsets are stable
     // for the lifetime of this session.
     // Use ctx directly: g_dsp_ctx is not set until after init completes.
     ctx->weight_inval_count = 0;
@@ -1472,7 +1327,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     }
 #endif
     // Default to 0: no DSP-side cache optimizations beyond the baseline
-    // first-touch weight bitmap. AP will push the configured bitmask via
+    // first-touch weight tracking. AP will push the configured bitmask via
     // execute_batch(0xFFFC) right after ggml_dsp_open returns. Until then,
     // every code path that consults dsp_cache_mode sees 0 and behaves like
     // baseline 29c1cf196.
@@ -1483,7 +1338,6 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     printf("uri %s\n", uri);
     GGMLHEXAGON_LOG_INFO("uri    = %s\n", uri);
     GGMLHEXAGON_LOG_ALWAYS("uri  = %s\n", uri);
-    GGMLHEXAGON_LOG_ERROR("uri   = %s\n", uri);
 
     unsigned int api_version = qurt_api_version();
     printf("qurt_api_version            = 0x%x\n", api_version);
@@ -1565,9 +1419,13 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
         void * vtcm_ptr = NULL;
         unsigned int vtcm_ptr_size = 0;
         if (HAP_compute_res_attr_get_vtcm_ptr_v2(&attr, &vtcm_ptr, &vtcm_ptr_size) != 0) {
-            GGMLHEXAGON_LOG_INFO("HAP_compute_res_attr_get_vtcm_ptr_v2 failed\n");
+            GGMLHEXAGON_LOG_ERROR("HAP_compute_res_attr_get_vtcm_ptr_v2 failed\n");
             HAP_compute_res_release(ctx->compute_res_ctx_id);
-            ctx->compute_res_ctx_id = 0;
+            free(ctx->arrays_pool);
+            free(ctx->htp_ctx);
+            free(ctx);
+            *handle = 0;
+            return AEE_EFAILED;
         } else {
             ctx->vtcm_base = vtcm_ptr;
             ctx->vtcm_size = vtcm_ptr_size;
@@ -1757,11 +1615,8 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
                requested_thread_counts, max_usable, g_dsp_ctx->max_hw_threads);
         requested_thread_counts = max_usable;
     }
-    if (requested_thread_counts <= g_dsp_ctx->thread_counts) {
-        g_dsp_ctx->thread_counts = requested_thread_counts;
-    }
-
-    g_dsp_ctx->dump_diag_info      = diag_info;
+    g_dsp_ctx->thread_counts    = requested_thread_counts;
+    g_dsp_ctx->dump_diag_info   = diag_info;
 
     // Expose the actual thread count in effect on DSP side so AP can mirror it
     // (avoids jobs > work-queue threads when n_act_threads is precomputed on AP).
@@ -2001,7 +1856,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
      *   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
-     *   bit 0 (0x1): first-touch weight bitmap    - INVAL_SRC_IF_NEEDED skips
+     *   bit 0 (0x1): first-touch weight tracking  - INVAL_SRC_IF_NEEDED skips
      *               dcinva for repack weights (flags==2) once invalidated.
      *   bit 1 (0x2): skip dcinva for prior dst     - INVAL_SRC_IF_NEEDED skips
      *               dcinva for activations (flags!=2) when [base,base+len) is
@@ -2109,6 +1964,19 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
     }
 
+    /* Validate per-tensor data ranges against the mempool mapping. Catches
+     * corrupted descriptors (e.g. stale offsets from the AP side) before
+     * they become wild reads/writes anywhere in DSP address space. */
+    for (uint32_t ti = 0; ti < hdr->n_tensors; ti++) {
+        const uint32_t off = tens[ti].data_offset;
+        const uint32_t len = tens[ti].data_len;
+        if (off >= g_dsp_ctx->mempool_dsp_size || len > g_dsp_ctx->mempool_dsp_size - off) {
+            GGMLHEXAGON_LOG_ERROR("tensor %u: range out of bounds off=%u len=%u pool=%zu",
+                                  ti, off, len, (size_t)g_dsp_ctx->mempool_dsp_size);
+            return AEE_EBADPARM;
+        }
+    }
+
     /* VTCM is acquired once in ggml_dsp_open and held for the whole
      * session (matches htp/main.c htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
@@ -2180,6 +2048,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         const dsptensor *src1_dt = (op->src_idx[1] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[1]] : NULL;
         const dsptensor *src2_dt = (op->src_idx[2] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[2]] : NULL;
         const dsptensor *src3_dt = (op->src_idx[3] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[3]] : NULL;
+        const dsptensor *src4_dt = (op->src_idx[4] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[4]] : NULL;
+        const dsptensor *src5_dt = (op->src_idx[5] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[5]] : NULL;
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             if (src0_dt->data && src0_dt->data_len >= 16) {
@@ -2195,11 +2065,11 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             }
         }
 
-        /* dsts: copy from pre-converted, then override op_params with
-         * per-op params (node->op_params is correct; dst tensor's op_params
-         * can be zero or stale for in-place reuse ops like SCALE).
-         * Uses file-scope static buffers (see g_dsp_ctx->dst_dt_buf/g_dsp_ctx->dst_dt_ptrs)
-         * to avoid per-op stack frame pressure. */
+         /* dsts: copy from pre-converted, then override op_params with
+          * per-op params (node->op_params is correct; dst tensor's op_params
+          * can be zero or stale for in-place reuse ops like SCALE).
+          * Uses dsp_context-scoped buffers (g_dsp_ctx->dst_dt_buf/dst_dt_ptrs)
+          * to avoid per-op stack frame pressure. */
         for (int k = 0; k < HTP_OP_MAX_OUTPUTS; k++) {
             g_dsp_ctx->dst_dt_ptrs[k] = NULL;
             const int32_t di = op->dst_idx[k];
@@ -2217,6 +2087,8 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         if (src1_dt) INVAL_SRC_IF_NEEDED(i, 1, src1_dt, op->src_idx[1]);
         if (src2_dt) INVAL_SRC_IF_NEEDED(i, 2, src2_dt, op->src_idx[2]);
         if (src3_dt) INVAL_SRC_IF_NEEDED(i, 3, src3_dt, op->src_idx[3]);
+        if (src4_dt) INVAL_SRC_IF_NEEDED(i, 4, src4_dt, op->src_idx[4]);
+        if (src5_dt) INVAL_SRC_IF_NEEDED(i, 5, src5_dt, op->src_idx[5]);
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             if (src0_dt->data && src0_dt->data_len >= 16) {
@@ -2261,11 +2133,13 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 
         if (htp_op == HTP_OP_FLASH_ATTN_EXT) {
             const int32_t kp_kernel_type = octx.kernel_params[0];
+            /* AP always precomputes FA params; kernel_type==UNSUPPORTED means
+             * the op was routed here against fa_select policy (e.g. direct
+             * graph_compute with fa_select=0). Reject instead of running it. */
             if (kp_kernel_type == HTP_FA_KERNEL_UNSUPPORTED) {
-                if (build_fa_kernel_params(&octx) != 0) {
-                    dsp_queues_suspend();
-                    return AEE_EFAILED;
-                }
+                GGMLHEXAGON_LOG_ERROR("ion-op %u: FLASH_ATTN_EXT without precomputed params", i);
+                dsp_queues_suspend();
+                return AEE_EUNSUPPORTED;
             }
         }
 
@@ -2406,8 +2280,12 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     g_dsp_ctx->nonop_bulk_flush_us += (uint64_t)(ggml_time_us() - prof_bf_t0);
 #endif
 
+    /* Read-probe one word of the last op's first output before replying,
+     * forcing the memory pipeline to observe completed writes; result is
+     * discarded and the offset is bounds-checked above. */
     __asm__ __volatile__("" ::: "memory");
-    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
+    if (hdr->n_ops > 0 && ops[hdr->n_ops - 1].dst_idx[0] >= 0 &&
+        (uint32_t)ops[hdr->n_ops - 1].dst_idx[0] < hdr->n_tensors) {
         uint32_t last_off = tens[ops[hdr->n_ops - 1].dst_idx[0]].data_offset;
         if (last_off < g_dsp_ctx->mempool_dsp_size && g_dsp_ctx->mempool_dsp_size - last_off > 4)
             (void) *(volatile const int *)(base + last_off);

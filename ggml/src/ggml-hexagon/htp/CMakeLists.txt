@@ -47,7 +47,6 @@ set(HTP_OPS_SRCS
 option(GGML_HEXAGON_USE_MEMPOOL "Build the mempool/FastRPC-invoke skel variant (entry.c) instead of the dspqueue variant (main.c)" OFF)
 
 if (GGML_HEXAGON_USE_MEMPOOL)
-    # --- mempool variant: single ION mempool, synchronous FastRPC invoke ---
     set(HTP_LIB ggml-htp-${DSP_VERSION})
 
     add_library(${HTP_LIB} SHARED
@@ -62,7 +61,6 @@ if (GGML_HEXAGON_USE_MEMPOOL)
         $<IF:$<BOOL:${HEXAGON_HTP_DEBUG}>,FARF_HIGH=1,>
     )
 
-    # entry.c predates the -Werror toolchain defaults; not audited for them
     target_compile_options(${HTP_LIB} PRIVATE -Wno-error)
 
     build_idl(ggml_dsp.idl ${HTP_LIB})
@@ -71,7 +69,6 @@ if (GGML_HEXAGON_USE_MEMPOOL)
 
     install(TARGETS ${HTP_LIB})
 else()
-    # --- dspqueue variant: per-buffer shared memory, async dspqueue ---
     set(HTP_LIB ggml-htp-${DSP_VERSION})
 
     add_library(${HTP_LIB} SHARED
