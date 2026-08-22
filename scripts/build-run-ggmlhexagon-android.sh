@@ -8,11 +8,11 @@
 #
 # this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 1. build&verify llama.cpp + JZ's ggml-hexagon backend(libggmldsp-skel.so) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 1. build&verify llama.cpp + mempool/FastRPC ggml-hexagon backend(aka JZ's ggml-hexagon, ggml-hexagon-fastrpc.cpp + entry.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 2. build&verify llama.cpp + Qualcomm's ggml-hexagon backend(libggml-htp.so) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 2. build&verify llama.cpp + dspqueue ggml-hexagon backend(aka Qualcomm's ggml-hexagon, ggml-hexagon.cpp + main.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 3. performance comparison of Qualcomm's ggml-hexagon and JZ's ggml-hexagon on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
+# 3. performance comparison of the dspqueue variant and the mempool/FastRPC variant on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
 #
 #
 set -e
@@ -116,7 +116,7 @@ function resolve_model_name()
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
-#unified command-line parameters used during inference testing for fair performance comparison of PP and TG across Qualcomm's ggml-hexagon and JZ's ggml-hexagon
+#unified command-line parameters used during inference testing for fair performance comparison of PP and TG across the dspqueue and mempool/FastRPC ggml-hexagon variants
 #running_params=" -ngl 99 -t 6 -n 256 --no-warmup --load-mode none --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
 running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 
@@ -344,44 +344,15 @@ function check_and_download_ndk()
 }
 
 
-function build_idl()
-{
-    echo "build idl"
-    if [ -f ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic ]; then
-        ${HEXAGON_SDK_PATH}/ipc/fastrpc/qaic/bin/qaic -mdll -o ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels -I${HEXAGON_SDK_PATH}/incs -I${HEXAGON_SDK_PATH}/incs/stddef -I${HEXAGON_SDK_PATH}/ipc/fastrpc/incs ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ggml_dsp.idl
-    fi
-}
-
-
-#build extra DSP skels (all HTP_ARCH_VERSIONS except the first/default)
-#$1 = "debug" for debug build, anything else for release build
-function build_extra_dsp_skels()
-{
-    local dsp_debug_flag
-    if [ "$1" == "debug" ]; then
-        dsp_debug_flag="-DDEBUG -Wall"
-    else
-        dsp_debug_flag="-DNDEBUG -Wall"
-    fi
-
-    # extras = HTP_ARCH_VERSIONS minus the first element (default)
-    for extra_ver in ${HTP_ARCH_VERSIONS#* }; do
-        printf "\n========== build extra DSP skel: libggmldsp-skel-${extra_ver}.so ==========\n"
-        build_idl
-        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ clean
-        make -C ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/ HTP_ARCH_VERSION=${extra_ver} HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH} HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH} DEBUG_FLAG="${dsp_debug_flag}"
-        /bin/cp -fv ${PROJECT_ROOT_PATH}/ggml/src/ggml-hexagon/kernels/libggmldsp-skel.so ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${extra_ver}.so
-    done
-}
-
-
-#build JZ's ggml-hexagon backend for performance comparison
+#build the mempool/FastRPC-invoke ggml-hexagon backend (default)
 function build_arm64
 {
-    build_idl
-
     #make AI Agent happy
     export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache
+
+    # clear dspqueue skels left by a prior build_dspqueue, else detect_build_type()
+    # misreports hexagon-dspqueue
+    rm -f ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so
 
     #ARMv8.7a+i8mm CPU tuning flags, moved here from CMakeLists.txt to keep it aligned with upstream master
     local arm_cpu_flags="-march=armv8.7a+fp16+dotprod+i8mm -fvectorize -ffp-model=fast -fno-finite-math-only -flto -D_GNU_SOURCE"
@@ -427,13 +398,12 @@ function build_arm64
 
     local extra_flags="${arm_cpu_flags} ${pgo_flags}"
 
-    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_JZ=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF
-    cd ${LOCAL_BUILD_DIR}
-    make -j${HOST_CPU_COUNTS}
-    #cmake POST_BUILD now builds all 4 DSP skels (v73/v75/v79/v81) in one pass; no script-side extras needed
-    #build_extra_dsp_skels
-    #upload the new libggmldsp-skel.so on device side
-    prepare_ggmldsp
+    /bin/cp -fv ${PROJECT_ROOT_PATH}/docs/backend/snapdragon/CMakeUserPresets.json .
+
+    cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DGGML_CCACHE=ON -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DGGML_HEXAGON_USE_MEMPOOL=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} -DHTP_ARCH_VERSION=${HTP_ARCH_VERSION} -DCMAKE_C_FLAGS="${extra_flags}" -DCMAKE_CXX_FLAGS="${extra_flags}" -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE} -DGGML_USE_HEXAGON=ON -DLLAMA_BUILD_TESTS=ON -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_APP=OFF -DLLAMA_BUILD_UI=ON -DLLAMA_USE_PREBUILT_UI=OFF -DLLAMA_OPENSSL=OFF --preset arm64-android-snapdragon-release
+    cmake --build ${LOCAL_BUILD_DIR}
+    #upload the new libggml-htp.so (mempool variant) on device side
+    prepare_fastrpc_skels
     #push AP-side libs too: libggml-hexagon.so embeds the regenerated FastRPC stub
     #which MUST stay in sync with the DSP skel signature, otherwise FastRPC args
     #get misaligned (root cause of the 8gen3 garbled-output regression).
@@ -441,77 +411,81 @@ function build_arm64
     commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-cpu.so
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
         commit_so_file_md5 ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
-        # backup for AB testing: JZ's AP-side libs + DSP skels
-        # libggml-hexagon.so leaks different libc++ symbols between JZ/QCOM, so all
-        # transitively-linked libs (libggml, libllama, libllama-common, *-impl) must
-        # be swapped together to avoid symbol lookup failures at runtime
+        # backup for AB testing: mempool(FastRPC) AP-side libs + DSP skels
+        # libggml-hexagon.so leaks different libc++ symbols between the mempool/dspqueue
+        # variants, so all transitively-linked libs (libggml, libllama, libllama-common,
+        # *-impl) must be swapped together to avoid symbol lookup failures at runtime
         mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-jz.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-jz.so
-        for skel in ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-v*.so; do
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-fastrpc.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-fastrpc.so
+        for skel in ${LOCAL_BUILD_DIR}/bin/libggml-htp-v*.so; do
             [ -f "$skel" ] || continue
-            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
+            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/$(basename "$skel" .so)-fastrpc.so
         done
         # libggml-opencl.so is optional (GGML_OPENCL=OFF by default); back up if present
         if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ]; then
-            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-jz.so
+            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-fastrpc.so
         fi
     fi
     show_pwd
 
-    cd -
+    /bin/rm -f CMakeUserPresets.json
 }
 
 
-#build Qualcomm's ggml-hexagon backend for performance comparison
-function build_arm64_qcom
+#build the dspqueue ggml-hexagon backend for performance comparison
+function build_arm64_dspqueue
 {
     #make AI Agent happy
-    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom
+    export CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_dspqueue
 
     rm -f ${LOCAL_BUILD_DIR}/.ab_test_runtime
+
+    # clear mempool skels left by a prior fastrpc build, else detect_build_type()
+    # misreports hexagon-fastrpc
+    rm -f ${LOCAL_BUILD_DIR}/bin/libggml-htp-*.so
 
     /bin/cp -fv ${PROJECT_ROOT_PATH}/docs/backend/snapdragon/CMakeUserPresets.json .
 
     cmake -H. -B${LOCAL_BUILD_DIR} -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_OPENCL=OFF -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK}/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_PATH} -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_PATH} --preset arm64-android-snapdragon-release -DCMAKE_VERBOSE_MAKEFILE:BOOL=${VERBOSE}
     cmake --build ${LOCAL_BUILD_DIR}
-    #upload the new libggml-htps.so on device side
-    prepare_ggmlhtp
-    #push AP-side libs too: QCOM build also needs to sync runtime libs
+    #upload the new libggml-htp.so (dspqueue variant) on device side
+    prepare_dspqueue_skels
+    #push AP-side libs too: dspqueue build also needs to sync runtime libs
     update_ggml_libs
-    # backup for AB testing: QCOM's AP-side libs + DSP skels
+    # backup for AB testing: dspqueue AP-side libs + DSP skels
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
         mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-qcom.so
-        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-qcom.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so          ${PROJECT_ROOT_PATH}/out/ab-test/libggml-hexagon-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libggml-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama.so                 ${PROJECT_ROOT_PATH}/out/ab-test/libllama-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-common.so          ${PROJECT_ROOT_PATH}/out/ab-test/libllama-common-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-completion-impl.so ${PROJECT_ROOT_PATH}/out/ab-test/libllama-completion-impl-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-server-impl.so     ${PROJECT_ROOT_PATH}/out/ab-test/libllama-server-impl-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libmtmd.so                  ${PROJECT_ROOT_PATH}/out/ab-test/libmtmd-dspqueue.so
+        /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libllama-bench-impl.so      ${PROJECT_ROOT_PATH}/out/ab-test/libllama-bench-impl-dspqueue.so
         for skel in ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-v*.so; do
             [ -f "$skel" ] || continue
-            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/
+            /bin/cp -fv "$skel" ${PROJECT_ROOT_PATH}/out/ab-test/$(basename "$skel" .so)-dspqueue.so
         done
         # libggml-opencl.so is optional (GGML_OPENCL=OFF by default); back up if present
         if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ]; then
-            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-qcom.so
+            /bin/cp -fv ${LOCAL_BUILD_DIR}/bin/libggml-opencl.so ${PROJECT_ROOT_PATH}/out/ab-test/libggml-opencl-dspqueue.so
         fi
     fi
     show_pwd
 
     /bin/rm -f CMakeUserPresets.json
 
-    echo "run following command to see the performance of qualcomm's official ggml-hexagon backend"
-    echo "./scripts/build-run-android.sh run_llamacli"
-    echo "./scripts/build-run-android.sh run_llamabench"
+    echo "run following command to see the performance of the dspqueue ggml-hexagon backend"
+    echo "./scripts/build-run-ggmlhexagon-android.sh run_llamacli"
+    echo "./scripts/build-run-ggmlhexagon-android.sh run_llamabench"
 }
 
 
@@ -529,11 +503,13 @@ function build_armcpu()
     cmake --build ${LOCAL_BUILD_DIR} -j${HOST_CPU_COUNTS}
     #remove stale hexagon artifacts from previous hexagon builds to ensure CPU-only runtime
     rm -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so
+    rm -f ${LOCAL_BUILD_DIR}/bin/libggml-htp-*.so
+    # legacy name from before the skel unification; clean up leftovers
     rm -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so
-    # also clear QCOM skels left in the source dir by a prior build_qcom, else
-    # detect_build_type() falls back to them and misreports hexagon-qcom
+    # also clear dspqueue skels left in the source dir by a prior build_dspqueue, else
+    # detect_build_type() falls back to them and misreports hexagon-dspqueue
     rm -f ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so
-    # backup CPU-only AP libs for AB switching (symmetric with build/build_qcom)
+    # backup CPU-only AP libs for AB switching (symmetric with build/build_dspqueue)
     # note: do NOT use "-cpu" suffix - libggml-cpu.so is the CPU backend impl, a
     # different lib from libggml.so (the core). use "-cpuonly" to avoid collision.
     mkdir -p ${PROJECT_ROOT_PATH}/out/ab-test
@@ -596,7 +572,7 @@ function build_ggml_hexagon_debug()
 }
 
 
-function build_ggml_hexagon_qcom()
+function build_ggml_hexagon_dspqueue()
 {
     show_pwd
     check_and_download_ndk
@@ -604,12 +580,12 @@ function build_ggml_hexagon_qcom()
     check_and_download_hexagon_sdk
     dump_vars
     remove_temp_dir
-    build_arm64_qcom
+    build_arm64_dspqueue
 }
 
 
-#for Qualcomm's open-source ggml-hexagon backend in branch self-build-jz
-function prepare_ggmlhtp()
+#push dspqueue-variant DSP skels (libggml-htp-vXX.so) to the device
+function prepare_dspqueue_skels()
 {
     for ver in ${HTP_ARCH_VERSIONS}; do
         case "$ver" in
@@ -626,16 +602,16 @@ function prepare_ggmlhtp()
 }
 
 
-#for JZ's open-source ggml-hexagon backend in branch self-build-jz
-function prepare_ggmldsp()
+#push mempool/FastRPC-variant DSP skels (libggml-htp-vXX.so) to the device
+function prepare_fastrpc_skels()
 {
     if [ -f ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ]; then
         adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ggml-hexagon.cfg
     fi
     for ver in ${HTP_ARCH_VERSIONS}; do
-        if [ -f ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ]; then
-            echo "adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${REMOTE_PATH}/libggmldsp-skel-${ver}.so"
-            adb push ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-${ver}.so ${REMOTE_PATH}/libggmldsp-skel-${ver}.so
+        if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-htp-${ver}.so ]; then
+            echo "adb push ${LOCAL_BUILD_DIR}/bin/libggml-htp-${ver}.so ${REMOTE_PATH}/libggml-htp-${ver}.so"
+            adb push ${LOCAL_BUILD_DIR}/bin/libggml-htp-${ver}.so ${REMOTE_PATH}/libggml-htp-${ver}.so
         fi
     done
 }
@@ -753,11 +729,11 @@ function commit_so_file_md5() {
 
 
 # Push AP-side libs (libggml-*.so, libllama-*.so) from bin/ to device.
-# AP-only: does NOT push DSP skels (libggmldsp-skel-*.so / libggml-htp-*.so).
+# AP-only: does NOT push DSP skels (libggml-htp-*.so).
 # Does NOT switch backend - DSP skels already on device stay as-is.
-# Use update_jz_libs / update_qcom_libs for a full backend switch (AP + DSP).
-# Gotcha: bin/ reflects the last build (JZ or QCOM); pushing JZ AP libs while
-# QCOM DSP skels are still on device leaves an AP/DSP mismatch.
+# Use update_fastrpc_libs / update_dspqueue_libs for a full backend switch (AP + DSP).
+# Gotcha: bin/ reflects the last build (fastrpc or dspqueue); pushing fastrpc AP libs
+# while dspqueue DSP skels are still on device leaves an AP/DSP mismatch.
 function update_ggml_libs()
 {
     #adb push ${LOCAL_BUILD_DIR}/bin/*.so ${REMOTE_PATH}/
@@ -781,69 +757,75 @@ function update_ggml_libs()
 }
 
 
-#push JZ runtime .so from out/ab-test/ to device, renaming *-jz.so to canonical names
-function update_jz_libs()
+#push mempool/FastRPC runtime .so from out/ab-test/ to device, renaming *-fastrpc.so to canonical names
+function update_fastrpc_libs()
 {
     local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
-    if [ ! -f ${ab_test_dir}/libggml-hexagon-jz.so ]; then
-        echo "ERROR: ${ab_test_dir}/libggml-hexagon-jz.so not found."
+    if [ ! -f ${ab_test_dir}/libggml-hexagon-fastrpc.so ]; then
+        echo "ERROR: ${ab_test_dir}/libggml-hexagon-fastrpc.so not found."
         echo "Run '$0 build' first to populate AB test backups."
         exit 1
     fi
-    adb push ${ab_test_dir}/libggml-hexagon-jz.so          ${REMOTE_PATH}/libggml-hexagon.so
-    adb push ${ab_test_dir}/libggml-jz.so                  ${REMOTE_PATH}/libggml.so
-    adb push ${ab_test_dir}/libllama-jz.so                 ${REMOTE_PATH}/libllama.so
-    adb push ${ab_test_dir}/libllama-common-jz.so          ${REMOTE_PATH}/libllama-common.so
-    adb push ${ab_test_dir}/libllama-completion-impl-jz.so ${REMOTE_PATH}/libllama-completion-impl.so
-    adb push ${ab_test_dir}/libllama-server-impl-jz.so     ${REMOTE_PATH}/libllama-server-impl.so
-    adb push ${ab_test_dir}/libmtmd-jz.so                  ${REMOTE_PATH}/libmtmd.so
-    adb push ${ab_test_dir}/libllama-bench-impl-jz.so      ${REMOTE_PATH}/libllama-bench-impl.so
-    for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
-        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    adb push ${ab_test_dir}/libggml-hexagon-fastrpc.so          ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-fastrpc.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-fastrpc.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-fastrpc.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-fastrpc.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-fastrpc.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-fastrpc.so                  ${REMOTE_PATH}/libmtmd.so
+    adb push ${ab_test_dir}/libllama-bench-impl-fastrpc.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    # skels push as canonical libggml-htp-vXX.so, overwriting any dspqueue skels
+    for skel in ${ab_test_dir}/libggml-htp-v*-fastrpc.so; do
+        [ -f "$skel" ] || continue
+        adb push "$skel" ${REMOTE_PATH}/$(basename "$skel" -fastrpc.so).so
     done
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
-    if [ -f ${ab_test_dir}/libggml-opencl-jz.so ]; then
-        adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
+    if [ -f ${ab_test_dir}/libggml-opencl-fastrpc.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-fastrpc.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
         adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
-    adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
-    echo "jz" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
-    echo "JZ runtime .so pushed to device."
+    # legacy name from before the skel unification; clean up leftovers
+    adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
+    echo "fastrpc" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    echo "mempool/FastRPC runtime .so pushed to device."
 }
 
 
-#push QCOM runtime .so from out/ab-test/ to device, renaming *-qcom.so to canonical names
-function update_qcom_libs()
+#push dspqueue runtime .so from out/ab-test/ to device, renaming *-dspqueue.so to canonical names
+function update_dspqueue_libs()
 {
     local ab_test_dir=${PROJECT_ROOT_PATH}/out/ab-test
-    if [ ! -f ${ab_test_dir}/libggml-hexagon-qcom.so ]; then
-        echo "ERROR: ${ab_test_dir}/libggml-hexagon-qcom.so not found."
-        echo "Run '$0 build_qcom' first to populate AB test backups."
+    if [ ! -f ${ab_test_dir}/libggml-hexagon-dspqueue.so ]; then
+        echo "ERROR: ${ab_test_dir}/libggml-hexagon-dspqueue.so not found."
+        echo "Run '$0 build_dspqueue' first to populate AB test backups."
         exit 1
     fi
-    adb push ${ab_test_dir}/libggml-hexagon-qcom.so          ${REMOTE_PATH}/libggml-hexagon.so
-    adb push ${ab_test_dir}/libggml-qcom.so                  ${REMOTE_PATH}/libggml.so
-    adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
-    adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
-    adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
-    adb push ${ab_test_dir}/libllama-server-impl-qcom.so     ${REMOTE_PATH}/libllama-server-impl.so
-    adb push ${ab_test_dir}/libmtmd-qcom.so                  ${REMOTE_PATH}/libmtmd.so
-    adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
-    for skel in ${ab_test_dir}/libggml-htp-*.so; do
-        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    adb push ${ab_test_dir}/libggml-hexagon-dspqueue.so          ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-dspqueue.so                  ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-dspqueue.so                 ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-dspqueue.so          ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-dspqueue.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-dspqueue.so     ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-dspqueue.so                  ${REMOTE_PATH}/libmtmd.so
+    adb push ${ab_test_dir}/libllama-bench-impl-dspqueue.so      ${REMOTE_PATH}/libllama-bench-impl.so
+    # skels push as canonical libggml-htp-vXX.so, overwriting any fastrpc skels
+    for skel in ${ab_test_dir}/libggml-htp-v*-dspqueue.so; do
+        [ -f "$skel" ] || continue
+        adb push "$skel" ${REMOTE_PATH}/$(basename "$skel" -dspqueue.so).so
     done
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
-    if [ -f ${ab_test_dir}/libggml-opencl-qcom.so ]; then
-        adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
+    if [ -f ${ab_test_dir}/libggml-opencl-dspqueue.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-dspqueue.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
         adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
+    # legacy name from before the skel unification; clean up leftovers
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
-    echo "qcom" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
-    echo "QCOM runtime .so pushed to device."
+    echo "dspqueue" > ${LOCAL_BUILD_DIR}/.ab_test_runtime
+    echo "dspqueue runtime .so pushed to device."
 }
 
 
@@ -886,17 +868,18 @@ function update_cpu_libs()
 }
 
 
-#detect build type from build output: hexagon-jz, hexagon-qcom, or cpu-only
+#detect build type from build output: hexagon-fastrpc, hexagon-dspqueue, or cpu-only
+#fastrpc build puts skels in bin/; dspqueue build puts them in ggml/src/ggml-hexagon/
 function detect_build_type()
 {
     if [ -f ${LOCAL_BUILD_DIR}/bin/libggml-hexagon.so ]; then
-        if ls ${LOCAL_BUILD_DIR}/bin/libggmldsp-skel-*.so 1>/dev/null 2>&1; then
-            echo "hexagon-jz"
+        if ls ${LOCAL_BUILD_DIR}/bin/libggml-htp-*.so 1>/dev/null 2>&1; then
+            echo "hexagon-fastrpc"
         else
-            echo "hexagon-qcom"
+            echo "hexagon-dspqueue"
         fi
     elif ls ${LOCAL_BUILD_DIR}/ggml/src/ggml-hexagon/libggml-htp-*.so 1>/dev/null 2>&1; then
-        echo "hexagon-qcom"
+        echo "hexagon-dspqueue"
     else
         echo "cpu-only"
     fi
@@ -915,7 +898,7 @@ function prepare_run_on_phone()
 
     check_prebuilt_models
 
-    # AB test mode: if update_jz_libs/update_qcom_libs/update_cpu_libs set the marker,
+    # AB test mode: if update_fastrpc_libs/update_dspqueue_libs/update_cpu_libs set the marker,
     # skip lib/skel push - user has manually set up the runtime.
     local ab_test_marker="${LOCAL_BUILD_DIR}/.ab_test_runtime"
     if [ -f "${ab_test_marker}" ]; then
@@ -988,12 +971,15 @@ function prepare_run_on_phone()
 
     #deploy/cleanup backend-specific libs per build type
     case "${current_build_type}" in
-        hexagon-jz)
-            prepare_ggmldsp
-            adb shell rm -f ${REMOTE_PATH}/libggml-htp-*.so
+        hexagon-fastrpc)
+            # skels push as libggml-htp-vXX.so and overwrite any dspqueue skels
+            prepare_fastrpc_skels
+            # legacy name from before the skel unification; clean up leftovers
+            adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
             ;;
-        hexagon-qcom)
-            prepare_ggmlhtp
+        hexagon-dspqueue)
+            # skels push as libggml-htp-vXX.so and overwrite any fastrpc skels
+            prepare_dspqueue_skels
             adb shell rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so
             ;;
         cpu-only)
@@ -1054,7 +1040,7 @@ function run_llamacli()
 
     prepare_run_on_phone llama-completion
 
-    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
@@ -1087,7 +1073,7 @@ function run_llamaserver()
 
     prepare_run_on_phone llama-server
 
-    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
@@ -1108,7 +1094,7 @@ function run_llamaserver_for_pi()
 {
     local server_for_pi_running_params=" --models-dir /sdcard/ --no-models-autoload -ngl 999 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 -fa on -np 1 --jinja --host 0.0.0.0 --api-key my-local-llama-key"
     prepare_run_on_phone llama-server
-    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
            && export GGML_HEXAGON_OPPOLL=1 \
@@ -1124,7 +1110,7 @@ function run_llamabench()
 {
     prepare_run_on_phone llama-bench
 
-    #GGML_HEXAGON_OPPOLL is only effective for Qualcomm's ggml-hexagon, doesn't apply to JZ's ggml-hexagon
+    #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
@@ -1193,8 +1179,8 @@ function run_stresstest()
 
 function run_abtest()
 {
-    # JZ vs QCOM performance comparison test.
-    # Requires out/ab-test/ populated (run 'build' then 'build_qcom' first).
+    # mempool/FastRPC vs dspqueue performance comparison test.
+    # Requires out/ab-test/ populated (run 'build' then 'build_dspqueue' first).
     # Usage: run_abtest [rounds] [model_alias]
     #   rounds:      default 3
     #   model_alias: default gemma4-e2b
@@ -1223,108 +1209,112 @@ function run_abtest()
 
     # sanity check: verify out/ab-test/ has all required .so from both builds
     local missing=""
-    local jz_libs="libggml-hexagon-jz.so libggml-jz.so libllama-jz.so libllama-common-jz.so libllama-completion-impl-jz.so libllama-server-impl-jz.so libmtmd-jz.so libllama-bench-impl-jz.so"
-    local qcom_libs="libggml-hexagon-qcom.so libggml-qcom.so libllama-qcom.so libllama-common-qcom.so libllama-completion-impl-qcom.so libllama-server-impl-qcom.so libmtmd-qcom.so libllama-bench-impl-qcom.so"
-    for f in ${jz_libs}; do
+    local fastrpc_libs="libggml-hexagon-fastrpc.so libggml-fastrpc.so libllama-fastrpc.so libllama-common-fastrpc.so libllama-completion-impl-fastrpc.so libllama-server-impl-fastrpc.so libmtmd-fastrpc.so libllama-bench-impl-fastrpc.so"
+    local dspqueue_libs="libggml-hexagon-dspqueue.so libggml-dspqueue.so libllama-dspqueue.so libllama-common-dspqueue.so libllama-completion-impl-dspqueue.so libllama-server-impl-dspqueue.so libmtmd-dspqueue.so libllama-bench-impl-dspqueue.so"
+    for f in ${fastrpc_libs}; do
         [ ! -f ${ab_test_dir}/${f} ] && missing="${missing} ${f}"
     done
-    for f in ${qcom_libs}; do
+    for f in ${dspqueue_libs}; do
         [ ! -f ${ab_test_dir}/${f} ] && missing="${missing} ${f}"
     done
     if [ -n "${missing}" ]; then
         echo "ERROR: AB test backups incomplete, missing:${missing}"
         echo ""
         echo "Run these two commands first to populate ${ab_test_dir}:"
-        echo "  $0 build        # builds JZ ggml-hexagon, backs up *-jz.so"
-        echo "  $0 build_qcom   # builds QCOM ggml-hexagon, backs up *-qcom.so"
+        echo "  $0 build            # builds mempool/FastRPC ggml-hexagon, backs up *-fastrpc.so"
+        echo "  $0 build_dspqueue   # builds dspqueue ggml-hexagon, backs up *-dspqueue.so"
         exit 1
     fi
     # check DSP skels exist for at least one HTP arch version
-    local jz_skels=$(ls ${ab_test_dir}/libggmldsp-skel-*.so 2>/dev/null | wc -l)
-    local qcom_skels=$(ls ${ab_test_dir}/libggml-htp-*.so 2>/dev/null | wc -l)
-    if [ ${jz_skels} -eq 0 ] || [ ${qcom_skels} -eq 0 ]; then
+    local fastrpc_skels=$(ls ${ab_test_dir}/libggml-htp-v*-fastrpc.so 2>/dev/null | wc -l)
+    local dspqueue_skels=$(ls ${ab_test_dir}/libggml-htp-v*-dspqueue.so 2>/dev/null | wc -l)
+    if [ ${fastrpc_skels} -eq 0 ] || [ ${dspqueue_skels} -eq 0 ]; then
         echo "ERROR: DSP skels missing in ${ab_test_dir}"
-        echo "  JZ skels (libggmldsp-skel-*.so): ${jz_skels} found"
-        echo "  QCOM skels (libggml-htp-*.so): ${qcom_skels} found"
+        echo "  fastrpc skels (libggml-htp-v*-fastrpc.so): ${fastrpc_skels} found"
+        echo "  dspqueue skels (libggml-htp-v*-dspqueue.so): ${dspqueue_skels} found"
         echo ""
         echo "Run these two commands first:"
-        echo "  $0 build        # builds JZ DSP skels"
-        echo "  $0 build_qcom   # builds QCOM DSP skels"
+        echo "  $0 build            # builds mempool/FastRPC DSP skels"
+        echo "  $0 build_dspqueue   # builds dspqueue DSP skels"
         exit 1
     fi
 
     echo "=============================================="
-    echo "  AB test: JZ vs QCOM, ${rounds} rounds each"
+    echo "  AB test: mempool/FastRPC vs dspqueue, ${rounds} rounds each"
     echo "  model: ${model_path}"
     echo "  $(date '+%Y-%m-%d %H:%M:%S')"
     echo "=============================================="
 
-    # --- JZ phase ---
+    # --- mempool/FastRPC phase ---
     echo ""
-    echo "=== [$(date '+%H:%M:%S')] Switching to JZ ==="
-    adb push ${ab_test_dir}/libggml-hexagon-jz.so           ${REMOTE_PATH}/libggml-hexagon.so
-    adb push ${ab_test_dir}/libggml-jz.so                   ${REMOTE_PATH}/libggml.so
-    adb push ${ab_test_dir}/libllama-jz.so                  ${REMOTE_PATH}/libllama.so
-    adb push ${ab_test_dir}/libllama-common-jz.so           ${REMOTE_PATH}/libllama-common.so
-    adb push ${ab_test_dir}/libllama-completion-impl-jz.so  ${REMOTE_PATH}/libllama-completion-impl.so
-    adb push ${ab_test_dir}/libllama-server-impl-jz.so      ${REMOTE_PATH}/libllama-server-impl.so
-    adb push ${ab_test_dir}/libmtmd-jz.so                   ${REMOTE_PATH}/libmtmd.so
-    adb push ${ab_test_dir}/libllama-bench-impl-jz.so       ${REMOTE_PATH}/libllama-bench-impl.so
-    for skel in ${ab_test_dir}/libggmldsp-skel-*.so; do
-        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
+    echo "=== [$(date '+%H:%M:%S')] Switching to mempool/FastRPC ==="
+    adb push ${ab_test_dir}/libggml-hexagon-fastrpc.so     ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-fastrpc.so             ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-fastrpc.so            ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-fastrpc.so     ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-fastrpc.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-fastrpc.so ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-fastrpc.so             ${REMOTE_PATH}/libmtmd.so
+    adb push ${ab_test_dir}/libllama-bench-impl-fastrpc.so ${REMOTE_PATH}/libllama-bench-impl.so
+    # skels push as canonical libggml-htp-vXX.so, overwriting any dspqueue skels
+    for skel in ${ab_test_dir}/libggml-htp-v*-fastrpc.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/$(basename "$skel" -fastrpc.so).so
     done
     # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
-    if [ -f ${ab_test_dir}/libggml-opencl-jz.so ]; then
-        adb push ${ab_test_dir}/libggml-opencl-jz.so ${REMOTE_PATH}/libggml-opencl.so
+    if [ -f ${ab_test_dir}/libggml-opencl-fastrpc.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-fastrpc.so ${REMOTE_PATH}/libggml-opencl.so
     else
         adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
         adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
     fi
-    adb shell "rm -f ${REMOTE_PATH}/libggml-htp-*.so"
-
-    echo ""
-    echo "========================================"
-    echo "  JZ test (${rounds} runs)"
-    echo "========================================"
-    for i in $(seq 1 ${rounds}); do
-        echo ""
-        echo "-------- JZ run ${i}/${rounds} $(date '+%H:%M:%S') --------"
-        adb shell "cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
-        echo "-------- JZ run ${i} END --------"
-    done
-
-    # --- QCOM phase ---
-    echo ""
-    echo "=== [$(date '+%H:%M:%S')] Switching to QCOM ==="
-    adb push ${ab_test_dir}/libggml-hexagon-qcom.so          ${REMOTE_PATH}/libggml-hexagon.so
-    adb push ${ab_test_dir}/libggml-qcom.so                  ${REMOTE_PATH}/libggml.so
-    adb push ${ab_test_dir}/libllama-qcom.so                 ${REMOTE_PATH}/libllama.so
-    adb push ${ab_test_dir}/libllama-common-qcom.so          ${REMOTE_PATH}/libllama-common.so
-    adb push ${ab_test_dir}/libllama-completion-impl-qcom.so ${REMOTE_PATH}/libllama-completion-impl.so
-    adb push ${ab_test_dir}/libllama-server-impl-qcom.so     ${REMOTE_PATH}/libllama-server-impl.so
-    adb push ${ab_test_dir}/libmtmd-qcom.so                  ${REMOTE_PATH}/libmtmd.so
-    adb push ${ab_test_dir}/libllama-bench-impl-qcom.so      ${REMOTE_PATH}/libllama-bench-impl.so
-    for skel in ${ab_test_dir}/libggml-htp-*.so; do
-        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/
-    done
-    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
-    if [ -f ${ab_test_dir}/libggml-opencl-qcom.so ]; then
-        adb push ${ab_test_dir}/libggml-opencl-qcom.so ${REMOTE_PATH}/libggml-opencl.so
-    else
-        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
-        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
-    fi
+    # legacy name from before the skel unification; clean up leftovers
     adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
 
     echo ""
     echo "========================================"
-    echo "  QCOM test (${rounds} runs)"
+    echo "  mempool/FastRPC test (${rounds} runs)"
     echo "========================================"
     for i in $(seq 1 ${rounds}); do
         echo ""
-        echo "-------- QCOM run ${i}/${rounds} $(date '+%H:%M:%S') --------"
+        echo "-------- fastrpc run ${i}/${rounds} $(date '+%H:%M:%S') --------"
         adb shell "cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
-        echo "-------- QCOM run ${i} END --------"
+        echo "-------- fastrpc run ${i} END --------"
+    done
+
+    # --- dspqueue phase ---
+    echo ""
+    echo "=== [$(date '+%H:%M:%S')] Switching to dspqueue ==="
+    adb push ${ab_test_dir}/libggml-hexagon-dspqueue.so     ${REMOTE_PATH}/libggml-hexagon.so
+    adb push ${ab_test_dir}/libggml-dspqueue.so             ${REMOTE_PATH}/libggml.so
+    adb push ${ab_test_dir}/libllama-dspqueue.so            ${REMOTE_PATH}/libllama.so
+    adb push ${ab_test_dir}/libllama-common-dspqueue.so     ${REMOTE_PATH}/libllama-common.so
+    adb push ${ab_test_dir}/libllama-completion-impl-dspqueue.so ${REMOTE_PATH}/libllama-completion-impl.so
+    adb push ${ab_test_dir}/libllama-server-impl-dspqueue.so ${REMOTE_PATH}/libllama-server-impl.so
+    adb push ${ab_test_dir}/libmtmd-dspqueue.so             ${REMOTE_PATH}/libmtmd.so
+    adb push ${ab_test_dir}/libllama-bench-impl-dspqueue.so ${REMOTE_PATH}/libllama-bench-impl.so
+    # skels push as canonical libggml-htp-vXX.so, overwriting any fastrpc skels
+    for skel in ${ab_test_dir}/libggml-htp-v*-dspqueue.so; do
+        [ -f "$skel" ] && adb push "$skel" ${REMOTE_PATH}/$(basename "$skel" -dspqueue.so).so
+    done
+    # libggml-opencl.so is optional (GGML_OPENCL=OFF by default)
+    if [ -f ${ab_test_dir}/libggml-opencl-dspqueue.so ]; then
+        adb push ${ab_test_dir}/libggml-opencl-dspqueue.so ${REMOTE_PATH}/libggml-opencl.so
+    else
+        adb shell "rm -f ${REMOTE_PATH}/libggml-opencl.so"
+        adb shell "rm -f ${REMOTE_PATH}/libggml-vulkan.so"
+    fi
+    # legacy name from before the skel unification; clean up leftovers
+    adb shell "rm -f ${REMOTE_PATH}/libggmldsp-skel-*.so"
+
+    echo ""
+    echo "========================================"
+    echo "  dspqueue test (${rounds} runs)"
+    echo "========================================"
+    for i in $(seq 1 ${rounds}); do
+        echo ""
+        echo "-------- dspqueue run ${i}/${rounds} $(date '+%H:%M:%S') --------"
+        adb shell "cd ${REMOTE_PATH} && export LD_LIBRARY_PATH=${REMOTE_PATH} && ${REMOTE_PATH}/llama-completion ${running_params} -m ${model_path} -p \"${PROMPT_STRING}\""
+        echo "-------- dspqueue run ${i} END --------"
     done
 
     echo ""
@@ -1333,26 +1323,26 @@ function run_abtest()
     echo "=============================================="
 
     # Restore current build type libs after AB test.
-    # AB test leaves QCOM libs on device (QCOM is the last phase).
+    # AB test leaves dspqueue libs on device (dspqueue is the last phase).
     # Without this, subsequent run_llamabench would skip pushing
-    # libggml-hexagon.so (MD5 matches local JZ build), leaving device
-    # in a mixed state: QCOM AP lib + JZ DSP skels -> error 0x80000406.
+    # libggml-hexagon.so (MD5 matches local fastrpc build), leaving device
+    # in a mixed state: dspqueue AP lib + fastrpc DSP skels -> error 0x80000406.
     local restore_type=""
     local last_bt_file="${LOCAL_BUILD_DIR}/.last_deployed_build_type"
     if [ -f "${last_bt_file}" ]; then
         restore_type=$(cat "${last_bt_file}")
     fi
     if [ -z "${restore_type}" ]; then
-        restore_type="hexagon-jz"
+        restore_type="hexagon-fastrpc"
     fi
     echo ""
     echo "=== [$(date '+%H:%M:%S')] Restoring build type: ${restore_type} ==="
     case "${restore_type}" in
-        hexagon-jz)
-            update_jz_libs
+        hexagon-fastrpc)
+            update_fastrpc_libs
             ;;
-        hexagon-qcom)
-            update_qcom_libs
+        hexagon-dspqueue)
+            update_dspqueue_libs
             ;;
         cpu-only)
             update_cpu_libs
@@ -1634,22 +1624,54 @@ function show_usage()
     echo "Usage:"
     echo "  $0 help"
 
-    echo "  $0 update_jz_libs   (push JZ runtime .so from out/ab-test/ to device, for build)"
-    echo "  $0 update_qcom_libs (push QCOM runtime .so from out/ab-test/ to device, for build_qcom)"
-    echo "  $0 update_cpu_libs  (push CPU-only runtime .so from out/ab-test/ to device, for build_armcpu)"
-    echo "  $0 update_ggml_libs (incremental: push AP-side libs from bin/ to device only; keep DSP skels as-is)"
-
-    echo "  $0 build            (build JZ's ggml-hexagon backend)"
-    echo "  $0 build_qcom       (build Qualcomm's ggml-hexagon backend for performance comparison)"
-    echo "  $0 build_armcpu     (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
+    echo "  $0 build                    (build the mempool/FastRPC-invoke ggml-hexagon backend for performance comparision)"
+    echo "  $0 build_dspqueue           (build the dspqueue ggml-hexagon backend for performance comparison, Qualcomm's official dspqueu-based ggml-hexagon)"
+    echo "  $0 build_armcpu             (build Android CPU-only reference for correctness check and troulbeshooting trick issues)"
     echo "  $0 clean"
 
+    echo "  $0 update_fastrpc_libs      (push mempool/FastRPC runtime .so from out/ab-test/ to device, for build)"
+    echo "  $0 update_dspqueue_libs     (push dspqueue runtime .so from out/ab-test/ to device, for build_dspqueue)"
+    echo "  $0 update_cpu_libs          (push CPU-only runtime .so from out/ab-test/ to device, for build_armcpu)"
+    echo "  $0 update_ggml_libs         (incremental: push AP-side libs from bin/ to device only; keep DSP skels as-is)"
+
+    echo "  $0 run_llamaversion         (display llama-cpp version information, e.g. version: 0.2.0-dev (build 11120, commit 9f03708a9), built with Clang 21.0.0 for Android aarch64)"
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
-    echo "  $0 run_llamacli"
+
     echo "  $0 run_llamabench"
-    echo "  $0 run_llamaversion"
+    echo -e "\n"
+
+    echo "  $0 run_abtest_all [rounds]"
+    echo "    Batch AB test across all 8 models (qwen1 minicpm5-1b llama3 qwen3-2b gemma4-e2b nanbeige-3b gemma4-e4b qwen3-9b)."
+    echo "    rounds: default 3"
+    echo "    Log capture example:"
+    echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
+    echo -e "\n"
+
+    echo "  $0 run_llamacli   [model_alias]"
+    echo "  Model aliases for run_llamacli:"
+    echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
+    echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
+    echo "    gemma4-e2b    -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "    gemma4-e4b    -> gemma-4-E4B_q4_0-it.gguf"
+    echo "    qwen1         -> qwen1_5-1_8b-chat-q4_0.gguf"
+    echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
+    echo "    nanbeige-3b   -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf"
+    echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
+    echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
+    echo "  Examples:"
+    echo "    $0 run_llamacli              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
+    echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
+    echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
+    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b (mirror stress test)"
+}
+
+
+function show_usage_for_developer()
+{
+    echo -e "\n"
+    echo "Usage for developer:"
 
     echo "  $0 run_llamaserver"
     echo "  In a disconnected environment, download the pre-built UI from a llama.cpp
@@ -1663,7 +1685,7 @@ function show_usage()
     echo -e "\n"
 
     echo "  $0 run_abtest  [rounds] [model_alias]"
-    echo "    JZ vs QCOM performance comparison (requires 'build' then 'build_qcom' first)."
+    echo "    mempool/FastRPC vs dspqueue performance comparison (requires 'build' then 'build_dspqueue' first)."
     echo "    rounds:       default 3"
     echo "    model_alias:  default gemma4-e2b"
     echo "    Examples:"
@@ -1746,14 +1768,17 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "help" ]; then
         show_usage
         exit 1
+    elif [ "$1" == "help_ext" ]; then
+        show_usage_for_developer
+        exit 1
     elif [ "$1" == "update_ggml_libs" ]; then
         update_ggml_libs
         exit 1
-    elif [ "$1" == "update_jz_libs" ]; then
-        update_jz_libs
+    elif [ "$1" == "update_fastrpc_libs" ]; then
+        update_fastrpc_libs
         exit 0
-    elif [ "$1" == "update_qcom_libs" ]; then
-        update_qcom_libs
+    elif [ "$1" == "update_dspqueue_libs" ]; then
+        update_dspqueue_libs
         exit 0
     elif [ "$1" == "update_cpu_libs" ]; then
         update_cpu_libs
@@ -1764,8 +1789,8 @@ elif [ $# == 1 ]; then
     elif [ "$1" == "build_debug" ]; then
         build_ggml_hexagon_debug
         exit 0
-    elif [ "$1" == "build_qcom" ]; then
-        build_ggml_hexagon_qcom
+    elif [ "$1" == "build_dspqueue" ]; then
+        build_ggml_hexagon_dspqueue
         exit 0
     elif [ "$1" == "build_armcpu" ]; then
         build_armcpu

@@ -64,11 +64,11 @@
 
 #define HEX_OP_PROF_DUMP_INTERVAL       25
 
-// Queue capacity/stack sizes: mirror htp/main.c defaults with JZ_ prefix.
-#define JZ_HMX_QUEUE_CAPACITY           16
-#define JZ_HMX_QUEUE_STACK_SIZE         16384
-#define JZ_WORK_QUEUE_CAPACITY          16
-#define JZ_WORK_QUEUE_STACK_SIZE        16384
+// Queue capacity/stack sizes: mirror htp/main.c
+#define HMX_QUEUE_CAPACITY              16
+#define HMX_QUEUE_STACK_SIZE            16384
+#define WORK_QUEUE_CAPACITY             16
+#define WORK_QUEUE_STACK_SIZE           16384
 
 // Max dst len for prior-dst skip (bit 1): single cacheline only.
 // Larger ranges risk stale L2 reads from async DMA/HMX paths.
@@ -739,7 +739,7 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
 ) {
     struct htp_mm_hvx_vtcm_layout L;
     htp_mm_hvx_vtcm_layout_build(&L, kernel_type, wtype, ne10, src1_nrows, n_threads,
-                                 dst_row_size, src0_row_size, src1_row_size, n_prefetch,
+                                 dst_row_size, src0_row_size, src1_row_size, 0, n_prefetch,
                                  false, false, false);
     *vtcm_src0_size = L.src0_bytes;
     *vtcm_src1_size = L.src1_bytes;
@@ -863,7 +863,7 @@ static inline void hex_tensor_to_dsptensor(const hex_tensor_desc * ht,
 
 // Convert hex_tensor_desc directly to htp_tensor. Eliminates the intermediate
 // dsptensor step for op dispatch. Mirrors htp/main.c prep_tensor: data pointer
-// is computed from mempool base + offset. flags is never read on the JZ path;
+// is computed from mempool base + offset. flags is never read on the mempool path;
 // cache coherency is handled by entry.c itself.
 static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
                                              const char * ion_base,
@@ -1346,7 +1346,8 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
     if (hmx_eligible) {
         size_t Br = 0, Bc = 0;
         int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
-                                         g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts);
+                                         g_dsp_ctx->vtcm_size, g_dsp_ctx->thread_counts,
+                                         kparams->is_q_fp32 != 0);
         if (ret == 0) {
             kparams->kernel_type = HTP_FA_KERNEL_HMX;
             kparams->Br          = (uint16_t)Br;
@@ -1357,7 +1358,8 @@ static int build_fa_kernel_params(struct htp_ops_context * octx) {
             kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
             kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && g_dsp_ctx->thread_counts >= 2) ? 1 : 0;
             kparams->vtcm_size       = (uint32_t)hmx_fa_compute_vtcm_usage(
-                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0);
+                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0,
+                kparams->is_q_fp32 != 0);
 
             const size_t row_vec_bytes = hex_align_up(Bc * sizeof(uint16_t), 256);
             kparams->u.hmx.row_buf_stride = row_vec_bytes / 128;
@@ -1596,15 +1598,15 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
             ctx->hmx_queue     = NULL;
             ctx->hmx_queue_buf = NULL;
         }
-        size_t hmx_size  = hmx_queue_sizeof(JZ_HMX_QUEUE_CAPACITY, JZ_HMX_QUEUE_STACK_SIZE);
+        size_t hmx_size  = hmx_queue_sizeof(HMX_QUEUE_CAPACITY, HMX_QUEUE_STACK_SIZE);
         size_t hmx_align = hmx_queue_alignof();
         void * hmx_buf   = memalign(hmx_align, hmx_size);
         if (hmx_buf) {
             // Trace slot mirrors htp/main.c (&ctx->trace[HTP_MAX_NTHREADS]): must be a
             // valid (zeroed) htp_thread_trace, htp_trace_event_start/stop dereference
             // it unconditionally on every HMX descriptor completion.
-            ctx->hmx_queue = hmx_queue_init(hmx_buf, JZ_HMX_QUEUE_CAPACITY,
-                                                  JZ_HMX_QUEUE_STACK_SIZE,
+            ctx->hmx_queue = hmx_queue_init(hmx_buf, HMX_QUEUE_CAPACITY,
+                                                  HMX_QUEUE_STACK_SIZE,
                                                   ctx->compute_res_ctx_id,
                                                   &ctx->htp_ctx->trace[HTP_MAX_NTHREADS]);
             if (ctx->hmx_queue) {
@@ -1771,7 +1773,7 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
     printf("actual thread_counts:           %d\n", g_dsp_ctx->thread_counts);
     printf("dump_diag_info:                 %d\n\n", g_dsp_ctx->dump_diag_info);
 
-    // Initialize htp_context for calling Qualcomm's execute_op.
+    // Initialize htp_context for calling the shared execute_op.
     // Shares our already-acquired VTCM and HMX queue.
     // New Qualcomm API (b2dd28a3b) requires pre-allocated backing buffers for
     // work_queue and dma queues; we memalign them here and track the pointers
@@ -1816,15 +1818,15 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
 
         // work_queue: backing buffer holds worker stacks + queue struct.
         size_t wq_size  = work_queue_sizeof((uint32_t)g_dsp_ctx->thread_counts,
-                                            JZ_WORK_QUEUE_CAPACITY, JZ_WORK_QUEUE_STACK_SIZE);
+                                            WORK_QUEUE_CAPACITY, WORK_QUEUE_STACK_SIZE);
         size_t wq_align = work_queue_alignof();
         void * wq_buf   = memalign(wq_align, wq_size);
         AEEResult wp    = AEE_SUCCESS;
         if (wq_buf) {
             g_dsp_ctx->htp_ctx->work_queue = work_queue_init(wq_buf,
                                                               (uint32_t)g_dsp_ctx->thread_counts,
-                                                              JZ_WORK_QUEUE_CAPACITY,
-                                                              JZ_WORK_QUEUE_STACK_SIZE);
+                                                              WORK_QUEUE_CAPACITY,
+                                                              WORK_QUEUE_STACK_SIZE);
             if (g_dsp_ctx->htp_ctx->work_queue) {
                 g_dsp_ctx->work_queue_buf = wq_buf;
             } else {

@@ -4,7 +4,7 @@
 #
 # - Edits ggml/src/ggml-hexagon/htp/matmul-ops.h to set the constant
 # - Incremental rebuild (AP + DSP skel)
-# - Pushes libggml-hexagon.so + libggmldsp-skel-v79.so to /data/local/tmp
+# - Pushes libggml-hexagon.so + libggml-htp-v79.so to /data/local/tmp
 # - Runs 4-model CI (gemma4, qwen3, qwen1, llama3) with llama-bench -p 2048, 3 runs/model
 # - Saves per-value log to out/p2_hmx_min_nrows_<VALUE>.log
 #
@@ -36,8 +36,8 @@ cd "$PROJECT_ROOT"
 
 # ---- paths (mirror scripts/build-run-ggmlhexagon-android.sh) ----
 TOOLCHAIN_PATH=$PROJECT_ROOT/prebuilts
-ANDROID_NDK=$TOOLCHAIN_PATH/android-ndk-r28
-ANDROID_NDK_FULLNAME=android-ndk-r28-linux.zip
+ANDROID_NDK=$TOOLCHAIN_PATH/android-ndk-r29
+ANDROID_NDK_FULLNAME=android-ndk-r29-linux.zip
 HEXAGON_SDK_VERSION=6.6.0.0
 HEXAGON_TOOLS_VERSION=19.0.07
 HEXAGON_SDK_PATH=$TOOLCHAIN_PATH/Hexagon_SDK/$HEXAGON_SDK_VERSION
@@ -86,7 +86,7 @@ cmake -H. -B"$LOCAL_BUILD_DIR" \
     -DCMAKE_BUILD_TYPE=Release -DGGML_OPENMP=OFF -DGGML_CCACHE=ON \
     -DCMAKE_TOOLCHAIN_FILE=$NDK_TOOLCHAIN \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=latest \
-    -DGGML_HEXAGON=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON \
+    -DGGML_HEXAGON=ON -DGGML_HEXAGON_USE_MEMPOOL=ON -DLLAMA_CURL=OFF -DGGML_LLAMAFILE=ON \
     -DHEXAGON_SDK_PATH=$HEXAGON_SDK_PATH \
     -DHEXAGON_TOOLS_PATH=$HEXAGON_TOOLS_PATH \
     -DHTP_ARCH_VERSION=$HTP_ARCH_VERSION >/dev/null
@@ -103,7 +103,7 @@ echo "matmul-ops.h restored"
 echo ""
 echo "----- push to phone -----"
 adb push $LOCAL_BUILD_DIR/bin/libggml-hexagon.so            $REMOTE_PATH/libggml-hexagon.so
-adb push $LOCAL_BUILD_DIR/bin/libggmldsp-skel-v79.so        $REMOTE_PATH/libggmldsp-skel-v79.so
+adb push $LOCAL_BUILD_DIR/bin/libggml-htp-v79.so        $REMOTE_PATH/libggml-htp-v79.so
 adb push $LOCAL_BUILD_DIR/bin/llama-bench                   $REMOTE_PATH/llama-bench
 adb shell "chmod +x $REMOTE_PATH/llama-bench"
 

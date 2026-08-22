@@ -17,18 +17,17 @@ if (NOT IS_DIRECTORY "${HEXAGON_TOOLS_ROOT}")
     endif()
 endif()
 
-option(GGML_HEXAGON_JZ "ggml-hexagon: use JZ's alternative AP implementation (builds DSP skel via kernels/Makefile)" OFF)
+option(GGML_HEXAGON_USE_MEMPOOL "ggml-hexagon: mempool/FastRPC-invoke AP implementation (single mempool, synchronous invoke); OFF = dspqueue/per-buffer implementation" OFF)
 
 set(TARGET_NAME ggml-hexagon)
 
-if (GGML_HEXAGON_JZ)
-    # --- JZ's ggml-hexagon implementation ---
-    # kernels/Makefile expects HEXAGON_SDK_PATH / HEXAGON_TOOLS_PATH variable names
+if (GGML_HEXAGON_USE_MEMPOOL)
+    # --- mempool/FastRPC-invoke ggml-hexagon implementation ---
+    # Alias used by the include dirs and the cdsprpc import below
     set(HEXAGON_SDK_PATH   ${HEXAGON_SDK_ROOT})
-    set(HEXAGON_TOOLS_PATH ${HEXAGON_TOOLS_ROOT})
 
     if(NOT DEFINED HTP_ARCH_VERSION)
-        message(FATAL_ERROR "GGML_HEXAGON_JZ=ON requires HTP_ARCH_VERSION (one of: v73, v75, v79, v81)")
+        message(FATAL_ERROR "GGML_HEXAGON_USE_MEMPOOL=ON requires HTP_ARCH_VERSION (one of: v73, v75, v79, v81)")
     endif()
 
     set(CHECK_HTP_ARCH "WRONG")
@@ -38,7 +37,7 @@ if (GGML_HEXAGON_JZ)
         endif()
     endforeach()
     if (${CHECK_HTP_ARCH} STREQUAL "WRONG")
-        message(FATAL_ERROR "GGML_HEXAGON_JZ=ON requires HTP_ARCH_VERSION to be one of: v73, v75, v79, v81")
+        message(FATAL_ERROR "GGML_HEXAGON_USE_MEMPOOL=ON requires HTP_ARCH_VERSION to be one of: v73, v75, v79, v81")
     endif()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -59,7 +58,7 @@ if (GGML_HEXAGON_JZ)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         set(HEXAGON_DEFAULT_LIB_SEARCH_PATH "C:\\" CACHE STRING "customized library search path for hexagon backend")
     else()
-        message(FATAL_ERROR "ggml-hexagon (JZ) only available on Android and Windows(Windows on ARM)")
+        message(FATAL_ERROR "ggml-hexagon (mempool) only available on Android and Windows(Windows on ARM)")
     endif()
 
     set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -DGGML_USE_HEXAGON ${DEBUG_FLAG} ${OPT_FLAG}")
@@ -77,87 +76,85 @@ if (GGML_HEXAGON_JZ)
         ${HEXAGON_SDK_PATH}/ipc/fastrpc/rtld/ship/android_aarch64
         ${HEXAGON_SDK_PATH}/libs/atomic/inc
         ${HEXAGON_SDK_PATH}/libs/atomic/android_Debug_aarch64/ship
-        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/
-        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/kernels/)
+        ${CMAKE_SOURCE_DIR}/ggml/src/ggml-hexagon/)
 
-    # Generate ggml_dsp_{stub.c,skel.c,h} from ggml_dsp.idl via qaic
-    set(GGML_DSP_STUB ${CMAKE_CURRENT_LIST_DIR}/kernels/ggml_dsp_stub.c)
+    # Generate ggml_dsp_{stub.c,skel.c,h} from htp/ggml_dsp.idl via qaic.
+    # Regenerated on every configure so the stub never goes stale vs the IDL.
     set(QAIC_BIN ${HEXAGON_SDK_ROOT}/ipc/fastrpc/qaic/bin/qaic)
-    if (NOT EXISTS "${GGML_DSP_STUB}" AND EXISTS "${QAIC_BIN}")
-        message(STATUS "hexagon-jz: generating ggml_dsp stubs from ggml_dsp.idl")
+    if (EXISTS "${QAIC_BIN}")
+        message(STATUS "hexagon-mempool: generating ggml_dsp stubs from ggml_dsp.idl")
         execute_process(
             COMMAND ${QAIC_BIN} -mdll
-                -o ${CMAKE_CURRENT_LIST_DIR}/kernels
+                -o ${CMAKE_CURRENT_BINARY_DIR}
                 -I${HEXAGON_SDK_ROOT}/incs
                 -I${HEXAGON_SDK_ROOT}/incs/stddef
                 -I${HEXAGON_SDK_ROOT}/ipc/fastrpc/incs
-                ${CMAKE_CURRENT_LIST_DIR}/kernels/ggml_dsp.idl
+                ${CMAKE_CURRENT_LIST_DIR}/htp/ggml_dsp.idl
             RESULT_VARIABLE QAIC_RESULT)
         if (NOT QAIC_RESULT EQUAL 0)
-            message(FATAL_ERROR "hexagon-jz: qaic failed to generate ggml_dsp stubs")
+            message(FATAL_ERROR "hexagon-mempool: qaic failed to generate ggml_dsp stubs")
+        endif()
+    else()
+        if (NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/ggml_dsp_stub.c")
+            message(FATAL_ERROR "hexagon-mempool: qaic not found and no pre-generated ggml_dsp stubs")
         endif()
     endif()
 
     ggml_add_backend_library(${TARGET_NAME}
-        ggml-hexagon-jz.cpp
+        ggml-hexagon-fastrpc.cpp
         htp-drv.cpp
         htp-drv.h
         libdl.h
-        kernels/ggml_dsp_stub.c)
+        ${CMAKE_CURRENT_BINARY_DIR}/ggml_dsp_stub.c)
 
     target_include_directories(${TARGET_NAME} PRIVATE
-        ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_LIST_DIR}/kernels)
+        ${HEXAGON_SDK_PATH} ${CMAKE_CURRENT_LIST_DIR} ${CMAKE_CURRENT_BINARY_DIR})
     target_link_libraries(${TARGET_NAME} PRIVATE ${HEXAGON_LINK_LIBRARIES})
 
     string(REGEX REPLACE "/$" "" HEXAGON_DEFAULT_LIB_SEARCH_PATH "${HEXAGON_DEFAULT_LIB_SEARCH_PATH}")
     target_compile_definitions(${TARGET_NAME} PRIVATE
         HEXAGON_DEFAULT_LIB_SEARCH_PATH="${HEXAGON_DEFAULT_LIB_SEARCH_PATH}/")
 
-    # Build DSP skels for all supported HTP arch versions via kernels/Makefile.
-    # CMake owns the multi-version build; scripts no longer call build_extra_dsp_skels.
-    # Note: kernels/Makefile deletes generated stubs (ggml_dsp_skel.c/.h/_stub.c) after
-    # each link, so qaic must regenerate them before each arch build to avoid
-    # "missing ggml_dsp_skel.c" failures on the 2nd/3rd/4th version.
-    set(JZ_DSP_VERSIONS v73 v75 v79 v81)
-    set(JZ_DSP_BUILD_CMDS "")
-    foreach(V ${JZ_DSP_VERSIONS})
-        list(APPEND JZ_DSP_BUILD_CMDS
-            COMMAND ${QAIC_BIN} -mdll
-                -o ${CMAKE_CURRENT_LIST_DIR}/kernels
-                -I${HEXAGON_SDK_ROOT}/incs
-                -I${HEXAGON_SDK_ROOT}/incs/stddef
-                -I${HEXAGON_SDK_ROOT}/ipc/fastrpc/incs
-                ${CMAKE_CURRENT_LIST_DIR}/kernels/ggml_dsp.idl
-            COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/ clean
-            COMMAND make -C ${CMAKE_CURRENT_LIST_DIR}/kernels/
-                HEXAGON_SDK_PATH=${HEXAGON_SDK_PATH}
-                HEXAGON_TOOLS_PATH=${HEXAGON_TOOLS_PATH}
-                HTP_ARCH_VERSION=${V}
-                DEBUG_FLAG=${DEBUG_FLAG}
-            COMMAND ${CMAKE_COMMAND} -E copy
-                ${CMAKE_CURRENT_LIST_DIR}/kernels/libggmldsp-skel.so
-                ${CMAKE_BINARY_DIR}/bin/libggmldsp-skel-${V}.so
-        )
-        if (${V} STREQUAL ${HTP_ARCH_VERSION})
-            list(APPEND JZ_DSP_BUILD_CMDS
-                COMMAND ${CMAKE_COMMAND} -E copy
-                    ${CMAKE_CURRENT_LIST_DIR}/kernels/libggmldsp-skel.so
-                    ${CMAKE_BINARY_DIR}/bin/libggmldsp-skel.so
-            )
-        endif()
-    endforeach()
-    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-        ${JZ_DSP_BUILD_CMDS}
-        COMMENT "build JZ hexagon DSP skels (v73, v75, v79, v81)")
+    # Build DSP skels for all supported HTP arch versions via the shared
+    # htp/CMakeLists.txt (same ExternalProject mechanism as the dspqueue variant,
+    # selected by GGML_HEXAGON_USE_MEMPOOL). Skels land in ${CMAKE_BINARY_DIR}/bin.
+    option(GGML_HEXAGON_HTP_DEBUG "ggml-hexagon: enable HTP debug output" OFF)
+    include(ExternalProject)
 
-    # Copy runtime configuration file
-    add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/scripts/ggml-hexagon.cfg ${CMAKE_BINARY_DIR}/bin/
-        COMMENT "copy ggml-hexagon.cfg")
+    function(build_htp_skel_mempool V)
+        # the sub-build links libggml-htp-${V}.so in its own binary dir; copy it
+        # to bin/ under the same versioned name (runtime loads libggml-htp-vXX.so)
+        set(MEMPOOL_SKEL ${CMAKE_BINARY_DIR}/bin/libggml-htp-${V}.so)
+        ExternalProject_Add(htp-mempool-${V}
+            SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/htp BUILD_ALWAYS ON
+            BUILD_BYPRODUCTS ${MEMPOOL_SKEL}
+            CMAKE_ARGS
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_TOOLCHAIN_FILE=${CMAKE_CURRENT_SOURCE_DIR}/htp/cmake-toolchain.cmake
+                -DHEXAGON_SDK_ROOT=${HEXAGON_SDK_ROOT}
+                -DHEXAGON_TOOLS_ROOT=${HEXAGON_TOOLS_ROOT}
+                -DHEXAGON_HTP_DEBUG=${GGML_HEXAGON_HTP_DEBUG}
+                -DDSP_VERSION=${V}
+                -DGGML_HEXAGON_USE_MEMPOOL=ON
+                -DPREBUILT_LIB_DIR="toolv19_${V}"
+            INSTALL_COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/libggml-htp-${V}.so ${MEMPOOL_SKEL})
+    endfunction()
+
+    build_htp_skel_mempool(v73)
+    build_htp_skel_mempool(v75)
+    build_htp_skel_mempool(v79)
+    build_htp_skel_mempool(v81)
+
+    # Copy runtime configuration file when present; the backend also runs with built-in defaults without it
+    if (EXISTS ${CMAKE_SOURCE_DIR}/scripts/ggml-hexagon.cfg)
+        add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/scripts/ggml-hexagon.cfg ${CMAKE_BINARY_DIR}/bin/
+            COMMENT "copy ggml-hexagon.cfg")
+    endif()
 
 else()
-    # --- Qualcomm's official implementation (default, upstream) ---
+    # --- dspqueue/per-buffer implementation (default, upstream) ---
     message(STATUS "hexagon: using ${HEXAGON_SDK_ROOT} and ${HEXAGON_TOOLS_ROOT} for building libggml-htp skels")
 
     include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)

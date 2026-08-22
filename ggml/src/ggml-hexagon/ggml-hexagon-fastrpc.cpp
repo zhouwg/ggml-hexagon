@@ -107,14 +107,14 @@
 #include "ggml-common.h"
 #include "ggml-quants.h"
 
-#include "kernels/ggml_dsp.h"
-#include "kernels/dsp-ctx.h"
-#include "kernels/htp-ops.h"
-#include "kernels/hex-common.h"
-#include "kernels/hex-fastdiv.h"
-#include "kernels/matmul-ops.h"
-#include "kernels/flash-attn-ops.h"
-#include "kernels/unary-ops.h"
+#include "ggml_dsp.h"
+#include "htp/dsp-ctx.h"
+#include "htp/htp-ops.h"
+#include "htp/hex-common.h"
+#include "htp/hex-fastdiv.h"
+#include "htp/matmul-ops.h"
+#include "htp/flash-attn-ops.h"
+#include "htp/unary-ops.h"
 
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
@@ -446,7 +446,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7.4"},
+        .version                = {"0.99.7.5"},
         .enabled_ops            = "",
         .enabled_types          = "",
 };
@@ -786,13 +786,13 @@ public:
         std::ifstream in;
         std::string line;
         in.open(file_name.c_str());
-        if (not in.is_open()) {
+        if (!in.is_open()) {
             GGMLHEXAGON_LOG_WARN("can't open file %s", file_name.c_str());
             return false;
         }
         while (getline(in, line)) {
             std::string section, key, value;
-            if (not parse_line(line, section, key, value)) {
+            if (!parse_line(line, section, key, value)) {
                 continue;
             }
             set_section_keyvalue(section, key, value);
@@ -840,7 +840,7 @@ private:
         size_t len = str.length();
         size_t pos = len;
         while (pos > 0) {
-            if (not isblank(str[pos - 1])) {
+            if (!isblank(str[pos - 1])) {
                 break;
             }
             --pos;
@@ -938,14 +938,17 @@ static void ggmlhexagon_load_cfg() {
 #endif
 
     hexagon_appcfg hexagoncfg_instance;
-    hexagoncfg_instance.load(cfg_filename);
+    bool cfg_loaded = hexagoncfg_instance.load(cfg_filename);
+    if (!cfg_loaded) {
+        GGMLHEXAGON_LOG_ALWAYS("cfg file %s not found or unreadable, using built-in defaults", cfg_filename.c_str());
+    }
     hexagoncfg_instance.dump([](const std::string & section, const std::string & key, const std::string value) {
         std::ostringstream  tmposs;
         tmposs << "section[" << std::setw(10) << std::left << section << "],[" << std::setw(25) << std::left << key << "] = [" << value << "]";
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.4");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.5");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -962,9 +965,13 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_types", g_hexagon_appcfg.enabled_types, "");
 
-    memcpy(g_hexagon_appcfg.version, version.c_str(), strlen(version.c_str()));
+    snprintf(g_hexagon_appcfg.version, GGMLHEXAGON_TMPBUF_LEN, "%s", version.c_str());
 
-    GGMLHEXAGON_LOG_ALWAYS("load hexagon appcfg from %s", cfg_filename.c_str());
+    if (cfg_loaded) {
+        GGMLHEXAGON_LOG_ALWAYS("load hexagon appcfg from %s", cfg_filename.c_str());
+    } else {
+        GGMLHEXAGON_LOG_ALWAYS("no hexagon appcfg file, using built-in defaults");
+    }
     GGMLHEXAGON_LOG_ALWAYS("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
     GGMLHEXAGON_LOG_ALWAYS("runtime libpath=%s", g_hexagon_appcfg.runtime_libpath);
 
@@ -1023,7 +1030,7 @@ static void ggmlhexagon_check_valid_appcfg() {
     }
 }
 
-// Set the runtime library path where DSP skeleton .so files (libggmldsp-skel-v*.so)
+// Set the runtime library path where DSP skeleton .so files (libggml-htp-v*.so)
 // and ggml-hexagon.cfg are located. Must be called before any hexagon backend
 // registration to take effect.
 GGML_BACKEND_API void ggml_hexagon_set_runtime_libpath(const char * path) {
@@ -1070,7 +1077,6 @@ static int ion_sync_for_direction(int fd, int direction) {
         }
     }
 #elif defined(_WIN32)
-    // WoA: ION allocator and DMA_BUF_IOCTL_SYNC are not available on Windows.
     // Cache sync is handled by dspqueue's platform-specific driver implementation.
     GGML_UNUSED(fd); GGML_UNUSED(direction);
 #endif
@@ -1104,7 +1110,6 @@ static inline void cpu_dcache_flush_range(ggml_backend_hexagon_context * backend
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 1);
 #elif defined(_WIN32)
-    // WoA: MSVC does not support GCC inline asm for ARM64.
     // Cache sync is handled by dspqueue's platform-specific driver implementation.
     GGML_UNUSED(backend_ctx); GGML_UNUSED(ion_fd); GGML_UNUSED(p); GGML_UNUSED(size);
 #endif
@@ -1138,7 +1143,6 @@ static inline void cpu_dcache_inval_range(ggml_backend_hexagon_context * backend
     }
     if (ion_fd > 0) ion_sync_for_direction(ion_fd, 0);
 #elif defined(_WIN32)
-    // WoA: MSVC does not support GCC inline asm for ARM64.
     // Cache sync is handled by dspqueue's platform-specific driver implementation.
     GGML_UNUSED(backend_ctx); GGML_UNUSED(ion_fd); GGML_UNUSED(p); GGML_UNUSED(size);
 #endif
@@ -1840,7 +1844,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     domain * my_domain          = NULL;
     bool is_unsignedpd_enabled  = false;
     char final_uri[512];
-    char ggmldsp_uri[256];
+    char htp_uri[256];
 
     if (nullptr == ctx)
         return 1;
@@ -1912,20 +1916,20 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     htp_arch = ggmlhexagon_probe_dspinfo(ctx);
     GGML_ASSERT(0 != htp_arch);
 
-    snprintf(ggmldsp_uri, sizeof(ggmldsp_uri),
-             "file:///libggmldsp-skel-v%u.so?ggml_dsp_skel_handle_invoke&_modver=1.0&_idlver=" GGML_DSP_IDL_VERSION,
+    snprintf(htp_uri, sizeof(htp_uri),
+             "file:///libggml-htp-v%u.so?ggml_dsp_skel_handle_invoke&_modver=1.0&_idlver=" GGML_DSP_IDL_VERSION,
              htp_arch);
 
     // Build the final URI for ggml_dsp_open.
     // session_id > 0: use FASTRPC_GET_URI to obtain the session-specific URI.
-    // session_id == 0 (or FASTRPC_GET_URI failure): concatenate ggmldsp_uri + domain uri.
+    // session_id == 0 (or FASTRPC_GET_URI failure): concatenate htp_uri + domain uri.
     if (ctx->session_id > 0) {
         struct remote_rpc_get_uri u = {};
         u.session_id      = ctx->session_id;
         u.domain_name     = const_cast<char *>(CDSP_DOMAIN_NAME);
         u.domain_name_len = strlen(CDSP_DOMAIN_NAME);
-        u.module_uri      = const_cast<char *>(ggmldsp_uri);
-        u.module_uri_len  = strlen(ggmldsp_uri);
+        u.module_uri      = const_cast<char *>(htp_uri);
+        u.module_uri_len  = strlen(htp_uri);
         u.uri             = final_uri;
         u.uri_len         = sizeof(final_uri);
         int err = remote_session_control(FASTRPC_GET_URI, (void *) &u, sizeof(u));
@@ -1934,11 +1938,11 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
             GGMLHEXAGON_LOG_DEBUG("session URI for session_id=%d: %s", ctx->session_id, final_uri);
         } else {
             GGMLHEXAGON_LOG_WARN("FASTRPC_GET_URI failed for session_id=%d: error 0x%x, fallback to %s%s",
-                                 ctx->session_id, err, ggmldsp_uri, uri);
+                                 ctx->session_id, err, htp_uri, uri);
         }
     }
     if (!got_uri) {
-        snprintf(final_uri, sizeof(final_uri), "%s%s", ggmldsp_uri, uri);
+        snprintf(final_uri, sizeof(final_uri), "%s%s", htp_uri, uri);
     }
 
     GGMLHEXAGON_LOG_DEBUG("ggmlop domain uri: %s", final_uri);
@@ -2768,7 +2772,7 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
 ) {
     struct htp_mm_hvx_vtcm_layout vtcm_layout;
     htp_mm_hvx_vtcm_layout_build(&vtcm_layout, kernel_type, wtype, ne10, src1_nrows, n_threads,
-                                 dst_row_size, src0_row_size, src1_row_size, n_prefetch,
+                                 dst_row_size, src0_row_size, src1_row_size, 0, n_prefetch,
                                  false, false, false);
     *vtcm_src0_size = vtcm_layout.src0_bytes;
     *vtcm_src1_size = vtcm_layout.src1_bytes;
@@ -2783,7 +2787,7 @@ static inline size_t htp_mm_hvx_id_get_vtcm_sizes(
 ) {
     struct htp_mm_hvx_vtcm_layout vtcm_layout;
     htp_mm_hvx_vtcm_layout_build(&vtcm_layout, 0, wtype, ne10, src1_nrows, n_threads,
-                                 0, src0_row_size, 0, n_prefetch,
+                                 0, src0_row_size, 0, 0, n_prefetch,
                                  true, false, false);
     *vtcm_src0_size = vtcm_layout.src0_bytes;
     *vtcm_src1_size = vtcm_layout.src1_bytes;
@@ -2862,7 +2866,8 @@ static bool ggml_hexagon_compute_fa_params(
         size_t Br = 0, Bc = 0;
         const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
         int ret = hmx_fa_find_chunk_size(&Br, &Bc, G, DK, DV, neq1, nek1,
-                                         vtcm_budget, (size_t) ctx->n_threads);
+                                         vtcm_budget, (size_t) ctx->n_threads,
+                                         kparams->is_q_fp32 != 0);
         if (ret == 0) {
             kparams->kernel_type = HTP_FA_KERNEL_HMX;
             kparams->Br          = (uint16_t) Br;
@@ -2873,7 +2878,8 @@ static bool ggml_hexagon_compute_fa_params(
             kparams->u.hmx.g_br      = hex_align_up(G * Br, 32);
             kparams->u.hmx.pipeline  = (kparams->n_kv_blocks >= 3 && ctx->n_threads >= 2) ? 1 : 0;
             kparams->vtcm_size       = (uint32_t) hmx_fa_compute_vtcm_usage(
-                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0);
+                G, DK, DV, Br, Bc, kparams->n_threads, kparams->u.hmx.pipeline != 0,
+                kparams->is_q_fp32 != 0);
 
             const size_t row_vec_bytes = hex_align_up(Bc * sizeof(uint16_t), 256);
             kparams->u.hmx.row_buf_stride = row_vec_bytes / 128;
@@ -3329,7 +3335,7 @@ static void ggml_hexagon_precompute_fused_ffn_params(
 }
 
 // Precompute htp_mm_kernel_params on AP side for MUL_MAT in FastRPC/mempool batch path.
-// Mirrors build_mm_kernel_params in kernels/entry.c (F32/F16 HVX paths only).
+// Mirrors build_mm_kernel_params in htp/entry.c (F32/F16 HVX paths only).
 // Writes directly to op.kernel_params; DSP side consumes via memcpy.
 // For unsupported weight types (quant/HMX), leaves kernel_type=0 so DSP falls
 // back to build_mm_kernel_params which emits the error.
@@ -5751,7 +5757,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     t_p4 = t_start; t_start = ggml_time_us(); ctx->cum_p4_us += t_start - t_p4;
 
     // AP-side guard: fail early if batch exceeds DSP static array limits.
-    // Must stay in sync with kernels/entry.c (DSP_OPT_MAX_TENSORS, WEIGHT_INVAL_MAX_PTRS).
+    // Must stay in sync with htp/entry.c (DSP_OPT_MAX_TENSORS, WEIGHT_INVAL_MAX_PTRS).
     enum {
         AP_DSP_MAX_TENSORS   = 4096,   // DSP_OPT_MAX_TENSORS in entry.c
         AP_DSP_MAX_WEIGHTS   = 4096,   // WEIGHT_INVAL_MAX_PTRS in entry.c

@@ -36,12 +36,12 @@ git checkout self-build-jz
 ## Build
 ```
 
-$ ./scripts/build-run-android.sh build
+$ ./scripts/build-run-ggmlhexagon-android.sh build
 
 ```
 
 
-## How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon
+## How to do performance comparison of PP and TG between the dspqueue and the mempool/FastRPC ggml-hexagon variants
 
 for **fair performance comparison**, the same "running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on" "  and the same prompt and same LLM model file and same 8Elite phone would be used in both inference test.
 
@@ -55,19 +55,19 @@ for **fair performance comparison**, the same "running_params=" -ngl 99 -t 6 -n 
  git checkout self-build-jz
 ```
 
-2. build Qualcomm's ggml-hexagon in self-build-jz branch
+2. build the dspqueue ggml-hexagon variant in self-build-jz branch
 ```
-./scripts/build-run-android.sh build_qcom
+./scripts/build-run-ggmlhexagon-android.sh build_dspqueue
 ```
 
-3. build JZ's ggml-hexagon in self-build-jz branch accordingly
+3. build the mempool/FastRPC ggml-hexagon variant in self-build-jz branch accordingly
 ```
-./scripts/build-run-android.sh build
+./scripts/build-run-ggmlhexagon-android.sh build
 ```
 4. run automated AB test
 
 ```
-./scripts/build-run-android.sh run_abtest 2>&1 | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt
+./scripts/build-run-ggmlhexagon-android.sh run_abtest 2>&1 | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt
 ```
 
 5. Analyze logs and generate a performance comparison table from `log_abtest_$(date +%Y%m%d-%H%M%S).txt`
@@ -84,28 +84,28 @@ for **fair performance comparison**, the same "running_params=" -ngl 99 -t 6 -n 
  git checkout self-build-jz
 ```
 
-2. build Qualcomm's ggml-hexagon in self-build-jz branch
+2. build the dspqueue ggml-hexagon variant in self-build-jz branch
 ```
-./scripts/build-run-android.sh build_qcom
-```
-
-3. build JZ's ggml-hexagon in self-build-jz branch accordingly
-```
-./scripts/build-run-android.sh build
+./scripts/build-run-ggmlhexagon-android.sh build_dspqueue
 ```
 
-4. run llama-cli or llama-bench with Qualcomm ggml-hexagon
-
+3. build the mempool/FastRPC ggml-hexagon variant in self-build-jz branch accordingly
 ```
-./scripts/build-run-android.sh update_qcom_libs
-./scripts/build-run-android.sh run_llamacli
-./scripts/build-run-android.sh run_llamabench
+./scripts/build-run-ggmlhexagon-android.sh build
 ```
 
-5. run llama-cli or llama-bench with JZ ggml-hexagon
+4. run llama-cli or llama-bench with the dspqueue ggml-hexagon variant
 
 ```
-./scripts/build-run-android.sh update_jz_libs
-./scripts/build-run-android.sh run_llamacli
-./scripts/build-run-android.sh run_llamabench
+./scripts/build-run-ggmlhexagon-android.sh update_dspqueue_libs
+./scripts/build-run-ggmlhexagon-android.sh run_llamacli
+./scripts/build-run-ggmlhexagon-android.sh run_llamabench
+```
+
+5. run llama-cli or llama-bench with the mempool/FastRPC ggml-hexagon variant
+
+```
+./scripts/build-run-ggmlhexagon-android.sh update_fastrpc_libs
+./scripts/build-run-ggmlhexagon-android.sh run_llamacli
+./scripts/build-run-ggmlhexagon-android.sh run_llamabench
 ```

@@ -13,8 +13,8 @@
       "rule": "Do NOT use bare 2>&1 redirection. Instead use 'command | tee log_<purpose>.txt' so that: (1) the AI model can read the log file afterward to analyze results, (2) the user can view real-time output in the Trae IDE terminal.",
       "format": "command | tee log_<purpose>.txt",
       "examples": [
-        "./scripts/build-run-android.sh build | tee log_build.txt",
-        "./scripts/build-run-android.sh run_llamacli gemma4 | tee log_llamacli_gemma4.txt"
+        "./scripts/build-run-ggmlhexagon-android.sh build | tee log_build.txt",
+        "./scripts/build-run-ggmlhexagon-android.sh run_llamacli gemma4 | tee log_llamacli_gemma4.txt"
       ],
       "reason": "tee gives both real-time terminal visibility for the user and a persistent log file for the AI model to read. Bare 2>&1 only goes to one place, not both."
     }
@@ -109,22 +109,22 @@
     "ci_script": {
       "path": "./scripts/build-run-ggmlhexagon-android.sh",
       "alias": "CI script (entry point for build / run_testop / run_llamacli / run_abtest / run_ubatchtest commands)",
-      "description": "Unified build and test entry script for JZ's ggml-hexagon. All CI tests (5-model CI AB test, 6-model CI AB test, MUL_MAT validator unit tests) are triggered through this script"
+      "description": "Unified build and test entry script for the mempool/FastRPC ggml-hexagon variant. All CI tests (5-model CI AB test, 6-model CI AB test, MUL_MAT validator unit tests) are triggered through this script"
     },
-    "build": "./scripts/build-run-android.sh build",
-    "run_testops": "./scripts/build-run-android.sh run_testops",
-    "run_testop_add": "./scripts/build-run-android.sh run_testop ADD",
-    "run_testop_mulmat": "./scripts/build-run-android.sh run_testop MUL_MAT",
-    "run_llamacli": "./scripts/build-run-android.sh run_llamacli",
-    "build_qcom": "./scripts/build-run-android.sh build_qcom"
+    "build": "./scripts/build-run-ggmlhexagon-android.sh build",
+    "run_testops": "./scripts/build-run-ggmlhexagon-android.sh run_testops",
+    "run_testop_add": "./scripts/build-run-ggmlhexagon-android.sh run_testop ADD",
+    "run_testop_mulmat": "./scripts/build-run-ggmlhexagon-android.sh run_testop MUL_MAT",
+    "run_llamacli": "./scripts/build-run-ggmlhexagon-android.sh run_llamacli",
+    "build_dspqueue": "./scripts/build-run-ggmlhexagon-android.sh build_dspqueue"
   },
   "ab_test": {
-    "description": "Performance comparison between Qualcomm's official ggml-hexagon and JZ's ggml-hexagon. For fair comparison, use the same running_params, same prompt, same LLM model file, and same phone. Reference: docs/how-to-build-ggmlhexagon.md section 'How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon'.",
+    "description": "Performance comparison between the dspqueue and the mempool/FastRPC ggml-hexagon variants. For fair comparison, use the same running_params, same prompt, same LLM model file, and same phone. Reference: docs/how-to-build-ggmlhexagon.md section 'How to do performance comparison of PP and TG between the dspqueue and the mempool/FastRPC ggml-hexagon variants'.",
     "fair_comparison_prerequisites": {
       "running_params": "-ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --no-mmap -fa on",
-      "same_prompt": "Use the same prompt for both QCOM and JZ runs",
-      "same_model": "Use the same LLM model file for both QCOM and JZ runs",
-      "same_phone": "Use the same phone (e.g. Snapdragon 8 Elite) for both QCOM and JZ runs",
+      "same_prompt": "Use the same prompt for both dspqueue and fastrpc runs",
+      "same_model": "Use the same LLM model file for both dspqueue and fastrpc runs",
+      "same_phone": "Use the same phone (e.g. Snapdragon 8 Elite) for both dspqueue and fastrpc runs",
       "branch": "self-build-jz"
     },
     "automated": {
@@ -140,20 +140,20 @@
         },
         {
           "step": 2,
-          "action": "Build Qualcomm's ggml-hexagon",
-          "command": "./scripts/build-run-android.sh build_qcom | tee log_build_qcom.txt",
-          "note": "Builds with GGML_HEXAGON_JZ=OFF, using ggml-hexagon.cpp + htp/main.c"
+          "action": "Build the dspqueue ggml-hexagon variant",
+          "command": "./scripts/build-run-ggmlhexagon-android.sh build_dspqueue | tee log_build_dspqueue.txt",
+          "note": "Builds with GGML_HEXAGON_USE_MEMPOOL=OFF, using ggml-hexagon.cpp + htp/main.c"
         },
         {
           "step": 3,
-          "action": "Build JZ's ggml-hexagon",
-          "command": "./scripts/build-run-android.sh build | tee log_build_jz.txt",
-          "note": "Builds with GGML_HEXAGON_JZ=ON, using ggml-hexagon-jz.cpp + kernels/entry.c"
+          "action": "Build the mempool/FastRPC ggml-hexagon variant",
+          "command": "./scripts/build-run-ggmlhexagon-android.sh build | tee log_build_fastrpc.txt",
+          "note": "Builds with GGML_HEXAGON_USE_MEMPOOL=ON, using ggml-hexagon-fastrpc.cpp + htp/entry.c (shared htp/ ops, DSP skel via htp/CMakeLists.txt with GGML_HEXAGON_USE_MEMPOOL=ON)"
         },
         {
           "step": 4,
           "action": "Run automated AB test",
-          "command": "./scripts/build-run-android.sh run_abtest | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt",
+          "command": "./scripts/build-run-ggmlhexagon-android.sh run_abtest | tee log_abtest_$(date +%Y%m%d-%H%M%S).txt",
           "note": "Automatically runs both implementations and collects PP/TG metrics"
         },
         {
@@ -177,47 +177,47 @@
         },
         {
           "step": 2,
-          "action": "Build Qualcomm's ggml-hexagon",
-          "command": "./scripts/build-run-android.sh build_qcom | tee log_build_qcom.txt"
+          "action": "Build the dspqueue ggml-hexagon variant",
+          "command": "./scripts/build-run-ggmlhexagon-android.sh build_dspqueue | tee log_build_dspqueue.txt"
         },
         {
           "step": 3,
-          "action": "Build JZ's ggml-hexagon",
-          "command": "./scripts/build-run-android.sh build | tee log_build_jz.txt"
+          "action": "Build the mempool/FastRPC ggml-hexagon variant",
+          "command": "./scripts/build-run-ggmlhexagon-android.sh build | tee log_build_fastrpc.txt"
         },
         {
           "step": 4,
           "action": "Test with Qualcomm's ggml-hexagon",
           "commands": [
-            "./scripts/build-run-android.sh update_qcom_libs",
-            "./scripts/build-run-android.sh run_llamacli | tee log_llamacli_qcom.txt",
-            "./scripts/build-run-android.sh run_llamabench | tee log_llamabench_qcom.txt"
+            "./scripts/build-run-ggmlhexagon-android.sh update_dspqueue_libs",
+            "./scripts/build-run-ggmlhexagon-android.sh run_llamacli | tee log_llamacli_dspqueue.txt",
+            "./scripts/build-run-ggmlhexagon-android.sh run_llamabench | tee log_llamabench_dspqueue.txt"
           ],
           "note": "Deploy QCOM libs to phone, then run llama-cli and llama-bench"
         },
         {
           "step": 5,
-          "action": "Test with JZ's ggml-hexagon",
+          "action": "Test with the mempool/FastRPC ggml-hexagon variant",
           "commands": [
-            "./scripts/build-run-android.sh update_jz_libs",
-            "./scripts/build-run-android.sh run_llamacli | tee log_llamacli_jz.txt",
-            "./scripts/build-run-android.sh run_llamabench | tee log_llamabench_jz.txt"
+            "./scripts/build-run-ggmlhexagon-android.sh update_fastrpc_libs",
+            "./scripts/build-run-ggmlhexagon-android.sh run_llamacli | tee log_llamacli_fastrpc.txt",
+            "./scripts/build-run-ggmlhexagon-android.sh run_llamabench | tee log_llamabench_fastrpc.txt"
           ],
-          "note": "Deploy JZ libs to phone, then run llama-cli and llama-bench"
+          "note": "Deploy fastrpc-variant libs to phone, then run llama-cli and llama-bench"
         },
         {
           "step": 6,
           "action": "Compare results",
-          "command": "Compare PP/TG values from log_llamacli_qcom.txt vs log_llamacli_jz.txt (and llama-bench logs)",
+          "command": "Compare PP/TG values from log_llamacli_dspqueue.txt vs log_llamacli_fastrpc.txt (and llama-bench logs)",
           "output_table_format": "| Implementation | PP (tok/s) | TG (tok/s) | Notes |"
         }
       ]
     },
     "key_commands_reference": {
-      "build_qcom": "Build Qualcomm's official ggml-hexagon (GGML_HEXAGON_JZ=OFF)",
-      "build": "Build JZ's ggml-hexagon (GGML_HEXAGON_JZ=ON, default)",
-      "update_qcom_libs": "Deploy Qualcomm's .so files to phone via adb",
-      "update_jz_libs": "Deploy JZ's .so files to phone via adb",
+      "build_dspqueue": "Build the dspqueue ggml-hexagon variant (GGML_HEXAGON_USE_MEMPOOL=OFF)",
+      "build": "Build the mempool/FastRPC ggml-hexagon variant (GGML_HEXAGON_USE_MEMPOOL=ON, default)",
+      "update_dspqueue_libs": "Deploy dspqueue-variant .so files to phone via adb",
+      "update_fastrpc_libs": "Deploy fastrpc-variant .so files to phone via adb",
       "run_abtest": "Run automated AB test (builds + runs both, outputs comparison)",
       "run_llamacli": "Run llama-cli with currently deployed libs",
       "run_llamabench": "Run llama-bench with currently deployed libs"
@@ -225,22 +225,21 @@
   },
   "build_rules": {
     "documentation": "docs/how-to-build-ggmlhexagon.md",
-    "build_command": "./scripts/build-run-android.sh build",
+    "build_command": "./scripts/build-run-ggmlhexagon-android.sh build",
     "build_forbidden": {
       "do_not_read": ["Makefile", "CMakeLists.txt", "cmake", "cmake/**/*"],
       "do_not_run": ["make", "cmake", "ninja"],
       "reason": "Follow ONLY docs/how-to-build-ggmlhexagon.md. Ignore all toplevel build files."
     },
     "script_rules": {
-      "allowed_function": "build (from build-run-android.sh)",
+      "allowed_function": "build (from build-run-ggmlhexagon-android.sh)",
       "forbidden_functions": [],
       "reason": "All functions are allowed for local execution."
     },
     "dsp_kernel_fast_build": {
-      "description": "If only DSP-side source files (under ggml/src/ggml-hexagon/kernels/, e.g. entry.c, matmul-ops.c, HVX/HMX kernels) were modified, use the fast kernel-only build to skip the full AP rebuild.",
-      "command": "./scripts/build-kernels.sh",
-      "when_to_use": "Only DSP-side files in ggml/src/ggml-hexagon/kernels/ were modified; no changes to ARM-AP source (ggml-hexagon-jz.cpp) or top-level build files.",
-      "fallback": "If any AP-side file (ggml-hexagon-jz.cpp) or non-DSP file was also modified, fall back to the full build command above."
+      "description": "DSP-side source files live under ggml/src/ggml-hexagon/htp/ (shared ops tree). DSP skels are built as part of the normal CMake build (ExternalProject htp-mempool-v*, libggml-htp-v*.so in build dir bin/).",
+      "command": "./scripts/build-run-ggmlhexagon-android.sh build",
+      "when_to_use": "Any change, DSP-side (htp/*.c) or AP-side. The old kernel-only fast path (build-kernels.sh, kernels/Makefile) was removed when kernels/ merged into htp/."
     },
     "cifs_check": "Check whether the project is located on a CIFS file system and modify ./scripts/build-run-ggmlhexagon-android.sh accordingly",
     "if_unsure": "STOP. Do NOT use make/cmake. ONLY follow: docs/how-to-build-ggmlhexagon.md"
@@ -255,54 +254,54 @@
     "execution_mode": "local (no ssh needed - project is on local filesystem)",
     "workdir_local": "/home/zhouwg/develop/ggml-hexagon",
     "phone_connected_locally": "adb connects to the Android phone locally",
-    "default_verify_target": "source-built libggmldsp-skel.so, run ./scripts/build-run-ggmlhexagon-android.sh build",
-    "compare_with_qcom": "To compare against Qualcomm's official ggml-hexagon backend, run: ./scripts/build-run-ggmlhexagon-android.sh build_qcom",
-    "JZ vs QCOM AB test performance report": "Performance reports should follow the format of docs/backend/jz-ggml-hexagon/abtest-analysis-20260814-1407-en.md"
+    "default_verify_target": "source-built libggml-htp-v79.so, run ./scripts/build-run-ggmlhexagon-android.sh build",
+    "compare_with_dspqueue": "To compare against the dspqueue ggml-hexagon variant, run: ./scripts/build-run-ggmlhexagon-android.sh build_dspqueue",
+    "fastrpc vs dspqueue AB test performance report": "Performance reports should follow the format of docs/backend/jz-ggml-hexagon/abtest-analysis-20260814-1407-en.md"
   },
   "hexagon_implementations": {
-    "description": "JZ and Qualcomm use SEPARATE DSP kernel directories. JZ uses kernels/ (independent fork, primary development target); Qualcomm uses htp/ (tracks upstream master). They differ in ARM-AP source file, DSP entry-point source file, and DSP kernel directory.",
-    "qualcomm_official": {
+    "description": "Two ggml-hexagon variants share ONE DSP ops source tree (htp/). They differ in ARM-AP source file and DSP entry-point source file; the variant is selected by the CMake option GGML_HEXAGON_USE_MEMPOOL (default OFF).",
+    "dspqueue_implementation": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
       "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "description": "Qualcomm's official ggml-hexagon implementation. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory (tracks upstream)."
+      "description": "dspqueue/per-buffer ggml-hexagon variant (tracks upstream master). AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory. DSP skel libggml-htp-vXX.so built by htp/CMakeLists.txt (GGML_HEXAGON_USE_MEMPOOL=OFF)."
     },
-    "jz_implementation": {
-      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "dsp_entry_source_file": "ggml/src/ggml-hexagon/kernels/entry.c",
-      "dsp_kernel_directory": "ggml/src/ggml-hexagon/kernels/",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: kernels/entry.c. DSP ops/HVX/HMX: kernels/ directory (independent fork, selectively ports stable upstream changes)."
+    "fastrpc_implementation": {
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "description": "mempool/FastRPC-invoke ggml-hexagon variant (primary development target). AP side: ggml-hexagon-fastrpc.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory (single source tree; mempool-specific bits guarded by GGML_HEXAGON_USE_MEMPOOL). DSP skel libggml-htp-vXX.so built by htp/CMakeLists.txt with -DGGML_HEXAGON_USE_MEMPOOL=ON (FastRPC-invoke entry, excludes main.c/htp-tensor.c)."
     },
-    "separate_dsp_directory_note": "Historically, JZ and Qualcomm shared a single DSP kernel directory (htp/) for ops kernels, HVX/HMX headers, and common helpers. This ended with Qualcomm's large PR #26049 (https://github.com/ggml-org/llama.cpp/pull/26049, merge commit 0a50d9909a3478e82679f505bf8595d1eee4b0a8): after merging upstream master with this PR, JZ's default inference test produced garbled output while Qualcomm's remained normal. To avoid chasing each upstream htp/ change, JZ forked htp/ into a new kernels/ directory pinned at baseline commit 2be3826c9 (where PP/TG fully exceeded Qualcomm and inference output was correct). JZ now maintains kernels/ independently; Qualcomm continues using htp/ which tracks upstream master. Selected stable upstream htp/ improvements are ported into kernels/ manually. Build is selected by CMake option GGML_HEXAGON_JZ (default OFF)."
+    "separate_dsp_directory_note": "History: JZ and Qualcomm originally shared a single DSP kernel directory (htp/). Qualcomm's large PR #26049 (merge 0a50d9909a3478e82679f505bf8595d1eee4b0a8) broke JZ's inference (garbled output), so JZ forked htp/ into kernels/ pinned at baseline 2be3826c9. As of 2026-08-22 the fork was merged back: kernels/ is deleted, htp/ is the single ops source tree again, and the two variants are selected at build time by the CMake option GGML_HEXAGON_USE_MEMPOOL - dspqueue variant: libggml-htp-vXX.so via main.c (default, OFF); mempool/FastRPC variant: libggml-htp-vXX.so via entry.c (ON)."
   },
   "development_rules": {
-    "primary_target": "jz_implementation",
-    "jz_implementation": {
-      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-jz.cpp",
-      "dsp_entry_source_file": "ggml/src/ggml-hexagon/kernels/entry.c",
-      "dsp_kernel_directory": "ggml/src/ggml-hexagon/kernels/",
-      "build_command": "./scripts/build-run-android.sh build",
-      "description": "JZ's custom ggml-hexagon implementation (primary development target). AP side: ggml-hexagon-jz.cpp. DSP entry point: kernels/entry.c. DSP ops/HVX/HMX: kernels/ directory (independent fork, selectively ports stable upstream changes)."
+    "primary_target": "fastrpc_implementation",
+    "fastrpc_implementation": {
+      "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon-fastrpc.cpp",
+      "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/entry.c",
+      "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
+      "build_command": "./scripts/build-run-ggmlhexagon-android.sh build",
+      "description": "mempool/FastRPC ggml-hexagon variant (primary development target). AP side: ggml-hexagon-fastrpc.cpp. DSP entry point: htp/entry.c. DSP ops/HVX/HMX: shared htp/ directory (single source tree; mempool-specific bits guarded by GGML_HEXAGON_USE_MEMPOOL). DSP skel libggml-htp-vXX.so built by htp/CMakeLists.txt with -DGGML_HEXAGON_USE_MEMPOOL=ON (FastRPC-invoke entry, excludes main.c/htp-tensor.c)."
     },
-    "qualcomm_official_debug": {
+    "dspqueue_implementation_debug": {
       "ap_source_file": "ggml/src/ggml-hexagon/ggml-hexagon.cpp",
       "dsp_entry_source_file": "ggml/src/ggml-hexagon/htp/main.c",
       "dsp_kernel_directory": "ggml/src/ggml-hexagon/htp/",
-      "build_command": "./scripts/build-run-android.sh build_qcom",
-      "description": "Qualcomm's official backend. AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory (tracks upstream). Use this when debugging or benchmarking against the official reference."
+      "build_command": "./scripts/build-run-ggmlhexagon-android.sh build_dspqueue",
+      "description": "dspqueue/per-buffer variant (tracks upstream master). AP side: ggml-hexagon.cpp. DSP entry point: htp/main.c. DSP ops/HVX/HMX: htp/ directory. Use this when debugging or benchmarking against the upstream reference."
     },
     "ccache_usage": {
-      "description": "ccache is enabled for faster builds. For jz build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For qcom build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_qcom. Do NOT disable ccache.",
-      "jz_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache",
-      "qcom_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache_qcom"
+      "description": "ccache is enabled for faster builds. For fastrpc build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache. For dspqueue build: CCACHE_DIR=${PROJECT_ROOT_PATH}/.ccache_dspqueue. Do NOT disable ccache.",
+      "fastrpc_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache",
+      "dspqueue_ccache_dir": "${PROJECT_ROOT_PATH}/.ccache_dspqueue"
     },
-    "testing_focus": "jz_implementation"
+    "testing_focus": "fastrpc_implementation"
   },
   "testing_rules": {
     "description": "Test commands for different test types. All tests should be run locally.",
-    "add_test": "./scripts/build-run-android.sh run_testop ADD",
-    "mulmat_test": "./scripts/build-run-android.sh run_testop MUL_MAT",
-    "inference_test": "./scripts/build-run-android.sh run_llamacli",
+    "add_test": "./scripts/build-run-ggmlhexagon-android.sh run_testop ADD",
+    "mulmat_test": "./scripts/build-run-ggmlhexagon-android.sh run_testop MUL_MAT",
+    "inference_test": "./scripts/build-run-ggmlhexagon-android.sh run_llamacli",
     "note": "All tests must be executed locally"
   },
   "log_viewing_rules": {

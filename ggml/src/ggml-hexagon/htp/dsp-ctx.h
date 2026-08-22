@@ -57,9 +57,9 @@ extern "C" {
 #define HEX_OP_ALIGN                    128
 
 // HTP_TENSOR_FLUSHED was removed in upstream b2dd28a3b: per-tensor flush
-// flags were replaced by htp_context.dirty_map, maintained by Qualcomm's
-// scheduler in main.c (kernels never flush L2 themselves). JZ's entry.c
-// replaces that scheduler and does its own cache management, so
+// flags were replaced by htp_context.dirty_map, maintained by the dspqueue
+// scheduler in main.c (kernels never flush L2 themselves). The mempool
+// entry.c replaces that scheduler and does its own cache management, so
 // htp_tensor.flags is never read on this path. Defined as 0 to keep the
 // legacy assignments in entry.c compiling.
 #ifndef HTP_TENSOR_FLUSHED
@@ -252,7 +252,7 @@ struct dsp_context {
     // cross-check L2 staleness between weight and activation domains.
     uint32_t dsp_cache_trace_bit1;
 
-    // htp_context for calling Qualcomm's execute_op.
+    // htp_context for calling the shared execute_op.
     struct htp_context * htp_ctx;
 
     // Backing buffers for queues owned by this dsp_context (allocated via
