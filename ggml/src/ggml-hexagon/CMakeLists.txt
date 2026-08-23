@@ -23,15 +23,13 @@ include(${HEXAGON_SDK_ROOT}/build/cmake/hexagon_fun.cmake)
 include(ExternalProject)
 
 option(GGML_HEXAGON_USE_MEMPOOL "ggml-hexagon: mempool/FastRPC-invoke AP implementation (single mempool, synchronous invoke); OFF = dspqueue/per-buffer implementation" OFF)
-option(GGML_HEXAGON_HTP_DEBUG  "ggml-hexagon: enable HTP debug output" OFF)
+option(GGML_HEXAGON_HTP_DEBUG   "ggml-hexagon: enable HTP debug output" OFF)
 
 set(TARGET_NAME ggml-hexagon)
 
-if (GGML_HEXAGON_USE_MEMPOOL)
-    if (NOT CMAKE_SYSTEM_NAME MATCHES Android)
-        message(FATAL_ERROR "ggml-hexagon (mempool) is only available on Android")
-    endif()
+set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
 
+if (GGML_HEXAGON_USE_MEMPOOL)
     add_library(ggml_dsp OBJECT
         ${CMAKE_CURRENT_BINARY_DIR}/ggml_dsp_stub.c)
 
@@ -95,9 +93,6 @@ if (GGML_HEXAGON_USE_MEMPOOL)
     build_htp_skel_mempool(v79)
     build_htp_skel_mempool(v81)
 
-    # Install Hexagon skels required at runtime
-    install(FILES ${HTP_SKELS} TYPE LIB)
-
     if (EXISTS ${CMAKE_SOURCE_DIR}/scripts/ggml-hexagon.cfg)
         add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -105,8 +100,6 @@ if (GGML_HEXAGON_USE_MEMPOOL)
             COMMENT "copy ggml-hexagon.cfg")
     endif()
 else()
-    set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
-
     add_library(htp_iface OBJECT
         ${CMAKE_CURRENT_BINARY_DIR}/htp_iface_stub.c)
 
@@ -162,34 +155,35 @@ else()
     build_htp_skel(v79)
     build_htp_skel(v81)
 
-    # Install Hexagon skels required at runtime
-    install(FILES ${HTP_SKELS} TYPE LIB)
+endif()
 
-    if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
-        file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)
-        file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/x86"        WINSDK_BIN0_X86)
-        file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/arm64" WINSDK_BIN1_ARM64)
-        file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/x86"   WINSDK_BIN1_X86)
+# Install Hexagon skels required at runtime
+install(FILES ${HTP_SKELS} TYPE LIB)
 
-        set(WINSDK_PATHS ${WINSDK_BIN0_ARM64} ${WINSDK_BIN0_X86} ${WINSDK_BIN1_ARM64} ${WINSDK_BIN1_X86})
+if (CMAKE_SYSTEM_NAME MATCHES Windows AND GGML_HEXAGON_HTP_CERT)
+    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/arm64"      WINSDK_BIN0_ARM64)
+    file(TO_CMAKE_PATH "$ENV{WINDOWS_SDK_BIN}/x86"        WINSDK_BIN0_X86)
+    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/arm64" WINSDK_BIN1_ARM64)
+    file(TO_CMAKE_PATH "$ENV{WindowsSdkVerBinPath}/x86"   WINSDK_BIN1_X86)
 
-        find_program(INF2CAT  NAMES inf2cat.exe  PATHS ${WINSDK_PATHS} REQUIRED)
-        find_program(SIGNTOOL NAMES signtool.exe PATHS ${WINSDK_PATHS} REQUIRED)
+    set(WINSDK_PATHS ${WINSDK_BIN0_ARM64} ${WINSDK_BIN0_X86} ${WINSDK_BIN1_ARM64} ${WINSDK_BIN1_X86})
 
-        message(STATUS "hexagon: using ${GGML_HEXAGON_HTP_CERT} to sign libggml-htp skels")
+    find_program(INF2CAT  NAMES inf2cat.exe  PATHS ${WINSDK_PATHS} REQUIRED)
+    find_program(SIGNTOOL NAMES signtool.exe PATHS ${WINSDK_PATHS} REQUIRED)
 
-        set(LIBGGML_HTP_CAT ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp.cat)
-        add_custom_target(libggml-htp-cat
-            BYPRODUCTS ${LIBGGML_HTP_CAT}
-            DEPENDS libggml-htp.inf ${HTP_SKELS}
-            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/libggml-htp.inf ${CMAKE_CURRENT_BINARY_DIR}
-            COMMAND ${INF2CAT} /driver:${CMAKE_CURRENT_BINARY_DIR} /os:10_25H2_ARM64
-            COMMAND ${SIGNTOOL} sign /fd sha256 /f ${GGML_HEXAGON_HTP_CERT} ${LIBGGML_HTP_CAT}
-            COMMENT "generating and signing libggml-htp.cat file"
-            VERBATIM
-        )
+    message(STATUS "hexagon: using ${GGML_HEXAGON_HTP_CERT} to sign libggml-htp skels")
 
-        add_dependencies(${TARGET_NAME} libggml-htp-cat)
-        install(FILES ${LIBGGML_HTP_CAT} TYPE LIB)
-    endif()
+    set(LIBGGML_HTP_CAT ${CMAKE_CURRENT_BINARY_DIR}/libggml-htp.cat)
+    add_custom_target(libggml-htp-cat
+        BYPRODUCTS ${LIBGGML_HTP_CAT}
+        DEPENDS libggml-htp.inf ${HTP_SKELS}
+        COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/libggml-htp.inf ${CMAKE_CURRENT_BINARY_DIR}
+        COMMAND ${INF2CAT} /driver:${CMAKE_CURRENT_BINARY_DIR} /os:10_25H2_ARM64
+        COMMAND ${SIGNTOOL} sign /fd sha256 /f ${GGML_HEXAGON_HTP_CERT} ${LIBGGML_HTP_CAT}
+        COMMENT "generating and signing libggml-htp.cat file"
+        VERBATIM
+    )
+
+    add_dependencies(${TARGET_NAME} libggml-htp-cat)
+    install(FILES ${LIBGGML_HTP_CAT} TYPE LIB)
 endif()
