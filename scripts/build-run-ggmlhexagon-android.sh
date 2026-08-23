@@ -1103,18 +1103,32 @@ function run_llamaserver_for_pi()
 
 function run_llamabench()
 {
+    local model_name=""
+    local model_path=""
+
+    if [ $# -ge 1 ]; then
+        model_name="$1"
+        model_path=$(resolve_model_name "$model_name")
+        if [ -z "$model_path" ]; then
+            echo "ERROR: unknown model alias '$model_name'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            exit 1
+        fi
+    else
+        model_path="${GGUF_MODEL_NAME}"
+    fi
+
     prepare_run_on_phone llama-bench
 
     #GGML_HEXAGON_OPPOLL is only effective for the dspqueue variant, doesn't apply to the mempool/FastRPC variant
     echo "adb shell \"cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}\""
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${model_path}\""
 
     adb shell "cd ${REMOTE_PATH} \
                && export LD_LIBRARY_PATH=${REMOTE_PATH} \
                && export GGML_HEXAGON_OPPOLL=1 \
-               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${GGUF_MODEL_NAME}"
+               && ${REMOTE_PATH}/llama-bench -t 6 --poll 1000 -ngl 99 -fa 1 --ubatch-size 1024 -p 200,500,800,1024 -n 128 -m ${model_path}"
 }
 
 
@@ -1633,8 +1647,6 @@ function show_usage()
     echo "  $0 run_testops"
     echo "  $0 run_testop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify accuracy    of ADD/MUL_MAT)"
     echo "  $0 run_perfop     ADD/MUL_MAT/FLASH_ATTN_EXT (verify performance of ADD/MUL_MAT)"
-
-    echo "  $0 run_llamabench"
     echo -e "\n"
 
     echo "  $0 run_abtest_all [rounds]"
@@ -1644,7 +1656,8 @@ function show_usage()
     echo "      $0 run_abtest_all 2>&1 | tee log_abtest_all_\$(date +%Y%m%d-%H%M%S).txt"
     echo -e "\n"
 
-    echo "  $0 run_llamacli   [model_alias]"
+    echo "  $0 run_llamacli     [model_alias]"
+    echo "  $0 run_llamabench   [model_alias]"
     echo "  Model aliases for run_llamacli:"
     echo "    qwen3-2b      -> Qwen3.5-2B-Q4_0.gguf"
     echo "    qwen3-9b      -> Qwen3.5-9B-Q4_0.gguf"
@@ -1656,10 +1669,10 @@ function show_usage()
     echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
-    echo "    $0 run_llamacli              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
-    echo "    $0 run_llamacli qwen3-2b     # test qwen3-2b"
-    echo "    $0 run_llamacli gemma4-e2b   # test gemma4-e2b"
-    echo "    $0 run_llamacli gemma4-e4b   # test gemma4-e4b (mirror stress test)"
+    echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
+    echo "    $0 run_llamacli/run_llamabench qwen3-2b     # test qwen3-2b"
+    echo "    $0 run_llamacli/run_llamabench gemma4-e2b   # test gemma4-e2b"
+    echo "    $0 run_llamacli/run_llamabench gemma4-e4b   # test gemma4-e4b (mirror stress test)"
 }
 
 
@@ -1849,6 +1862,14 @@ elif [ $# == 2 ]; then
             exit 1
         fi
         run_llamacli "$2"
+        exit 0
+    elif [ "$1" == "run_llamabench" ]; then
+        if [ -z "$(resolve_model_name "$2")" ]; then
+            echo "ERROR: unknown model alias '$2'. Valid aliases: qwen3-2b, qwen3-9b, gemma4-e2b, gemma4-e4b, qwen1, llama3"
+            show_usage
+            exit 1
+        fi
+        run_llamabench "$2"
         exit 0
     elif [ "$1" == "run_threadsafety" ]; then
         run_threadsafety
