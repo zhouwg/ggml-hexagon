@@ -1,5 +1,5 @@
-#ifndef GGMLDSP_CTX_H
-#define GGMLDSP_CTX_H
+#ifndef GGMLHTP_CTX_H
+#define GGMLHTP_CTX_H
 
 #include <stdint.h>
 #include <string.h>
@@ -125,7 +125,7 @@ typedef struct hex_tensor_desc {
     int32_t  ne[4];           /* element counts per dimension */
     int32_t  nb[4];           /* strides (bytes) per dimension */
     int32_t  op_params[16];   /* operation-specific parameters */
-    uint32_t flags;           /* 0=ION tensor, 1=mirrored (heap), 2=weight (skip cache flush) */
+    uint32_t flags;           /* 0=ION tensor, 1=mirrored (heap), 2=weight (skip NPU first-touch invalidation) */
     uint32_t data_offset;     /* byte offset of data in mempool */
     uint32_t data_len;        /* data length in bytes */
 } hex_tensor_desc;
@@ -152,7 +152,7 @@ typedef struct hex_batch_hdr {
 } hex_batch_hdr;
 
 // DSP session context: bundles all per-session state.
-// Allocated in ggml_dsp_open, freed in ggml_dsp_close.
+// Allocated in ggml_htp_open, freed in ggml_htp_close.
 struct dsp_context {
     // Configuration
     int thread_counts;
@@ -175,7 +175,7 @@ struct dsp_context {
     int hmx_available;
     struct hmx_queue_s * hmx_queue;
     // Backing buffer for hmx_queue (NULL if hmx_queue is owned externally).
-    // Allocated via memalign in ggml_dsp_setclocks and freed in ggml_dsp_close.
+    // Allocated via memalign in ggml_htp_setclocks and freed in ggml_htp_close.
     void * hmx_queue_buf;
 
     // mempool
@@ -184,7 +184,7 @@ struct dsp_context {
 
     // DSP-side entry.c cache optimization bitmask. Pushed by AP at init via
     // execute_batch(0xFFFC) special mode (no IDL change). All three bits are
-    //   are wired into ggml_dsp_execute_batch(); dsp_cache_mode=0 is behaviorally
+    //   are wired into ggml_htp_execute_batch(); dsp_cache_mode=0 is behaviorally
     // identical to baseline 29c1cf196.
     //   bit 0 (0x1): first-touch weight bitmap    - skip dcinva for repack weights (flags==2) after first access
     //   bit 1 (0x2): skip dcinva for prior dst     - DSP's own dst writes stay in L2; next op's src read skips dcinva
@@ -223,7 +223,7 @@ struct dsp_context {
     struct htp_context * htp_ctx;
 
     // Backing buffers for queues owned by this dsp_context (allocated via
-    // memalign in ggml_dsp_setclocks, freed in ggml_dsp_close). The new
+    // memalign in ggml_htp_setclocks, freed in ggml_htp_close). The new
     // Qualcomm API (b2dd28a3b) requires callers to provide pre-allocated
     // memory to *_queue_init and does not free it in *_queue_free, so we
     // must track these buffers separately to avoid leaking them.
@@ -287,4 +287,4 @@ void ggmlhexagon_log_always_internal(int level, const char * file, const char * 
 }
 #endif
 
-#endif /* GGMLDSP_CTX_H */
+#endif /* GGMLHTP_CTX_H */

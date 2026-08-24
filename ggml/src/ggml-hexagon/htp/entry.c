@@ -192,7 +192,7 @@ static const char * htp_op_short_name(unsigned int op) {
     }
 }
 
-// op_prof_min_us is initialized to UINT64_MAX in ggml_dsp_open.
+// op_prof_min_us is initialized to UINT64_MAX in ggml_htp_open.
 static void dump_op_prof(const char * tag) {
     for (unsigned int i = 0; i < HEX_OP_PROF_BUCKETS; i++) {
         if (g_dsp_ctx->op_prof_count[i] == 0) continue;
@@ -227,7 +227,7 @@ static void dump_op_prof(const char * tag) {
 // =================================================================================================
 // cache infrastructure
 // =================================================================================================
-static void ggml_dsp_cache_flush_range(void * addr, size_t size) {
+static void ggml_htp_cache_flush_range(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
@@ -252,7 +252,7 @@ static void ggml_dsp_cache_flush_range(void * addr, size_t size) {
 // Flush range WITHOUT the trailing syncht. Used by bulk_flush_all to issue a
 // single syncht after processing all merged regions, instead of one per
 // region. Caller must issue syncht before any read of the flushed data.
-static inline void ggml_dsp_cache_flush_range_nosync(void * addr, size_t size) {
+static inline void ggml_htp_cache_flush_range_nosync(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
@@ -274,7 +274,7 @@ static inline void ggml_dsp_cache_flush_range_nosync(void * addr, size_t size) {
     __asm__ __volatile__("" ::: "memory");  // compiler barrier between cache ops
 }
 
-static void ggml_dsp_cache_inval_range(void * addr, size_t size) {
+static void ggml_htp_cache_inval_range(void * addr, size_t size) {
     if (!addr || size == 0) return;
     char * p = (char *)addr;
     char * end = p + size;
@@ -368,7 +368,7 @@ static inline void weight_inval_unmark(const void * ptr) {
  *   no-op (a cfg comment in ggml-hexagon.cfg covers this).
  * - bit 2 (bulk dst flush at batch end): collect all dst ranges during the
  *   op loop, sort + merge adjacent/overlapping ranges at batch end, then
- *   call ggml_dsp_cache_flush_range() once per merged region. Replaces
+ *   call ggml_htp_cache_flush_range() once per merged region. Replaces
  *   per-op flush with fewer but larger flushes. prior_dst is also updated
  *   when bit 2 is on, regardless of bit 1.
  *
@@ -427,7 +427,7 @@ static inline void bulk_flush_add(void * base, size_t len) {
     if (g_dsp_ctx->bulk_flush_count >= DSP_OPT_MAX_BATCH_DSTS) {
         /* Overflow: fall back to immediate per-range flush for THIS dst only
          * (degraded perf, but correctness preserved). */
-        ggml_dsp_cache_flush_range(base, len);
+        ggml_htp_cache_flush_range(base, len);
         return;
     }
     g_dsp_ctx->bulk_flush_ranges[g_dsp_ctx->bulk_flush_count].base = base;
@@ -462,11 +462,11 @@ static inline void bulk_flush_sort(void) {
  * region once. Overlap defined as next_start <= cur_end (1B threshold:
  * touching ranges merge). Flushes in sorted order to preserve ION ordering.
  *
- * Uses ggml_dsp_cache_flush_range_nosync() to avoid one syncht per region;
+ * Uses ggml_htp_cache_flush_range_nosync() to avoid one syncht per region;
  * a single syncht is issued at the end so AP reads of the flushed tensors
  * see fresh DRAM. This batch-end consolidation is the only safe place to
  * merge syncht barriers; per-op synchts are still required for the
- * bit-2-disabled fallback path (see ggml_dsp_execute_batch). */
+ * bit-2-disabled fallback path (see ggml_htp_execute_batch). */
 static inline void bulk_flush_all(void) {
     if (g_dsp_ctx->bulk_flush_count == 0) return;
     bulk_flush_sort();
@@ -481,13 +481,13 @@ static inline void bulk_flush_all(void) {
             if (next_end > cur_end) cur_end = next_end;
         } else {
             /* Gap: flush [cur_base, cur_end) and start new region */
-            ggml_dsp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+            ggml_htp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
             cur_base = next_base;
             cur_end  = next_end;
         }
         i++;
     }
-    ggml_dsp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
+    ggml_htp_cache_flush_range_nosync(cur_base, (size_t)(cur_end - (uintptr_t)cur_base));
     /* Single syncht covers all merged-region flushes above. AP reads
      * following this point see consistent DRAM. */
     __asm__ __volatile__("syncht\n" ::: "memory");
@@ -496,7 +496,7 @@ static inline void bulk_flush_all(void) {
 #if HEX_OP_PROF
 static inline void prof_cache_inval_range(void * p, size_t len, int is_weight) {
     const int64_t t0 = ggml_time_us();
-    ggml_dsp_cache_inval_range(p, len);
+    ggml_htp_cache_inval_range(p, len);
     const uint64_t dt = (uint64_t)(ggml_time_us() - t0);
     if (is_weight) {
         g_dsp_ctx->nonop_w_inval_us += dt;
@@ -507,7 +507,7 @@ static inline void prof_cache_inval_range(void * p, size_t len, int is_weight) {
     }
 }
 #else
-#define prof_cache_inval_range(p, len, is_weight) ggml_dsp_cache_inval_range((p), (len))
+#define prof_cache_inval_range(p, len, is_weight) ggml_htp_cache_inval_range((p), (len))
 #endif // HEX_OP_PROF
 
 // =================================================================================================
@@ -1264,12 +1264,12 @@ mm_finalize:
 // =================================================================================================
 // IDL implementation
 // =================================================================================================
-int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
+int ggml_htp_open(const char * uri, remote_handle64 * handle) {
     struct dsp_context * ctx = NULL;
 
     // Guard against double initialization
     if (g_dsp_ctx != NULL) {
-        GGMLHEXAGON_LOG_ERROR("ggml_dsp_open: g_dsp_ctx already initialized");
+        GGMLHEXAGON_LOG_ERROR("ggml_htp_open: g_dsp_ctx already initialized");
         return AEE_EITEMBUSY;
     }
 
@@ -1328,7 +1328,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
 #endif
     // Default to 0: no DSP-side cache optimizations beyond the baseline
     // first-touch weight tracking. AP will push the configured bitmask via
-    // execute_batch(0xFFFC) right after ggml_dsp_open returns. Until then,
+    // execute_batch(0xFFFC) right after ggml_htp_open returns. Until then,
     // every code path that consults dsp_cache_mode sees 0 and behaves like
     // baseline 29c1cf196.
     ctx->dsp_cache_mode = 0;
@@ -1447,7 +1447,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     /* Step 4: Create async HMX queue for pipeline overlap (DMA/HVX/HMX).
      * New Qualcomm API (b2dd28a3b) requires a pre-allocated backing buffer;
      * we memalign it here and track it in dsp_context.hmx_queue_buf for
-     * cleanup in ggml_dsp_close. Capacity/stack_size match main.c defaults. */
+     * cleanup in ggml_htp_close. Capacity/stack_size match main.c defaults. */
     if (ctx->hmx_available && ctx->compute_res_ctx_id != 0) {
         if (ctx->hmx_queue != NULL) {
             GGMLHEXAGON_LOG_INFO("hmx_queue already exists, deleting old one\n");
@@ -1522,7 +1522,7 @@ int ggml_dsp_open(const char * uri, remote_handle64 * handle) {
     return 0;
 }
 
-int ggml_dsp_close(remote_handle64 handle) {
+int ggml_htp_close(remote_handle64 handle) {
     struct dsp_context * ctx = (struct dsp_context *)handle;
     if (!ctx) return 0;
     g_dsp_ctx = ctx;
@@ -1576,7 +1576,7 @@ int ggml_dsp_close(remote_handle64 handle) {
     }
 
     /* VTCM: release once at session end (matches the pattern, see
-     * ggml_dsp_open). The release callback is still registered and will
+     * ggml_htp_open). The release callback is still registered and will
      * set vtcm_needs_release=1 if another session preempts during the
      * session, but we intentionally ignore it here so that VTCM stays
      * cached for the full session. */
@@ -1599,7 +1599,7 @@ int ggml_dsp_close(remote_handle64 handle) {
     return 0;
 }
 
-AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requested_thread_counts, int32 * actual_thread_counts) {
+AEEResult ggml_htp_setclocks(remote_handle64 handle, int32 diag_info, int32 requested_thread_counts, int32 * actual_thread_counts) {
     g_dsp_ctx = (struct dsp_context *)handle;
     if (!g_dsp_ctx) return AEE_EBADPARM;
     /* Reserve 2 hw thread slots: one for the hmx_queue thread, one for
@@ -1632,10 +1632,10 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
     // Shares our already-acquired VTCM and HMX queue.
     // New Qualcomm API (b2dd28a3b) requires pre-allocated backing buffers for
     // work_queue and dma queues; we memalign them here and track the pointers
-    // in dsp_context for cleanup in ggml_dsp_close.
+    // in dsp_context for cleanup in ggml_htp_close.
     if (g_dsp_ctx->thread_counts >= 1) {
         // Free previously allocated htp_ctx resources before memset,
-        // in case ggml_dsp_setclocks is called more than once.
+        // in case ggml_htp_setclocks is called more than once.
         if (g_dsp_ctx->htp_ctx->work_queue) {
             work_queue_free(g_dsp_ctx->htp_ctx->work_queue);
             g_dsp_ctx->htp_ctx->work_queue = NULL;
@@ -1780,7 +1780,7 @@ AEEResult ggml_dsp_setclocks(remote_handle64 handle, int32 diag_info, int32 requ
     return AEE_SUCCESS;
 }
 
-AEEResult ggml_dsp_register_rpcmem(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
+AEEResult ggml_htp_register_rpcmem(remote_handle64 h, uint32_t ion_fd, uint32_t size_lo, uint32_t size_hi) {
     g_dsp_ctx = (struct dsp_context *)h;
     if (!g_dsp_ctx) return AEE_EBADPARM;
     int32_t fd = (int32_t)ion_fd;
@@ -1840,7 +1840,7 @@ static void dsp_queues_suspend(void) {
 /*
  * ION-based op-batch execution: FastRPC only passes 2 scalars (offset, size) - all data is in the mempool.
  */
-AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
+AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
     g_dsp_ctx = (struct dsp_context *)h;
     if (!g_dsp_ctx) return AEE_EBADPARM;
     if (g_dsp_ctx->mempool_dsp_base == NULL) {
@@ -1911,7 +1911,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
 #if HEX_OP_PROF
     const int64_t prof_hdr_t0 = ggml_time_us();
 #endif
-    ggml_dsp_cache_inval_range((void *)(base + batch_offset), batch_size);
+    ggml_htp_cache_inval_range((void *)(base + batch_offset), batch_size);
 #if HEX_OP_PROF
     g_dsp_ctx->nonop_hdr_inval_us += (uint64_t)(ggml_time_us() - prof_hdr_t0);
 #endif
@@ -1977,9 +1977,9 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
     }
 
-    /* VTCM is acquired once in ggml_dsp_open and held for the whole
+    /* VTCM is acquired once in ggml_htp_open and held for the whole
      * session (matches htp/main.c htp_packet_callback pattern). Per-batch
-     * acquire/release removed: see dsp_vtcm_acquire in ggml_dsp_open. */
+     * acquire/release removed: see dsp_vtcm_acquire in ggml_htp_open. */
 
     GGMLHEXAGON_LOG_DEBUG("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
@@ -2233,7 +2233,7 @@ AEEResult ggml_dsp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                     bulk_flush_add(g_dsp_ctx->dst_dt_buf[k].data, g_dsp_ctx->dst_dt_buf[k].data_len);
                 }
             } else {
-                ggml_dsp_cache_flush_range(g_dsp_ctx->dst_dt_buf[k].data, g_dsp_ctx->dst_dt_buf[k].data_len);
+                ggml_htp_cache_flush_range(g_dsp_ctx->dst_dt_buf[k].data, g_dsp_ctx->dst_dt_buf[k].data_len);
             }
             /* Mark dst tensor as dirty: next time it's used as src, it must be re-invalidated. */
             g_dsp_ctx->batch_tensor_needs_inval[op->dst_idx[k]] = 1;
