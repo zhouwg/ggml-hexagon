@@ -30,26 +30,26 @@ set(TARGET_NAME ggml-hexagon)
 set(GGML_HEXAGON_HTP_CERT  "$ENV{HEXAGON_HTP_CERT}" CACHE PATH "ggml-hexagon: enable HTP library signing using certificate")
 
 if (GGML_HEXAGON_USE_MEMPOOL)
-    add_library(ggml_dsp OBJECT
-        ${CMAKE_CURRENT_BINARY_DIR}/ggml_dsp_stub.c)
+    add_library(ggml_htp OBJECT
+        ${CMAKE_CURRENT_BINARY_DIR}/ggml_htp_stub.c)
 
-    set_target_properties(ggml_dsp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(ggml_htp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-    target_include_directories(ggml_dsp PUBLIC
+    target_include_directories(ggml_htp PUBLIC
         ${HEXAGON_SDK_ROOT}/incs
         ${HEXAGON_SDK_ROOT}/incs/stddef
         ${HEXAGON_SDK_ROOT}/utils/examples
         ${CMAKE_CURRENT_SOURCE_DIR}/htp
         ${CMAKE_CURRENT_BINARY_DIR})
 
-    build_idl(htp/ggml_dsp.idl ggml_dsp)
+    build_idl(htp/ggml_htp.idl ggml_htp)
 
     if (CMAKE_SYSTEM_NAME MATCHES Android)
-        target_link_options(ggml_dsp PUBLIC -llog -ldl)
+        target_link_options(ggml_htp PUBLIC -llog -ldl)
     elseif (CMAKE_SYSTEM_NAME MATCHES Windows)
-        target_precompile_headers(ggml_dsp PUBLIC <sal.h>)
+        target_precompile_headers(ggml_htp PUBLIC <sal.h>)
     else()
-        target_link_options(ggml_dsp PUBLIC -ldl)
+        target_link_options(ggml_htp PUBLIC -ldl)
     endif()
 
     ggml_add_backend_library(${TARGET_NAME}
@@ -65,7 +65,7 @@ if (GGML_HEXAGON_USE_MEMPOOL)
         ${CMAKE_CURRENT_SOURCE_DIR}/htp
         ${CMAKE_CURRENT_BINARY_DIR})
 
-    target_link_libraries(${TARGET_NAME} PRIVATE ggml_dsp)
+    target_link_libraries(${TARGET_NAME} PRIVATE ggml_htp)
     target_include_directories(${TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/htp ${CMAKE_CURRENT_BINARY_DIR})
 
     # Build HTP skels
