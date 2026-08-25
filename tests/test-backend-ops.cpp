@@ -143,6 +143,91 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
     }
 }
 
+// Some backends (e.g. Hexagon/HTP, and the CPU repack path) keep quantized
+// weights and BF16 weights in a tiled/repacked layout that must live in a
+// dedicated "repack" buffer type. When such weights are allocated in the default
+// buffer the kernels read the canonical layout as if it were tiled, producing
+// NaN/garbage. Route these weight tensors into the device's repack buffer type
+// (exposed via ggml_backend_dev_get_extra_bufts) so ggml_backend_tensor_set
+// tiles them correctly.
+//
+// This is backend-agnostic: it triggers for any backend that exposes an extra
+// (repack) buffer type and is the same mechanism production uses to load
+// repacked weights. Backends without an extra buffer type fall back to
+// ggml_backend_alloc_ctx_tensors and behave exactly as before.
+static bool is_repack_weight_type(enum ggml_type type) {
+    return ggml_is_quantized(type) || type == GGML_TYPE_BF16;
+}
+
+static ggml_backend_buffer_t alloc_tensor_group_in_buft(ggml_backend_buffer_type_t buft, std::vector<ggml_tensor *> & ts) {
+    if (ts.empty()) {
+        return nullptr;
+    }
+    const size_t alignment = ggml_backend_buft_get_alignment(buft);
+    size_t total = 0;
+    for (ggml_tensor * t : ts) {
+        total += GGML_PAD(ggml_backend_buft_get_alloc_size(buft, t), alignment);
+    }
+    ggml_backend_buffer_t buf = ggml_backend_buft_alloc_buffer(buft, total);
+    if (buf == nullptr) {
+        return nullptr;
+    }
+    size_t cur = 0;
+    for (ggml_tensor * t : ts) {
+        const size_t s = GGML_PAD(ggml_backend_buft_get_alloc_size(buft, t), alignment);
+        ggml_backend_tensor_alloc(buf, t, (char *)ggml_backend_buffer_get_base(buf) + cur);
+        cur += s;
+    }
+    return buf;
+}
+
+// Allocate ctx tensors, placing repack-capable weight tensors into the device's
+// repack buffer type when one is exposed. Returns the default buffer (may be
+// NULL if every tensor went to the repack buffer); any repack buffer is appended
+// to out_repack so the caller keeps it alive for the duration of the test.
+// Backends without an extra buffer type fall back to ggml_backend_alloc_ctx_tensors.
+static ggml_backend_buffer_ptr alloc_ctx_tensors_with_repack(ggml_context * ctx, ggml_backend_t backend,
+                                                        std::vector<ggml_backend_buffer_ptr> & out_repack) {
+    ggml_backend_buffer_type_t repack_buft = nullptr;
+    ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+    ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+    if (reg) {
+        auto get_extra = (ggml_backend_dev_get_extra_bufts_t)
+            ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_get_extra_bufts");
+        if (get_extra) {
+            ggml_backend_buffer_type_t * bufts = get_extra(dev);
+            for (int i = 0; bufts && bufts[i]; ++i) {
+                repack_buft = bufts[i];
+                break;
+            }
+        }
+    }
+
+    if (repack_buft == nullptr) {
+        return ggml_backend_buffer_ptr(ggml_backend_alloc_ctx_tensors(ctx, backend));
+    }
+
+    ggml_backend_buffer_type_t default_buft = ggml_backend_get_default_buffer_type(backend);
+
+    std::vector<ggml_tensor *> repack_ts;
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+        if (t->data == NULL && t->view_src == NULL && is_repack_weight_type(t->type)) {
+            repack_ts.push_back(t);
+        }
+    }
+
+    // If repack allocation fails (e.g. the backend's repack buffer cannot hold a
+    // given type), leave those tensors unallocated so the default allocation
+    // below transparently places them in the default buffer.
+    ggml_backend_buffer_t b_repack  = alloc_tensor_group_in_buft(repack_buft, repack_ts);
+    ggml_backend_buffer_t b_default = ggml_backend_alloc_ctx_tensors_from_buft(ctx, default_buft);
+
+    if (b_repack) {
+        out_repack.emplace_back(b_repack);
+    }
+    return ggml_backend_buffer_ptr(b_default);
+}
+
 // generate an F16 mask where certain blocks are randomly masked with -INF value
 static void init_tensor_kq_mask(ggml_tensor * tensor, float min = -1.0f, float max = 1.0f) {
     GGML_ASSERT(tensor->type == GGML_TYPE_F16);
@@ -1228,6 +1313,11 @@ struct test_case {
 
     std::vector<ggml_tensor *> sentinels;
 
+    // Repack buffers returned by alloc_ctx_tensors_with_repack; kept alive for
+    // the duration of the test so repacked weights stay tiled on backends that
+    // require a dedicated repack buffer type.
+    std::vector<ggml_backend_buffer_ptr> repack_bufs_;
+
     std::string current_op_name;
     bool contains_f16 = false;
 
@@ -1380,19 +1470,22 @@ struct test_case {
         }
 
         ggml_backend_buffer_ptr buf_weights(nullptr);
+        repack_bufs_.clear();
         if (ctx_weights) {
-            buf_weights.reset(ggml_backend_alloc_ctx_tensors(ctx_weights.get(), backend1));
-            if (buf_weights == NULL) {
+            buf_weights = alloc_ctx_tensors_with_repack(ctx_weights.get(), backend1, repack_bufs_);
+            if (buf_weights == NULL && repack_bufs_.empty()) {
                 printf("failed to allocate weight tensors [%s] ", ggml_backend_name(backend1));
                 return test_status_t::FAIL;
             }
-            ggml_backend_buffer_set_usage(buf_weights.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            if (buf_weights != NULL) {
+                ggml_backend_buffer_set_usage(buf_weights.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            }
         }
 
         // allocate
-        ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend1));
+        ggml_backend_buffer_ptr buf = alloc_ctx_tensors_with_repack(ctx.get(), backend1, repack_bufs_);
 
-        if (buf == NULL) {
+        if (buf == NULL && repack_bufs_.empty()) {
             printf("failed to allocate tensors [%s] ", ggml_backend_name(backend1));
             return test_status_t::FAIL;
         }
@@ -1540,19 +1633,22 @@ struct test_case {
         }
 
         ggml_backend_buffer_ptr buf_weights(nullptr);
+        repack_bufs_.clear();
         if (ctx_weights) {
-            buf_weights.reset(ggml_backend_alloc_ctx_tensors(ctx_weights.get(), backend));
-            if (buf_weights == NULL) {
+            buf_weights = alloc_ctx_tensors_with_repack(ctx_weights.get(), backend, repack_bufs_);
+            if (buf_weights == NULL && repack_bufs_.empty()) {
                 printf("failed to allocate weight tensors\n");
                 return false;
             }
-            ggml_backend_buffer_set_usage(buf_weights.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            if (buf_weights != NULL) {
+                ggml_backend_buffer_set_usage(buf_weights.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            }
         }
 
         // allocate
-        ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend)); // smart ptr
+        ggml_backend_buffer_ptr buf = alloc_ctx_tensors_with_repack(ctx.get(), backend, repack_bufs_);
 
-        if (buf == NULL) {
+        if (buf == NULL && repack_bufs_.empty()) {
             printf("failed to allocate tensors\n");
             return false;
         }
@@ -1800,8 +1896,9 @@ struct test_case {
         }
 
         // allocate
-        ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend)); // smart ptr
-        if (buf == NULL) {
+        repack_bufs_.clear();
+        ggml_backend_buffer_ptr buf = alloc_ctx_tensors_with_repack(ctx.get(), backend, repack_bufs_); // smart ptr
+        if (buf == NULL && repack_bufs_.empty()) {
             test_operation_info info(op_desc(out), vars(), ggml_backend_name(backend));
             info.set_error("allocation", "");
             output_printer->print_operation(info);
@@ -4492,6 +4589,18 @@ struct test_mul_mat : public test_case {
         // for blackwell we quantize activations to mxfp4 instead of q8_1 so we add higher tolerance
         if ((type_a == GGML_TYPE_MXFP4 || type_a == GGML_TYPE_NVFP4) && backend_has_feature(backend, "BLACKWELL_NATIVE_FP4")) {
             return 2e-2;
+        }
+        // Hexagon HTP requantizes K-quant weights (Q5_K/Q6_K) to Q4_0 tiled
+        // layout for the NPU.  The test's CPU reference path reads back via
+        // get_tensor which does tiled-Q4_0 -> f32 -> Q5_K/Q6_K (lossy), then
+        // CPU dequants that K-quant.  This extra Q4_0 <-> K-quant round-trip
+        // adds double-quantization noise that shows up as slightly elevated NMSE
+        // for small-n cases.  Bump tolerance to accommodate.
+        if ((type_a == GGML_TYPE_Q5_K || type_a == GGML_TYPE_Q6_K)) {
+            ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
+            if (strcmp(ggml_backend_reg_name(reg), "HTP") == 0) {
+                return 1e-3;
+            }
         }
         return max_nmse_err();
     }
