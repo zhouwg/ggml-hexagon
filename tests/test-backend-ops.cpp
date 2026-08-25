@@ -209,6 +209,17 @@ static ggml_backend_buffer_ptr alloc_ctx_tensors_with_repack(ggml_context * ctx,
 
     ggml_backend_buffer_type_t default_buft = ggml_backend_get_default_buffer_type(backend);
 
+    // When the default buft and repack buft use different alloc_buffer functions,
+    // they create separate ION buffers (separate FDs). The dspqueue backend
+    // (ggml-hexagon.cpp) cannot handle multiple ION FDs in a single DSP batch,
+    // causing dspqueue_read failures. Fall back to default allocation in that case.
+    const char * default_buft_name = ggml_backend_buft_name(default_buft);
+    if (strncmp(default_buft_name, "hexagon-ion-buffer", 18) != 0) {
+        // dspqueue backend: set_tensor always tiles unconditionally,
+        // and creating a separate ION buffer for repack causes DSP crash.
+        return ggml_backend_buffer_ptr(ggml_backend_alloc_ctx_tensors(ctx, backend));
+    }
+
     std::vector<ggml_tensor *> repack_ts;
     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
         if (t->data == NULL && t->view_src == NULL && is_repack_weight_type(t->type)) {

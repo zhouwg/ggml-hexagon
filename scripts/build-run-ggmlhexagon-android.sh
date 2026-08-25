@@ -126,7 +126,7 @@ function dump_vars()
 
 function show_pwd()
 {
-    echo -e "current working path:$(pwd)\n"
+    echo -e "current working path:$(pwd)\n" > /dev/null
 }
 
 
@@ -135,8 +135,7 @@ function check_command_in_host()
     set +e
     cmd=$1
     if command -v ${cmd} > /dev/null 2>&1; then
-        printf "${cmd} is available on host machine\n"
-        echo ""
+        printf "${cmd} is available on host machine\n" > /dev/null 2>&1
     else
         printf "${cmd} not exist on host machine, pls install command line utility ${cmd} firstly and accordingly\n"
         exit 1
@@ -237,7 +236,7 @@ function check_and_download_hexagon_sdk()
         echo -e "HEXAGON_SDK_PATH ${HEXAGON_SDK_PATH} not exist, pls install it accordingly...\n"
         exit 0
     else
-        printf "Qualcomm Hexagon SDK already exist:${HEXAGON_SDK_PATH} \n\n"
+        printf "Qualcomm Hexagon SDK already exist:${HEXAGON_SDK_PATH} \n\n" > /dev/null
     fi
 }
 
@@ -300,7 +299,7 @@ function check_and_download_opencl_sdk()
 
         cd ${PROJECT_ROOT_PATH}
     else
-        printf "OpenCL SDK already exist:    ${OPENCL_SDK_PATH} \n\n"
+        printf "OpenCL SDK already exist:    ${OPENCL_SDK_PATH} \n\n" > /dev/null
     fi
 }
 
@@ -334,7 +333,7 @@ function check_and_download_ndk()
 
         printf "Android NDK saved to ${ANDROID_NDK} \n\n"
     else
-        printf "Android NDK already exist:         ${ANDROID_NDK} \n\n"
+        printf "Android NDK already exist:         ${ANDROID_NDK} \n\n" > /dev/null
     fi
 }
 
@@ -537,7 +536,7 @@ function remove_temp_dir()
 function update_cfg()
 {
     if [ -f ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ]; then
-        adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/
+        adb push ${PROJECT_ROOT_PATH}/scripts/ggml-hexagon.cfg ${REMOTE_PATH}/ > /dev/null 2>&1
     fi
 }
 
@@ -619,9 +618,9 @@ function check_and_download_model()
     model_name=$1
     model_url=$2
 
-    adb shell ls /sdcard/${model_name}
+    adb shell ls /sdcard/${model_name} > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        printf "the prebuild LLM model ${model_name} already exist on Android phone\n"
+        printf "the prebuild LLM model ${model_name} already exist on Android phone\n" > /dev/null
     else
         printf "the prebuild LLM model ${model_name} not exist on Android phone\n"
         printf "downloading from ${model_url}\n"

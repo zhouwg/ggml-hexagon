@@ -103,7 +103,6 @@ function check_commands_in_host()
 {
     check_command_in_host wget
     check_command_in_host xzcat
-    check_command_in_host adb
     check_command_in_host md5sum
     check_command_in_host ninja
 }
