@@ -51,7 +51,7 @@ if (GGML_HEXAGON_USE_MEMPOOL)
 
     add_library(${HTP_LIB} SHARED
         entry.c
-        ${CMAKE_CURRENT_BINARY_DIR}/ggml_dsp_skel.c
+        ${CMAKE_CURRENT_BINARY_DIR}/ggml_htp_skel.c
         ${HTP_OPS_SRCS}
     )
 
@@ -63,7 +63,7 @@ if (GGML_HEXAGON_USE_MEMPOOL)
 
     target_compile_options(${HTP_LIB} PRIVATE -Wno-error)
 
-    build_idl(ggml_dsp.idl ${HTP_LIB})
+    build_idl(ggml_htp.idl ${HTP_LIB})
 
     set_target_properties(${HTP_LIB} PROPERTIES EXPORT_COMPILE_COMMANDS ON)
 
