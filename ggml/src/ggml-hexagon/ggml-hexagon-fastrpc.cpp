@@ -75,22 +75,11 @@
 // =================================================================================================
 //  section-1: forward declarations, global vars, macros
 // =================================================================================================
-#ifndef PROJECT_NAME
-#define PROJECT_NAME                                    "ggml-hexagon"
-#endif
-
 #define GGML_HEXAGON_MAX_DEVICES                        16
-#define GGML_HEXAGON_BACKEND_NAME                       "hexagon"
 
-#define GGML_HTP_IDL_VERSION                            "0.0.2"
+
 
 #define SIZE_IN_MB                                      (1 << 20)
-
-#define GGMLHEXAGON_MAX_OPS_PER_TASK                    16
-
-#define GGMLHEXAGON_MAX_TENSORS_PER_TASK                32
-
-#define DMA_BUF_IOCTL_SYNC_IOCTL                        0x40086200u
 
 #if !defined (_WIN32)
 #pragma weak remote_system_request
@@ -497,7 +486,7 @@ void ggmlhexagon_log_internal(int level, const char * file, const char * func, i
         int len = vsnprintf(s_ggmlhexagon_log_internal_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len >= 0 && len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
-            __android_log_print(ANDROID_LOG_INFO, PROJECT_NAME, "%s\n", s_ggmlhexagon_log_internal_buf);
+            __android_log_print(ANDROID_LOG_INFO, "ggml-hexagon", "%s\n", s_ggmlhexagon_log_internal_buf);
             if (GGML_LOG_LEVEL_INFO == level || GGML_LOG_LEVEL_CONT == level) {
                 printf("%s\n", s_ggmlhexagon_log_internal_buf);
             }
@@ -534,7 +523,7 @@ void ggmlhexagon_log_always_internal(int level, const char * file, const char * 
         int len = vsnprintf(s_log_buf + len_prefix, GGMLHEXAGON_LOGBUF_LEN - len_prefix, format, args);
         if (len >= 0 && len < (GGMLHEXAGON_LOGBUF_LEN - len_prefix)) {
 #if (defined __ANDROID__) || (defined ANDROID)
-            __android_log_print(ANDROID_LOG_INFO, PROJECT_NAME, "%s\n", s_log_buf);
+            __android_log_print(ANDROID_LOG_INFO, "ggml-hexagon", "%s\n", s_log_buf);
             if (GGML_LOG_LEVEL_ERROR == level || GGML_LOG_LEVEL_CONT == level) {
                 printf("%s\n", s_log_buf);
             }

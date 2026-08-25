@@ -12,6 +12,8 @@
 extern "C" {
 #endif
 
+#define GGML_HTP_IDL_VERSION           "0.0.2"
+
 /* Op-level profiling is disabled by default
  * Compile with -DHEX_OP_PROF=1 to enable */
 #ifndef HEX_OP_PROF
