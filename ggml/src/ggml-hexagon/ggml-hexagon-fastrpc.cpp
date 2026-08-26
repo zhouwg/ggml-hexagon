@@ -77,8 +77,6 @@
 // =================================================================================================
 #define GGML_HEXAGON_MAX_DEVICES                        16
 
-
-
 #define SIZE_IN_MB                                      (1 << 20)
 
 #if !defined (_WIN32)
@@ -383,7 +381,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7.6"},
+        .version                = {"0.99.7.7"},
 };
 
 //supported Snapdragon devices
@@ -879,7 +877,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.6");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.7");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
