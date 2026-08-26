@@ -132,9 +132,9 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
   https://github.com/zhouwg/ggml-hexagon/tree/master, track [upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/).
 
 - self-build-jz
-  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, Qualcomm's ggml-hexagon & jz(jeff zhou)'s ggml-hexagon can be found in this branch.
+  https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, FastRPC-based ggml-hexagon & upstream dspqueue-based ggml-hexagon can be found in this branch.
 
-## Why jz's ggml-hexagon backend is still meaningful?
+## Why FastRPC-based ggml-hexagon backend is still meaningful?
 - The implementation of the prebuilt `libggmldsp-skel.so` is complicated&dirty: last year I built a closed-source version by porting a full ggml-core to Qualcomm's DSP/NPU side (supporting fully quantized & non-quantized mulmat op, theoretically supporting all ggml ops). The open-source code of `libggmldsp-skel.so` can now be found in JZ's ggml-hexagon at [`ggml/src/ggml-hexagon/htp/`](ggml/src/ggml-hexagon/htp/) - including the FastRPC entry point ([`entry.c`](ggml/src/ggml-hexagon/htp/entry.c)) and session context ([`dsp-ctx.h`](ggml/src/ggml-hexagon/htp/dsp-ctx.h)).
 - [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
 - Qualcomm's official ggml-hexagon backend uses a Qualcomm dedicated technology dspqueue to exchange data between ARM AP side and DSP(cDSP or HTP or NPU, these are different names for the same thing in Qualcomm's tech world) side. we know that <b>the so-called async dspqueue framework is a highlevel wrapper of the native FastRPC mechanism</b> and LLM inference is essentially synchronous and ION share memory is a same DDR region which can be "seen" by OS in AP side and OS in NPU side at the same time, so we can <b>implement a concise&efficient solution for purose of offload multiple op(or a fully single cgraph) to Hexagon NPU based on the native/pure FastRPC mechanism</b>, this concise solution will also reduce FastRPC overhead observably.
@@ -142,14 +142,14 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 - AI large model company can use the self-build-jz branch for real testing instead of just running benchmarks if any AI large model company thinks their AI model is really good.
 
 
-## How to build the jz's ggml-hexagon backend for Snapdragon-based Android device
+## How to build the FastRPC-based ggml-hexagon backend for Snapdragon-based Android device
 
 Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)
 
-## How to do performance comparison of PP and TG between Qualcomm's ggml-hexagon and JZ's ggml-hexagon
+## How to do performance comparison of PP and TG between dspqueue-based ggml-hexagon and FastRPC-based ggml-hexagon
 
 Pls refer to [about ggml-hexagon](https://github.com/zhouwg/ggml-hexagon/discussions/18)
 
-## RFC 26227: Introduce JZ's ggml-hexagon
+## PR in upstream
 
-Pls refer to [RFC 26227: Introduce JZ's ggml-hexagon](https://github.com/ggml-org/llama.cpp/discussions/26227)
+Pls refer to [PR-27642](https://github.com/ggml-org/llama.cpp/pull/27642)
