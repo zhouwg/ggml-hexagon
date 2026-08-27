@@ -334,15 +334,22 @@ struct ggml_backend_hexagon_context {
 
     static constexpr size_t CGRAPH_CACHE_MAX = 1024;  // bound distinct cached graphs
 
-    // Phase 6: track mempool offsets for repacked quantized weights (replaces
-    // function-static g_tiled_ion_offsets / s_warned_non_repack that leaked across model reloads)
-    std::unordered_map<const void *, uint32_t> tiled_ion_offsets;
+    // Phase 6: track mempool offsets for repacked quantized weights
+    std::unordered_map<const void *, uint32_t> tiled_pool_offsets;
     std::unordered_set<const void *> warned_non_repack;
 
     // QKV fusion: one-shot warning state moved from function-static to ctx member
     bool warned_qkv_name;
 
     uint64_t set_tensor_call_count;
+
+    // Fence slot layout constants for cross-device allreduce.
+    // Reserved for future DSP-side allreduce: when enabled, each CDSP
+    // will execute an allreduce kernel synchronized via shared-memory
+    // fence slots at these offsets within each device's mempool.
+    // Currently unused because the AP-side allreduce path is used instead.
+    static constexpr size_t FENCE_SLOT_SIZE  = 128;
+    static constexpr size_t FENCE_SLOTS_MAX  = GGML_HEXAGON_MAX_DEVICES;
 
     ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev);
     ~ggml_backend_hexagon_context();
@@ -4903,7 +4910,7 @@ static void ggml_backend_hexagon_buffer_free_buffer(ggml_backend_buffer_t buffer
         bctx->cgraph_cache.clear();
         bctx->mm_params_cache.clear();
         bctx->ever_dst_ptrs.clear();
-        bctx->tiled_ion_offsets.clear();
+        bctx->tiled_pool_offsets.clear();
         bctx->warned_non_repack.clear();
         bctx->warned_qkv_name = false;
         bctx->set_tensor_call_count = 0;
@@ -5058,9 +5065,9 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_
     if (buffer_ctx->is_ion_buffer) {
         const char * mem_type = "heap";
         const char * data_ptr = (const char *)buffer_ctx->buffer;
-        const char * ion_base = (const char *)ctx->rpc_mempool;
-        const char * ion_end  = ion_base + ctx->rpc_mempool_len;
-        if (data_ptr >= ion_base && data_ptr < ion_end) {
+        const char * pool_base = (const char *)ctx->rpc_mempool;
+        const char * pool_end  = pool_base + ctx->rpc_mempool_len;
+        if (data_ptr >= pool_base && data_ptr < pool_end) {
             mem_type = "mempool";
         }
         GGMLHEXAGON_LOG_ALWAYS("[ALLOC] device=%d LEAVE size=%zu (%.2f MiB) -> %s, pool_used=%zu/%zu (%.2f%%)",
@@ -5211,8 +5218,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     int64_t gap_from_prev               = ctx->last_graph_end_us ? (begin_time - ctx->last_graph_end_us) : 0;
     (void)gap_from_prev; // used only in GGMLHEXAGON_LOG_DEBUG
     uint32_t graph_n_nodes              = (uint32_t)cgraph->n_nodes;
-    const char * ion_base               = (const char *)ctx->rpc_mempool;
-    const size_t ion_size               = ctx->rpc_mempool_len;
+    const char * pool_base              = (const char *)ctx->rpc_mempool;
+    const size_t pool_size              = ctx->rpc_mempool_len;
     size_t saved_mempool_usage          = ctx->rpc_mempool_usage;
     uint32_t n_tensors                  = 0;
     uint32_t n_ops                      = 0;
@@ -5828,7 +5835,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         if (!t->data) continue;
 
         const char * data_ptr = (const char *)t->data;
-        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+        if (data_ptr >= pool_base && data_ptr < pool_base + (ptrdiff_t)pool_size) {
             continue;  // already in mempool
         }
 
@@ -5855,7 +5862,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     // Step 2: Allocate mirrors for each unique data pointer
-    size_t data_limit = ion_size;
+    size_t data_limit = pool_size;
     for (auto & kv : buffer_mirrors_map) {
         void * data_ptr = kv.first;
         buffer_mirror_info & info = kv.second;
@@ -5900,7 +5907,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         if (!t->data) continue;
 
         const char * data_ptr = (const char *)t->data;
-        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+        if (data_ptr >= pool_base && data_ptr < pool_base + (ptrdiff_t)pool_size) {
             continue;  // already in mempool
         }
 
@@ -5931,7 +5938,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // NO repack work here.
         //
         // The only thing Phase 6 still needs to do is record the mempool offset
-        // of each pool-resident repacked weight in tiled_ion_offsets so Phase 8
+        // of each pool-resident repacked weight in tiled_pool_offsets so Phase 8
         // can build the NPU descriptor with the correct data_offset. Only stable
         // (in-mempool) offsets are cached; see the recording site below. Any
         // quantized weight that somehow lives outside the repack buft is logged
@@ -5956,7 +5963,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 }
             }
 
-            if (ctx->tiled_ion_offsets.find(t->data) != ctx->tiled_ion_offsets.end()) {
+            if (ctx->tiled_pool_offsets.find(t->data) != ctx->tiled_pool_offsets.end()) {
                 continue;  // already recorded on a prior graph_compute call
             }
 
@@ -5966,8 +5973,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             // unrelated pool data. Phase 8 then leaves such tensors on the
             // generic descriptor path with the fresh mirror offset.
             const char * dp = (const char *)t->data;
-            if (dp >= ion_base && dp < ion_base + (ptrdiff_t)ion_size) {
-                ctx->tiled_ion_offsets[t->data] = (uint32_t)(dp - ion_base);
+            if (dp >= pool_base && dp < pool_base + (ptrdiff_t)pool_size) {
+                ctx->tiled_pool_offsets[t->data] = (uint32_t)(dp - pool_base);
             }
         }
     }
@@ -6035,9 +6042,9 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         td->data_len = (uint32_t)ggml_nbytes(t);
 
         const char * data_ptr = (const char *)t->data;
-        if (data_ptr >= ion_base && data_ptr < ion_base + (ptrdiff_t)ion_size) {
+        if (data_ptr >= pool_base && data_ptr < pool_base + (ptrdiff_t)pool_size) {
             // mempool tensor: direct offset
-            td->data_offset = (uint32_t)(data_ptr - ion_base);
+            td->data_offset = (uint32_t)(data_ptr - pool_base);
             td->flags = is_weight[i] ? 2 : 0;  // 2=weight (skip NPU first-touch invalidation)
         } else {
             // heap tensor: look up mempool offset
@@ -6063,8 +6070,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // (repack done in set_tensor during model loading via repack buffer type)
         bool is_quant_weight = is_weight[i] && t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16;
         if (is_quant_weight) {
-            auto it = ctx->tiled_ion_offsets.find(t->data);
-            if (it != ctx->tiled_ion_offsets.end()) {
+            auto it = ctx->tiled_pool_offsets.find(t->data);
+            if (it != ctx->tiled_pool_offsets.end()) {
                 const int32_t ne0_p = (int32_t)hex_round_up((uint32_t)t->ne[0], 32);
                 const int32_t ne1_p = (int32_t)hex_round_up((uint32_t)t->ne[1], 32);
                 td->ne[0] = ne0_p;
@@ -6096,7 +6103,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     ctx->rpc_batch_call_count++;
 
     // If a model was unloaded since last batch, reset NPU first-touch weight
-    // tracking so new weights at reused ION addresses get properly invalidated.
+    // tracking so new weights at reused mempool addresses get properly invalidated.
     if (ctx->dsp_need_weight_inval_reset) {
         const uint32_t mode_bits  = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0xFu;
         const uint32_t trace_bit0 = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
@@ -6706,6 +6713,126 @@ static ggml_backend_dev_t ggml_backend_hexagon_reg_get_device(ggml_backend_reg_t
     return ctx->devices[index];
 }
 
+// ** communication context for tensor-split allreduce
+
+struct ggml_backend_hexagon_comm_context {
+    std::vector<ggml_backend_t> backends;
+    size_t                      n_backends = 0;
+};
+
+static void * ggml_backend_hexagon_comm_init(ggml_backend_t * backends, size_t n_backends) {
+    if (n_backends < 2 || n_backends > GGML_HEXAGON_MAX_DEVICES) {
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < n_backends; ++i) {
+        if (!ggml_backend_is_hexagon(backends[i])) {
+            return nullptr;
+        }
+    }
+
+    auto * ctx = new ggml_backend_hexagon_comm_context();
+    ctx->backends.assign(backends, backends + n_backends);
+    ctx->n_backends = n_backends;
+
+    GGMLHEXAGON_LOG_ALWAYS("comm_init: %zu backends", n_backends);
+    return ctx;
+}
+
+static void ggml_backend_hexagon_comm_free(void * comm_ctx_v) {
+    if (!comm_ctx_v) return;
+    auto * ctx = static_cast<ggml_backend_hexagon_comm_context *>(comm_ctx_v);
+    GGMLHEXAGON_LOG_ALWAYS("comm_free: %zu backends", ctx->n_backends);
+    delete ctx;
+}
+
+static bool ggml_backend_hexagon_comm_allreduce_tensor(void * comm_ctx_v, struct ggml_tensor ** tensors) {
+    if (!comm_ctx_v) return false;
+    auto * comm_ctx = static_cast<ggml_backend_hexagon_comm_context *>(comm_ctx_v);
+    const size_t n_backends = comm_ctx->n_backends;
+
+    if (n_backends < 2 || n_backends > GGML_HEXAGON_MAX_DEVICES) return false;
+
+    for (size_t i = 0; i < n_backends; i++) {
+        if (!tensors[i] || !tensors[i]->buffer || !ggml_backend_buft_is_hexagon(tensors[i]->buffer->buft)) {
+            return false;
+        }
+        if (tensors[i]->type != tensors[0]->type) {
+            return false;
+        }
+        if (!ggml_is_contiguous(tensors[i])) {
+            return false;
+        }
+        if (ggml_nelements(tensors[i]) != ggml_nelements(tensors[0])) {
+            return false;
+        }
+    }
+
+    if (tensors[0]->type != GGML_TYPE_F16 && tensors[0]->type != GGML_TYPE_F32) {
+        return false;
+    }
+
+
+
+    // AP-side allreduce: each CDSP only sees its own mempool, so cross-device
+    // reduction must happen on the AP CPU.  Read all devices' partial results,
+    // average them in-place, and write back.
+    const size_t ne = ggml_nelements(tensors[0]);
+    const size_t elem_size = ggml_element_size(tensors[0]);
+
+    // Pointers into each device's mempool (AP can see all via mmap)
+    std::vector<char *> data_ptrs(n_backends);
+    for (size_t r = 0; r < n_backends; r++) {
+        auto * ctx = (ggml_backend_hexagon_context *) comm_ctx->backends[r]->context;
+        char * pool_base = (char *)ctx->rpc_mempool;
+        char * data_ptr = (char *)tensors[r]->data;
+        if (!pool_base || !data_ptr) {
+            GGMLHEXAGON_LOG_ERROR("comm_allreduce: null ptr (device %zu, pool=%p, data=%p)", r, (void*)pool_base, (void*)data_ptr);
+            return false;
+        }
+        data_ptrs[r] = data_ptr;
+    }
+
+    if (tensors[0]->type == GGML_TYPE_F32) {
+        // f32 allreduce: accumulate into first device's buffer, average, write back
+        float * dst = (float *)data_ptrs[0];
+        for (size_t j = 0; j < ne; j++) {
+            float sum = dst[j];
+            for (size_t r = 1; r < n_backends; r++) {
+                sum += ((const float *)data_ptrs[r])[j];
+            }
+            dst[j] = sum / (float)n_backends;
+        }
+        // Write averaged result to other devices
+        for (size_t r = 1; r < n_backends; r++) {
+            memcpy(data_ptrs[r], dst, ne * elem_size);
+        }
+    } else if (tensors[0]->type == GGML_TYPE_F16) {
+        // f16 allreduce: convert to f32, average, convert back
+        std::vector<float> tmp(ne);
+        // Accumulate from all ranks
+        memset(tmp.data(), 0, ne * sizeof(float));
+        for (size_t r = 0; r < n_backends; r++) {
+            const ggml_fp16_t * src = (const ggml_fp16_t *)data_ptrs[r];
+            for (size_t j = 0; j < ne; j++) {
+                tmp[j] += ggml_fp16_to_fp32(src[j]);
+            }
+        }
+        // Average and write back to all devices
+        const float inv_n = 1.0f / (float)n_backends;
+        for (size_t r = 0; r < n_backends; r++) {
+            ggml_fp16_t * fp16_dst = (ggml_fp16_t *)data_ptrs[r];
+            for (size_t j = 0; j < ne; j++) {
+                fp16_dst[j] = ggml_fp32_to_fp16(tmp[j] * inv_n);
+            }
+        }
+    }
+
+    GGMLHEXAGON_LOG_DEBUG("comm_allreduce: %zu ranks, %zu elements, type=%s",
+                          n_backends, ne, tensors[0]->type == GGML_TYPE_F32 ? "f32" : "f16");
+    return true;
+}
+
 static void * ggml_backend_hexagon_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
 
@@ -6717,6 +6844,15 @@ static void * ggml_backend_hexagon_reg_get_proc_address(ggml_backend_reg_t reg, 
     }
     if (0 == strcmp(name, "ggml_backend_dev_get_extra_bufts")) {
         return (void *)ggml_backend_hexagon_device_get_extra_buffers_type;
+    }
+    if (0 == strcmp(name, "ggml_backend_comm_init")) {
+        return (void *)ggml_backend_hexagon_comm_init;
+    }
+    if (0 == strcmp(name, "ggml_backend_comm_free")) {
+        return (void *)ggml_backend_hexagon_comm_free;
+    }
+    if (0 == strcmp(name, "ggml_backend_comm_allreduce_tensor")) {
+        return (void *)ggml_backend_hexagon_comm_allreduce_tensor;
     }
 
     return nullptr;
