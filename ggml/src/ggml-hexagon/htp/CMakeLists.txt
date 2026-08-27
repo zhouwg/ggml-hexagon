@@ -40,6 +40,7 @@ set(HTP_OPS_SRCS
     pad-ops.c
     argsort-ops.c
     im2col-ops.c
+    allreduce-ops.c
 )
 
 # Both variants build ggml-htp-${DSP_VERSION} (libggml-htp-vXX.so); only one
