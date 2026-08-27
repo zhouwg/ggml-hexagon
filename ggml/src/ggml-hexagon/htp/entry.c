@@ -731,6 +731,31 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
 // prediction overhead (single indirect jump vs. chained conditional branches).
 // Table is ~180 bytes, fits in L1I cache. Indexed directly by htp_op_code.
 // ===========================================================================
+
+// Fence op: spin-wait on a shared-memory atomic until the peer CDSP signals
+// the given sequence number. Used by cross-device tensor copy and allreduce.
+static int op_fence(struct htp_ops_context * octx) {
+    const uint32_t seq = (uint32_t) octx->op_params[0];
+    const struct htp_tensor * sync = octx->src[0];
+    atomic_uint * sync_fence = (atomic_uint *) sync->data;
+    uint64_t spins = 0;
+    while (1) {
+        Q6_dccleaninva_A((void *) sync_fence);
+        asm volatile ("syncht" : : : "memory");
+        uint32_t val = atomic_load(&sync_fence[0]);
+        if ((int32_t)(val - seq) >= 0) {
+            break;
+        }
+        if (++spins > HTP_FENCE_TIMEOUT) {
+            FARF(ERROR, "ggml-hex: sync-wait TIMEOUT : fence %p spins %llu seq %u\n", sync_fence, spins, seq);
+            break;
+        }
+        hex_pause();
+    }
+    FARF(HIGH, "ggml-hex: sync-done : fence %p spins %llu seq %u\n", sync_fence, spins, seq);
+    return HTP_STATUS_OK;
+}
+
 typedef int (*htp_op_func_t)(struct htp_ops_context *);
 
 static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
@@ -779,6 +804,9 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_IM2COL]          = op_im2col,
     [HTP_OP_GATED_DELTA_NET] = op_gated_delta_net,
     [HTP_OP_TRI]             = op_unary,
+    [HTP_OP_FENCE]           = op_fence,
+    [HTP_OP_ALLREDUCE]       = op_allreduce,
+    [HTP_OP_ALLREDUCE_ADD]   = op_allreduce,
 };
 
 static int execute_op(struct htp_ops_context * octx) {
