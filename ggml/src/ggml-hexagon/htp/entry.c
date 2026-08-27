@@ -143,8 +143,7 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_MUL_MAT:         return "MUL_MAT";
         case HTP_OP_MUL_MAT_ADD:     return "MUL_MAT_ADD";
         case HTP_OP_MUL_MAT_ID:      return "MUL_MAT_ID";
-        case HTP_OP_MUL_MAT_QKV:     return "MUL_MAT_QKV";
-        case HTP_OP_MUL_MAT_FFN:     return "MUL_MAT_FFN";
+        case HTP_OP_MUL_MAT_NX:      return "MUL_MAT_NX";
         case HTP_OP_MUL:             return "MUL";
         case HTP_OP_ADD:             return "ADD";
         case HTP_OP_SUB:             return "SUB";
@@ -716,7 +715,7 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
     struct htp_mm_hvx_vtcm_layout L;
     htp_mm_hvx_vtcm_layout_build(&L, kernel_type, wtype, ne10, src1_nrows, n_threads,
                                  dst_row_size, src0_row_size, src1_row_size, 0, n_prefetch,
-                                 false, false, false);
+                                 false, false);
     *vtcm_src0_size = L.src0_bytes;
     *vtcm_src1_size = L.src1_bytes;
     *vtcm_dst_size  = L.dst_bytes;
@@ -741,8 +740,7 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_DIV]             = op_binary,
     [HTP_OP_MUL_MAT]         = op_matmul,
     [HTP_OP_MUL_MAT_ID]      = op_matmul_id,
-    [HTP_OP_MUL_MAT_QKV]     = op_matmul_qkv,
-    [HTP_OP_MUL_MAT_FFN]     = op_matmul_ffn,
+    [HTP_OP_MUL_MAT_NX]      = op_matmul_nx,
     [HTP_OP_MUL_MAT_ADD]     = op_matmul,
     [HTP_OP_NORM]            = op_unary,
     [HTP_OP_RMS_NORM]        = op_unary,
@@ -2050,6 +2048,10 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         const dsptensor *src3_dt = (op->src_idx[3] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[3]] : NULL;
         const dsptensor *src4_dt = (op->src_idx[4] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[4]] : NULL;
         const dsptensor *src5_dt = (op->src_idx[5] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[5]] : NULL;
+        const dsptensor *src6_dt = (op->src_idx[6] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[6]] : NULL;
+        const dsptensor *src7_dt = (op->src_idx[7] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[7]] : NULL;
+        const dsptensor *src8_dt = (op->src_idx[8] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[8]] : NULL;
+        const dsptensor *src9_dt = (op->src_idx[9] >= 0) ? &g_dsp_ctx->pre_dt[op->src_idx[9]] : NULL;
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             if (src0_dt->data && src0_dt->data_len >= 16) {
@@ -2089,6 +2091,10 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         if (src3_dt) INVAL_SRC_IF_NEEDED(i, 3, src3_dt, op->src_idx[3]);
         if (src4_dt) INVAL_SRC_IF_NEEDED(i, 4, src4_dt, op->src_idx[4]);
         if (src5_dt) INVAL_SRC_IF_NEEDED(i, 5, src5_dt, op->src_idx[5]);
+        if (src6_dt) INVAL_SRC_IF_NEEDED(i, 6, src6_dt, op->src_idx[6]);
+        if (src7_dt) INVAL_SRC_IF_NEEDED(i, 7, src7_dt, op->src_idx[7]);
+        if (src8_dt) INVAL_SRC_IF_NEEDED(i, 8, src8_dt, op->src_idx[8]);
+        if (src9_dt) INVAL_SRC_IF_NEEDED(i, 9, src9_dt, op->src_idx[9]);
 
         if (1 == g_dsp_ctx->dump_diag_info) {
             if (src0_dt->data && src0_dt->data_len >= 16) {
