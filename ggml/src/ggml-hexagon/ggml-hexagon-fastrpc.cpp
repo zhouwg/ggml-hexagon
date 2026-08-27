@@ -30,6 +30,7 @@
 #include <utility>
 #include <future>
 #include <algorithm>
+#include <cctype>
 
 #if defined(__ANDROID__) || defined(__linux__)
 #include <unistd.h>
@@ -80,6 +81,31 @@
 #define GGML_HEXAGON_MAX_DEVICES                        16
 
 #define SIZE_IN_MB                                      (1 << 20)
+
+struct ggml_hexagon_device_config {
+    int physical_idx = 0;
+    int virtual_idx  = 0;
+    std::string name;
+};
+
+static ggml_hexagon_device_config opt_device_configs[GGML_HEXAGON_MAX_DEVICES];
+
+static int get_domain_id(int physical_idx) {
+    switch (physical_idx) {
+        case 0:  return 3;   // CDSP0 (all devices)
+        case 1:  return 4;   // CDSP1 (IQ9, IQ10)
+        case 2:  return 18;  // CDSP2 (IQ10)
+        case 3:  return 19;  // CDSP3 (IQ10)
+        default: return CDSP_DOMAIN_ID + physical_idx;
+    }
+}
+
+static std::string get_domain_name(int physical_idx) {
+    if (physical_idx == 0) {
+        return CDSP_DOMAIN_NAME;
+    }
+    return std::string("cdsp") + std::to_string(physical_idx);
+}
 
 #if !defined (_WIN32)
 #pragma weak remote_system_request
@@ -169,6 +195,8 @@ struct ggml_backend_hexagon_context {
     int dsp_thread_counts = 0;                  // actual worker threads in effect on NPU (max_hw_threads - 2)
 
     //HTP resource management
+    int physical_idx;           // physical CDSP index (from device config)
+    int virtual_idx;            // virtual session index within physical CDSP
     int domain_id;
     int session_id;
     remote_handle64 ggmlop_handle;
@@ -903,23 +931,106 @@ static void ggmlhexagon_load_cfg() {
     GGMLHEXAGON_LOG_ALWAYS("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
     GGMLHEXAGON_LOG_ALWAYS("runtime libpath=%s", g_hexagon_appcfg.runtime_libpath);
 
-    // env var GGML_HEXAGON_NDEV overrides cfg value (for automation/testing)
-    const char * str_ndev = getenv("GGML_HEXAGON_NDEV");
-    if (str_ndev) {
-        int v = atoi(str_ndev);
-        if (v > 0 && v <= GGML_HEXAGON_MAX_DEVICES) {
-            g_hexagon_appcfg.ndev = v;
-        } else {
-            GGMLHEXAGON_LOG_WARN("invalid GGML_HEXAGON_NDEV=%d, must be 1..%d, using cfg value %d",
-                                 v, GGML_HEXAGON_MAX_DEVICES, g_hexagon_appcfg.ndev);
-        }
+    // Parse device configuration from GGML_HEXAGON_DEVICES env var.
+    // Supports two formats:
+    //   "3"              - 3 virtual sessions on physical device 0
+    //   "HTP0:0,HTP1:0"  - explicit physical:virtual mapping
+    // Falls back to legacy GGML_HEXAGON_NDEV for simple numeric values.
+    const char * str_devices = getenv("GGML_HEXAGON_DEVICES");
+    const char * str_ndev    = getenv("GGML_HEXAGON_NDEV");
+    if (!str_devices && str_ndev && str_ndev[0] != '\0') {
+        GGMLHEXAGON_LOG_WARN("DEPRECATED: GGML_HEXAGON_NDEV is deprecated, use GGML_HEXAGON_DEVICES instead\n");
+        str_devices = str_ndev;
     }
+
+    if (str_devices && str_devices[0] != '\0') {
+        bool is_single_number = true;
+        for (int i = 0; str_devices[i] != '\0'; i++) {
+            if (!std::isdigit((unsigned char)str_devices[i])) {
+                is_single_number = false;
+                break;
+            }
+        }
+        if (is_single_number) {
+            int n = atoi(str_devices);
+            if (n < 1) n = 1;
+            if (n > GGML_HEXAGON_MAX_DEVICES) n = GGML_HEXAGON_MAX_DEVICES;
+            g_hexagon_appcfg.ndev = n;
+            for (int i = 0; i < n; i++) {
+                opt_device_configs[i].physical_idx = 0;
+                opt_device_configs[i].virtual_idx  = i;
+                opt_device_configs[i].name         = "HTP" + std::to_string(i);
+            }
+        } else {
+            std::string s_devices(str_devices);
+            std::stringstream ss(s_devices);
+            std::string item;
+            int ndev = 0;
+            while (std::getline(ss, item, ',')) {
+                size_t start = item.find_first_not_of(" \t\r\n");
+                size_t end   = item.find_last_not_of(" \t\r\n");
+                if (start == std::string::npos) {
+                    continue;
+                }
+                item = item.substr(start, end - start + 1);
+
+                if (item.rfind("HTP", 0) == 0) {
+                    std::string rest = item.substr(3);
+                    size_t colon_pos = rest.find(':');
+                    int phys = 0;
+                    int virt = 0;
+                    try {
+                        if (colon_pos == std::string::npos) {
+                            phys = std::stoi(rest);
+                            virt = 0;
+                        } else {
+                            phys = std::stoi(rest.substr(0, colon_pos));
+                            virt = std::stoi(rest.substr(colon_pos + 1));
+                        }
+                    } catch (...) {
+                        GGMLHEXAGON_LOG_WARN("ggml-hex: failed to parse device index in '%s'\n", item.c_str());
+                        continue;
+                    }
+
+                    if (ndev < GGML_HEXAGON_MAX_DEVICES) {
+                        opt_device_configs[ndev].physical_idx = phys;
+                        opt_device_configs[ndev].virtual_idx  = virt;
+                        opt_device_configs[ndev].name         = colon_pos == std::string::npos
+                            ? "HTP" + std::to_string(phys)
+                            : "HTP" + std::to_string(phys) + ":" + std::to_string(virt);
+                        ndev++;
+                    } else {
+                        GGMLHEXAGON_LOG_WARN("ggml-hex: max devices limit reached (%d), ignoring device %s\n",
+                                             GGML_HEXAGON_MAX_DEVICES, item.c_str());
+                    }
+                } else {
+                    GGMLHEXAGON_LOG_WARN("ggml-hex: invalid device name format '%s', must start with HTP\n",
+                                         item.c_str());
+                }
+            }
+            g_hexagon_appcfg.ndev = (ndev > 0) ? ndev : 1;
+        }
+    } else {
+        g_hexagon_appcfg.ndev = 1;
+        opt_device_configs[0].physical_idx = 0;
+        opt_device_configs[0].virtual_idx  = 0;
+        opt_device_configs[0].name         = "HTP0";
+    }
+
     if (g_hexagon_appcfg.ndev < 1 || g_hexagon_appcfg.ndev > GGML_HEXAGON_MAX_DEVICES) {
-        GGMLHEXAGON_LOG_WARN("invalid ndev=%d from cfg, must be 1..%d, using default 1",
+        GGMLHEXAGON_LOG_WARN("invalid ndev=%d, must be 1..%d, using default 1",
                              g_hexagon_appcfg.ndev, GGML_HEXAGON_MAX_DEVICES);
         g_hexagon_appcfg.ndev = 1;
     }
-    GGMLHEXAGON_LOG_ALWAYS("ndev=%d (from cfg, env GGML_HEXAGON_NDEV overrides if set)", g_hexagon_appcfg.ndev);
+    GGMLHEXAGON_LOG_ALWAYS("ndev=%d (devices: %s)", g_hexagon_appcfg.ndev,
+                           [&]() -> std::string {
+                               std::string s;
+                               for (int i = 0; i < g_hexagon_appcfg.ndev; i++) {
+                                   if (i > 0) s += ", ";
+                                   s += opt_device_configs[i].name;
+                               }
+                               return s;
+                           }().c_str());
 
     ggmlhexagon_set_runtime_path(0, g_hexagon_appcfg.runtime_libpath);
 
@@ -1174,8 +1285,13 @@ static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
 //  section-6: HTP helper functions
 // =================================================================================================
 static const char * ggmlhexagon_get_dsp_name(int domain_id) {
-    (void)domain_id;
-    return "HTP";
+    if (domain_id == 3)  return "CDSP0";
+    if (domain_id == 4)  return "CDSP1";
+    if (domain_id == 18) return "CDSP2";
+    if (domain_id == 19) return "CDSP3";
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "CDSP(domain=%d)", domain_id);
+    return buf;
 }
 
 static int ggmlhexagon_get_vtcm_info(int domain, uint32_t attr, uint32_t * capability) {
@@ -1668,7 +1784,16 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         goto bail;
     }
 
-    GGMLHEXAGON_LOG_DEBUG("init HTP with backend %d(%s)", ctx->device, ctx->name);
+    // Resolve physical/virtual device indices and compute the Hexagon domain ID.
+    {
+        ggml_hexagon_device_config & cfg = opt_device_configs[ctx->device];
+        ctx->physical_idx = cfg.physical_idx;
+        ctx->virtual_idx  = cfg.virtual_idx;
+        domain_id         = get_domain_id(cfg.physical_idx);
+    }
+    GGMLHEXAGON_LOG_ALWAYS("init HTP with backend %d(%s) phys=%d virt=%d domain=%d",
+                           ctx->device, ctx->name, ctx->physical_idx, ctx->virtual_idx, domain_id);
+
     ctx->ggmlop_handle = 0;
     my_domain = htpdrv_get_domain(domain_id);
     if (NULL == my_domain) {
@@ -1677,28 +1802,29 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     }
     uri = my_domain->uri;
     GGMLHEXAGON_LOG_DEBUG("domain uri=%s", uri);
-    // Reserve new FastRPC session (PD) for additional devices (dev_id > 0)
-    // dev_id == 0 reuses the default HTP PD (session_id=0)
+    // Reserve new FastRPC session for virtual sessions (virt_idx > 0).
     ctx->session_id = 0;
-    if (ctx->device > 0) {
+    if (ctx->virtual_idx > 0) {
         struct remote_rpc_reserve_new_session n;
-        n.domain_name_len  = strlen(CDSP_DOMAIN_NAME);
-        n.domain_name      = const_cast<char *>(CDSP_DOMAIN_NAME);
+        std::string dom_name = get_domain_name(ctx->physical_idx);
+        n.domain_name_len  = dom_name.size();
+        n.domain_name      = const_cast<char *>(dom_name.c_str());
         char sess_name[32];
-        snprintf(sess_name, sizeof(sess_name), "HTP%d", ctx->device);
+        snprintf(sess_name, sizeof(sess_name), "HTP%d:%d", ctx->physical_idx, ctx->virtual_idx);
         n.session_name     = sess_name;
         n.session_name_len = strlen(sess_name);
 
         int err = remote_session_control(FASTRPC_RESERVE_NEW_SESSION, (void *) &n, sizeof(n));
         if (err != AEE_SUCCESS) {
-            GGMLHEXAGON_LOG_WARN("FASTRPC_RESERVE_NEW_SESSION failed for device %d: error 0x%x", ctx->device, err);
+            GGMLHEXAGON_LOG_WARN("FASTRPC_RESERVE_NEW_SESSION failed for device %d (phys=%d virt=%d): error 0x%x",
+                                 ctx->device, ctx->physical_idx, ctx->virtual_idx, err);
             hexagon_error = err;
             goto bail;
         }
         ctx->session_id = n.session_id;
         domain_id       = n.effective_domain_id;
-        GGMLHEXAGON_LOG_VERBOSE("reserved new session: device=%d session_id=%d effective_domain_id=%d",
-                             ctx->device, ctx->session_id, domain_id);
+        GGMLHEXAGON_LOG_VERBOSE("reserved new session: device=%d phys=%d virt=%d session_id=%d effective_domain_id=%d",
+                             ctx->device, ctx->physical_idx, ctx->virtual_idx, ctx->session_id, domain_id);
     }
 
     is_unsignedpd_enabled = ggmlhexagon_is_unsignedpd_supported(domain_id);
@@ -1735,9 +1861,10 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     // session_id == 0 (or FASTRPC_GET_URI failure): concatenate htp_uri + domain uri.
     if (ctx->session_id > 0) {
         struct remote_rpc_get_uri u = {};
+        std::string dom_name = get_domain_name(ctx->physical_idx);
         u.session_id      = ctx->session_id;
-        u.domain_name     = const_cast<char *>(CDSP_DOMAIN_NAME);
-        u.domain_name_len = strlen(CDSP_DOMAIN_NAME);
+        u.domain_name     = const_cast<char *>(dom_name.c_str());
+        u.domain_name_len = dom_name.size();
         u.module_uri      = const_cast<char *>(htp_uri);
         u.module_uri_len  = strlen(htp_uri);
         u.uri             = final_uri;
@@ -3694,6 +3821,8 @@ ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_back
       backend(nullptr),
       socinfo(),
       n_threads(6),
+      physical_idx(0),
+      virtual_idx(0),
       domain_id(CDSP_DOMAIN_ID),
       session_id(0),
       ggmlop_handle(0),
