@@ -68,6 +68,8 @@
 #include "htp/htp-ops.h"
 #include "htp/hex-common.h"
 #include "htp/hex-fastdiv.h"
+#include "htp/get-rows-ops.h"
+#include "htp/set-rows-ops.h"
 #include "htp/matmul-ops.h"
 #include "htp/flash-attn-ops.h"
 #include "htp/unary-ops.h"
@@ -243,8 +245,8 @@ struct ggml_backend_hexagon_context {
     // changing existing per-call LOG_DEBUG output paths
     uint64_t n_mul_mat_total_cum = 0;           // total MUL_MAT ops in supported_nodes
     uint64_t n_hmx_used_cum      = 0;           // MUL_MAT dispatched to HMX kernels
-    uint64_t n_fused_qkv_cum     = 0;           // 3x MUL_MAT -> HTP_OP_MUL_MAT_QKV fusions
-    uint64_t n_fused_ffn_cum     = 0;           // 2x MUL_MAT -> HTP_OP_MUL_MAT_FFN fusions
+    uint64_t n_fused_qkv_cum     = 0;           // 3x MUL_MAT -> HTP_OP_MUL_MAT_NX (QKV) fusions
+    uint64_t n_fused_ffn_cum     = 0;           // 2x MUL_MAT -> HTP_OP_MUL_MAT_NX (FFN) fusions
     uint64_t n_fused_mm_add_cum  = 0;           // MUL_MAT + ADD -> HTP_OP_MUL_MAT_ADD fusions
 
     // HMX eligibility diagnostic counters (why MUL_MATs fall back to HVX)
@@ -381,7 +383,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
 #elif defined(_WIN32)
         .runtime_libpath        = "C:\\temp\\",
 #endif
-        .version                = {"0.99.7.7"},
+        .version                = {"0.99.7.8"},
 };
 
 //supported Snapdragon devices
@@ -634,8 +636,8 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
     // MUL_MAT optimization diagnostics (PP). Cumulative across the run.
     // - n_mul_mat_total: every MUL_MAT in supported_nodes (cache miss only)
     // - n_hmx_used:      MUL_MAT dispatched to HMX (kparams.n_hmx == 1)
-    // - n_fused_qkv:     3x MUL_MAT (Q,K,V) merged into HTP_OP_MUL_MAT_QKV
-    // - n_fused_ffn:     2x MUL_MAT (gate,up) merged into HTP_OP_MUL_MAT_FFN
+    // - n_fused_qkv:     3x MUL_MAT (Q,K,V) merged into HTP_OP_MUL_MAT_NX
+    // - n_fused_ffn:     2x MUL_MAT (gate,up) merged into HTP_OP_MUL_MAT_NX
     // - n_fused_mm_add:  MUL_MAT + ADD merged into HTP_OP_MUL_MAT_ADD
     {
         const double total = (double) ctx->n_mul_mat_total_cum;
@@ -877,7 +879,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.7");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.8");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -2614,7 +2616,7 @@ static inline size_t htp_mm_hvx_get_vtcm_sizes(
     struct htp_mm_hvx_vtcm_layout vtcm_layout;
     htp_mm_hvx_vtcm_layout_build(&vtcm_layout, kernel_type, wtype, ne10, src1_nrows, n_threads,
                                  dst_row_size, src0_row_size, src1_row_size, 0, n_prefetch,
-                                 false, false, false);
+                                 false, false);
     *vtcm_src0_size = vtcm_layout.src0_bytes;
     *vtcm_src1_size = vtcm_layout.src1_bytes;
     *vtcm_dst_size  = vtcm_layout.dst_bytes;
@@ -2629,7 +2631,7 @@ static inline size_t htp_mm_hvx_id_get_vtcm_sizes(
     struct htp_mm_hvx_vtcm_layout vtcm_layout;
     htp_mm_hvx_vtcm_layout_build(&vtcm_layout, 0, wtype, ne10, src1_nrows, n_threads,
                                  0, src0_row_size, 0, 0, n_prefetch,
-                                 true, false, false);
+                                 true, false);
     *vtcm_src0_size = vtcm_layout.src0_bytes;
     *vtcm_src1_size = vtcm_layout.src1_bytes;
     *vtcm_dst_size  = vtcm_layout.dst_bytes;
@@ -2868,6 +2870,96 @@ static void ggml_hexagon_precompute_unary_params(
     kparams->div_tpr   = init_fastdiv_values(tiles_per_row);
 }
 
+// Precompute htp_get_rows_kernel_params on AP side for GET_ROWS.
+static void ggml_hexagon_precompute_get_rows_params(
+    const ggml_backend_hexagon_context * ctx,
+    const ggml_tensor * src0,
+    const ggml_tensor * src1,
+    const ggml_tensor * dst,
+    struct htp_get_rows_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const uint32_t ne00 = (uint32_t)src0->ne[0];
+    const uint32_t ne02 = (uint32_t)src0->ne[2];
+    const uint32_t ne03 = (uint32_t)src0->ne[3];
+
+    const uint32_t ne10 = (uint32_t)src1->ne[0];
+    const uint32_t ne11 = (uint32_t)src1->ne[1];
+    const uint32_t ne12 = (uint32_t)src1->ne[2];
+    const uint32_t nr = ne10 * ne11 * ne12;
+
+    const size_t nb01 = src0->nb[1];
+    const size_t nb1 = dst->nb[1];
+
+    const bool can_use_dma = (src0->type == dst->type) && (nb01 == nb1);
+    const bool use_dma = can_use_dma && (ne00 >= 2048);
+
+    kparams->use_dma = use_dma ? 1 : 0;
+
+    uint32_t chunks_per_row = 1;
+    uint32_t chunk_size = ne00;
+    uint32_t total_tasks = nr;
+
+    if (use_dma) {
+        kparams->n_threads = (std::min)((uint32_t)ctx->n_threads, nr);
+        kparams->tasks_per_thread = (nr + kparams->n_threads - 1) / kparams->n_threads;
+    } else {
+        if (src0->type == GGML_TYPE_F32 && nr < (uint32_t)ctx->n_threads) {
+            const uint32_t min_chunk_size = 1024;
+            uint32_t max_chunks = ne00 / min_chunk_size;
+            if (max_chunks == 0) {
+                max_chunks = 1;
+            }
+            chunks_per_row = (std::min)(((uint32_t)ctx->n_threads + nr - 1) / nr, max_chunks);
+            chunk_size = (ne00 + chunks_per_row - 1) / chunks_per_row;
+            total_tasks = nr * chunks_per_row;
+        }
+        kparams->n_threads = (std::min)(total_tasks, (uint32_t)ctx->n_threads);
+        kparams->tasks_per_thread = (total_tasks + kparams->n_threads - 1) / kparams->n_threads;
+    }
+
+    kparams->chunks_per_row = chunks_per_row;
+    kparams->chunk_size = chunk_size;
+    kparams->total_tasks = total_tasks;
+
+    kparams->div_ne10 = init_fastdiv_values(ne10);
+    kparams->div_ne10_ne11 = init_fastdiv_values(ne10 * ne11);
+    kparams->div_chunks_per_row = init_fastdiv_values(chunks_per_row);
+    kparams->div_ne02 = init_fastdiv_values(ne02);
+    kparams->div_ne03 = init_fastdiv_values(ne03);
+
+    struct htp_get_rows_vtcm_layout vtcm_layout;
+    htp_get_rows_vtcm_layout_build(&vtcm_layout, src0->type, ne00, kparams->n_threads);
+    kparams->vtcm_size = vtcm_layout.total_bytes;
+}
+
+// Precompute htp_set_rows_kernel_params on AP side for SET_ROWS.
+static void ggml_hexagon_precompute_set_rows_params(
+    const ggml_backend_hexagon_context * ctx,
+    const ggml_tensor * src0, // values
+    const ggml_tensor * src1, // indices
+    const ggml_tensor * dst,  // destination
+    struct htp_set_rows_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+
+    const uint32_t nr = (uint32_t)src0->ne[1];
+
+    kparams->n_threads = (std::min)((uint32_t)ctx->n_threads, nr);
+    kparams->tasks_per_thread = (nr + kparams->n_threads - 1) / kparams->n_threads;
+    kparams->total_tasks = nr;
+
+    kparams->div_ne11 = init_fastdiv_values((uint32_t)src1->ne[1]);
+    kparams->div_ne12 = init_fastdiv_values((uint32_t)src1->ne[2]);
+    kparams->div_tasks_per_thread = init_fastdiv_values(kparams->tasks_per_thread);
+    kparams->div_ne02 = init_fastdiv_values((uint32_t)src0->ne[2]);
+
+    struct htp_set_rows_vtcm_layout vtcm_layout;
+    htp_set_rows_vtcm_layout_build(&vtcm_layout, dst->type, (uint32_t)src0->ne[0], kparams->n_threads);
+    kparams->vtcm_size = vtcm_layout.total_bytes;
+}
+
 static bool ggml_hexagon_matmul_is_hmx_eligible(
     const struct ggml_tensor * src0,
     const struct ggml_tensor * src1,
@@ -2990,7 +3082,7 @@ static bool is_qkv_mergeable(const ggml_backend_hexagon_context * ctx, const ggm
 
 // Precompute htp_mm_kernel_params for fused QKV matmul (3 outputs: K, V, Q).
 // src0 = Wk (representative of K/V/Q weights), src1 = x (shared activation).
-// NPU-side op_matmul_qkv expects src[0]=Wk, src[1]=x, src[2]=Wv, src[3]=Wq.
+// NPU-side op_matmul_nx (QKV mode) expects src[0]=Wk, src[1]=x, src[2]=Wv, src[3]=Wq.
 static void ggml_hexagon_precompute_fused_qkv_params(
     const ggml_backend_hexagon_context * ctx,
     const struct ggml_tensor * src0,
@@ -3086,7 +3178,7 @@ static void ggml_hexagon_precompute_fused_qkv_params(
 
 // Precompute htp_mm_kernel_params for fused FFN matmul (2 outputs: gate, up).
 // src0 = Wgate, src1 = y (shared activation).
-// NPU-side op_matmul_ffn expects src[0]=Wgate, src[1]=y, src[2]=Wup.
+// NPU-side op_matmul_nx (FFN mode) expects src[0]=Wgate, src[1]=y, src[2]=Wup.
 static void ggml_hexagon_precompute_fused_ffn_params(
     const ggml_backend_hexagon_context * ctx,
     const struct ggml_tensor * src0,
@@ -5144,7 +5236,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             hex_op_desc op;
             memset(&op, 0, sizeof(op));
             for (int k = 0; k < 4; k++) op.dst_idx[k] = -1;
-            for (int k = 0; k < 6; k++) op.src_idx[k] = -1;
+            for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) op.src_idx[k] = -1;
             op.opcode   = node->op;
             memcpy(op.params, node->op_params, sizeof(op.params));
             if (node->op == GGML_OP_MUL_MAT) {
@@ -5167,6 +5259,14 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                         node->src[0], node->src[1], node,
                         (struct htp_unary_kernel_params *) op.kernel_params);
                     op.htp_opcode = (int32_t) unary_htp_op;
+                } else if (node->op == GGML_OP_GET_ROWS) {
+                    ggml_hexagon_precompute_get_rows_params(ctx,
+                        node->src[0], node->src[1], node,
+                        (struct htp_get_rows_kernel_params *) op.kernel_params);
+                } else if (node->op == GGML_OP_SET_ROWS) {
+                    ggml_hexagon_precompute_set_rows_params(ctx,
+                        node->src[0], node->src[1], node,
+                        (struct htp_set_rows_kernel_params *) op.kernel_params);
                 }
             }
             op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
@@ -5229,8 +5329,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     // Supported fusions:
     //   RMS_NORM + MUL      -> HTP_OP_RMS_NORM_MUL
     //   MUL_MAT + ADD       -> HTP_OP_MUL_MAT_ADD     (bias add inside kernel)
-    //   3x MUL_MAT (Q,K,V)  -> HTP_OP_MUL_MAT_QKV     (via NPU execute_op)
-    //   2x MUL_MAT (gate,up)-> HTP_OP_MUL_MAT_FFN     (via NPU execute_op)
+    //   3x MUL_MAT (Q,K,V)  -> HTP_OP_MUL_MAT_NX      (via NPU execute_op)
+    //   2x MUL_MAT (gate,up)-> HTP_OP_MUL_MAT_NX      (via NPU execute_op)
     //
     // QKV/FFN fusion eligibility:
     //   quantized src0 + F32 src1 + !mm_is_hmx_eligible.
@@ -5240,7 +5340,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         // Count src usages of each tensor; fusable intermediates must have exactly one consumer
         std::vector<int> src_use_count(n_tensors, 0);
         for (const auto & op : hex_ops) {
-            for (int k = 0; k < 6; k++) {
+            for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) {
                 if (op.src_idx[k] >= 0 && op.src_idx[k] < (int)n_tensors) {
                     src_use_count[op.src_idx[k]]++;
                 }
@@ -5260,8 +5360,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
         // QKV/FFN fusion prerequisites:
         //   - dispatches via NPU execute_op, which provides
-        //     op_matmul_qkv / op_matmul_ffn as dedicated fused kernels (htp/matmul-ops.c).
-        // htp_arch>=V73 is required because op_matmul_qkv/ffn use HMX instructions.
+        //     op_matmul_nx as dedicated fused kernel (htp/matmul-ops.c).
+        // htp_arch>=V73 is required because op_matmul_nx uses HMX instructions.
         bool qkv_ffn_enabled = (ctx->socinfo.htp_arch >= V73 && g_hexagon_appcfg.enable_opfusion);
         for (size_t i = 0; i < hex_ops.size(); i++) {
             hex_op_desc op = hex_ops[i];
@@ -5290,11 +5390,12 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             }
 
             if (qkv_ffn_enabled && op.opcode == GGML_OP_MUL_MAT) {
-                // QKV fusion: 3 MUL_MAT (Q,K,V) -> HTP_OP_MUL_MAT_QKV.
+                // QKV fusion: 3 MUL_MAT (Q,K,V) -> HTP_OP_MUL_MAT_NX.
                 // The Q/K/V MUL_MATs may appear in either Q,K,V or Q,V,K order
                 // depending on the model (e.g. Gemma4/Llama3 uses Q,K,V, Qwen3 uses Q,V,K).
                 // Detect the actual order from tensor names and map src/dst accordingly.
-                // NPU-side expects: src[0]=Wk, src[1]=x, src[2]=Wv, src[3]=Wq; dst[0]=K, dst[1]=V, dst[2]=Q.
+                // NX layout: src[0..n_weights-1] = weights, src[n_weights] = activation;
+                //            dst[0..n_weights-1] = outputs.
                 if (i + 2 < hex_ops.size()) {
                     const hex_op_desc & next1 = hex_ops[i + 1];
                     const hex_op_desc & next2 = hex_ops[i + 2];
@@ -5343,18 +5444,20 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                             if (can_fuse_qkv) {
                                 struct htp_mm_kernel_params kparams;
                                 ggml_hexagon_precompute_fused_qkv_params(ctx, n_k->src[0], n_k->src[1], &kparams);
+                                kparams.n_weights = 3;
                                 if ((size_t)kparams.vtcm_size <= vtcm_budget) {
                                     int32_t wq_idx  = op.src_idx[0];
                                     int32_t x_idx   = op.src_idx[1];
                                     int32_t q_dst   = op.dst_idx[0];
-                                    op.htp_opcode   = HTP_OP_MUL_MAT_QKV;
-                                    op.src_idx[0]   = op_k->src_idx[0];  // Wk
-                                    op.src_idx[1]   = x_idx;             // x (shared)
+                                     op.htp_opcode   = HTP_OP_MUL_MAT_NX;
+                                    // NX layout: src[0..n_weights-1] = weights, src[n_weights] = activation
+                                    op.src_idx[0]   = wq_idx;            // Wq
+                                    op.src_idx[1]   = op_k->src_idx[0];  // Wk
                                     op.src_idx[2]   = op_v->src_idx[0];  // Wv
-                                    op.src_idx[3]   = wq_idx;            // Wq
-                                    op.dst_idx[0]   = op_k->dst_idx[0];  // K
-                                    op.dst_idx[1]   = op_v->dst_idx[0];  // V
-                                    op.dst_idx[2]   = q_dst;             // Q
+                                    op.src_idx[3]   = x_idx;             // x (activation, last)
+                                    op.dst_idx[0]   = q_dst;             // Q
+                                    op.dst_idx[1]   = op_k->dst_idx[0];  // K
+                                    op.dst_idx[2]   = op_v->dst_idx[0];  // V
                                     op.dst_idx[3]   = -1;
                                     memcpy(op.kernel_params, &kparams, sizeof(kparams));
                                     fused_ops.push_back(op);
@@ -5376,9 +5479,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     }
                 }
 
-                // FFN fusion: 2 MUL_MAT (gate,up) -> HTP_OP_MUL_MAT_FFN.
+                // FFN fusion: 2 MUL_MAT (gate,up) -> HTP_OP_MUL_MAT_NX.
                 // Current op is gate, next is up.
-                // src0=Wgate, src1=y, src2=Wup; dst[0]=gate, dst[1]=up.
+                // NX layout: src[0]=Wgate, src[1]=Wup, src[2]=y(activation);
+                //            dst[0]=gate, dst[1]=up.
                 // Only triggers when is_mergeable_mul_mat returns true
                 // (quantized src0 + F32 src1 + !mm_is_hmx_eligible).
                 if (i + 1 < hex_ops.size()) {
@@ -5389,10 +5493,15 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                         if (is_mergeable_mul_mat_pair(ctx, n_gate, n_up)) {
                             struct htp_mm_kernel_params kparams;
                             ggml_hexagon_precompute_fused_ffn_params(ctx, n_gate->src[0], n_gate->src[1], &kparams);
+                            kparams.n_weights = 2;
                             if ((size_t)kparams.vtcm_size <= vtcm_budget) {
-                                op.htp_opcode = HTP_OP_MUL_MAT_FFN;
-                                // src0=Wgate (keep), src1=y (keep)
-                                op.src_idx[2] = next.src_idx[0];
+                                op.htp_opcode = HTP_OP_MUL_MAT_NX;
+                                // NX layout: src[0..n_weights-1] = weights, src[n_weights] = activation
+                                int32_t wgate_idx = op.src_idx[0];
+                                int32_t y_idx     = op.src_idx[1];  // activation (save before overwrite)
+                                op.src_idx[0] = wgate_idx;           // Wgate
+                                op.src_idx[1] = next.src_idx[0];     // Wup
+                                op.src_idx[2] = y_idx;               // y (activation, last)
                                 op.src_idx[3] = -1;
                                 // dst[0]=gate (keep)
                                 op.dst_idx[1] = next.dst_idx[0];
@@ -5404,10 +5513,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                                 n_mul_mat_ffn++;
                                 ctx->n_fused_ffn_cum++;
                                 GGMLHEXAGON_LOG_DEBUG("DBG FFN fusion: gate=%s up=%s | Wgate[t%d] y[t%d] Wup[t%d] | gate[t%d] up[t%d]",
-                                                         n_gate->name ? n_gate->name : "?",
-                                                         n_up->name ? n_up->name : "?",
-                                                         op.src_idx[0], op.src_idx[1], next.src_idx[0],
-                                                         op.dst_idx[0], next.dst_idx[0]);
+                                                          n_gate->name ? n_gate->name : "?",
+                                                          n_up->name ? n_up->name : "?",
+                                                          wgate_idx, y_idx, next.src_idx[0],
+                                                          op.dst_idx[0], next.dst_idx[0]);
                                 continue;
                             } else {
                                 GGMLHEXAGON_LOG_DEBUG("skip FFN fusion: VTCM needed (%d) > budget (%zu)",
