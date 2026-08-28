@@ -161,6 +161,8 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_UNARY_NEG:       return "UNARY_NEG";
         case HTP_OP_UNARY_EXP:       return "UNARY_EXP";
         case HTP_OP_UNARY_TANH:      return "UNARY_TANH";
+        case HTP_OP_UNARY_ABS:       return "UNARY_ABS";
+        case HTP_OP_UNARY_LOG:       return "UNARY_LOG";
         case HTP_OP_UNARY_SILU:      return "UNARY_SILU";
         case HTP_OP_UNARY_GELU:      return "UNARY_GELU";
         case HTP_OP_GLU_SWIGLU:      return "GLU_SWIGLU";
@@ -774,6 +776,8 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_UNARY_NEG]       = op_unary,
     [HTP_OP_UNARY_EXP]       = op_unary,
     [HTP_OP_UNARY_TANH]      = op_unary,
+    [HTP_OP_UNARY_ABS]       = op_unary,
+    [HTP_OP_UNARY_LOG]       = op_unary,
     [HTP_OP_L2_NORM]         = op_unary,
     [HTP_OP_UNARY_SILU]      = op_unary,
     [HTP_OP_UNARY_GELU]      = op_unary,
@@ -908,6 +912,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_L2_NORM: *htp_op = HTP_OP_L2_NORM;     return 0;
         case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return 0;
         case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return 0;
+        case GGML_OP_LOG:     *htp_op = HTP_OP_UNARY_LOG;   return 0;
         case GGML_OP_ARGSORT: *htp_op = HTP_OP_ARGSORT;     return 0;
         case GGML_OP_PAD:     *htp_op = HTP_OP_PAD;         return 0;
         case GGML_OP_IM2COL:  *htp_op = HTP_OP_IM2COL;      return 0;
@@ -931,6 +936,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
                 case GGML_UNARY_OP_SILU:      *htp_op = HTP_OP_UNARY_SILU;     return 0;
                 case GGML_UNARY_OP_EXP:       *htp_op = HTP_OP_UNARY_EXP;      return 0;
                 case GGML_UNARY_OP_SOFTPLUS: *htp_op = HTP_OP_UNARY_SOFTPLUS; return 0;
+                case GGML_UNARY_OP_ABS:      *htp_op = HTP_OP_UNARY_ABS;      return 0;
                 default:
                     FARF(ERROR, "ggml_op_to_htp_op: unsupported unary_op %d", op_params[0]);
                     return -1;

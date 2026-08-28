@@ -2915,6 +2915,7 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
         case GGML_OP_SCALE:   *htp_op = HTP_OP_SCALE;       return true;
         case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return true;
         case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return true;
+        case GGML_OP_LOG:     *htp_op = HTP_OP_UNARY_LOG;   return true;
         case GGML_OP_TRI:     *htp_op = HTP_OP_TRI;         return true;
         case GGML_OP_UNARY:
             if (!op_params) return false;
@@ -2924,6 +2925,7 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
                 case GGML_UNARY_OP_SIGMOID:    *htp_op = HTP_OP_UNARY_SIGMOID;  return true;
                 case GGML_UNARY_OP_EXP:        *htp_op = HTP_OP_UNARY_EXP;      return true;
                 case GGML_UNARY_OP_SOFTPLUS:   *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
+                case GGML_UNARY_OP_ABS:        *htp_op = HTP_OP_UNARY_ABS;      return true;
                 case GGML_UNARY_OP_SILU:       *htp_op = HTP_OP_UNARY_SILU;     return true;
                 case GGML_UNARY_OP_GELU:
                 case GGML_UNARY_OP_GELU_QUICK: *htp_op = HTP_OP_UNARY_GELU;     return true;
@@ -4534,6 +4536,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_L2_NORM]        = hexagon_validate_norm_op;
     s_op_validators[GGML_OP_SQR]            = hexagon_validate_sqr_sqrt;
     s_op_validators[GGML_OP_SQRT]           = hexagon_validate_sqr_sqrt;
+    s_op_validators[GGML_OP_LOG]            = hexagon_validate_sqr_sqrt;
     s_op_validators[GGML_OP_ROPE]           = hexagon_validate_rope;
     s_op_validators[GGML_OP_SOFT_MAX]       = hexagon_validate_soft_max;
     s_op_validators[GGML_OP_UNARY]          = hexagon_validate_unary;
