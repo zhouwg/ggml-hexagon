@@ -102,9 +102,8 @@ static int                   ggmlhexagon_get_hvx_arch_ver(int domain, uint32_t *
 static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
 static bool                  ggml_backend_buffer_is_hexagon_repack(const ggml_backend_buffer * b);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
-static void                  ggmlhexagon_set_runtime_path(size_t device, const std::string & path);
 static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
-static ggml_backend_t        ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
+static ggml_backend_t        ggml_backend_hexagon_init_ext(size_t device);
 static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
 static size_t                ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
 static bool                  ggml_backend_hexagon_repack_buffer_is_host(ggml_backend_buffer_type_t buft);
@@ -116,8 +115,6 @@ static size_t                ggml_backend_hexagon_buffer_type_get_alloc_size(ggm
 static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_backend_dev_t dev);
 static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size);
 static bool                  ggml_hexagon_compute_fa_params(const ggml_backend_hexagon_context * ctx, const ggml_tensor * node, htp_fa_kernel_params * kparams);
-
-GGML_BACKEND_API void       ggml_hexagon_set_runtime_libpath(const char * path);
 
 // =================================================================================================
 //  section-2: data structures
@@ -371,7 +368,6 @@ struct hexagon_appcfg_t {
     int enable_graph_optimize;  // enable/disable cgraph reorder pass
 
     const char * cfgfilename;
-    const char * runtime_libpath;
     char version[GGMLHEXAGON_TMPBUF_LEN];
 };
 
@@ -393,13 +389,6 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
-#if defined(__ANDROID__)
-        .runtime_libpath        = "/data/local/tmp/",
-#elif defined(__linux__)
-        .runtime_libpath        = "/tmp/",
-#elif defined(_WIN32)
-        .runtime_libpath        = "C:\\temp\\",
-#endif
         .version                = {"0.99.7.8"},
 };
 
@@ -443,16 +432,6 @@ static struct qcom_socinfo g_hexagon_soc_info_table[] = {
 // dtors, so function-local std::mutex objects (e.g. the log mutex) are still
 // alive when ~ggml_backend_hexagon_context calls ggmlhexagon_deinit_cdsp.
 static ggml_backend_hexagon_reg_context * g_reg_ctx = nullptr;
-
-static char g_runtime_libpath_buf[512] =
-#if defined(__ANDROID__)
-    "/data/local/tmp/"
-#elif defined(__linux__)
-    "/tmp/"
-#elif defined(_WIN32)
-    "C:\\temp\\"
-#endif
-;
 
 //For multi-NPU support
 static ggml_hexagon_device_config opt_device_configs[GGML_HEXAGON_MAX_DEVICES];
@@ -875,18 +854,13 @@ static void ggmlhexagon_load_cfg() {
     memset(time_string, 0, GGMLHEXAGON_TMPBUF_LEN);
     ggmlhexagon_get_timestring(time_string);
     GGMLHEXAGON_LOG_DEBUG("program running start time:%s", time_string);
-    std::string cfg_filename = std::string(g_hexagon_appcfg.runtime_libpath) + std::string(g_hexagon_appcfg.cfgfilename);
-
-    // Prefer user-editable copy in /data/local/tmp/ (accessible via adb shell),
-    // fall back to runtime_libpath/ggml-hexagon.cfg (such as app data dir in Android APK).
 #if defined(__ANDROID__)
-    {
-        std::string user_cfg = "/data/local/tmp/" + std::string(g_hexagon_appcfg.cfgfilename);
-        if (access(user_cfg.c_str(), F_OK) == 0) {
-            cfg_filename = user_cfg;
-        }
-    }
+    std::filesystem::path cfg_dir("/data/local/tmp");
+#else
+    std::filesystem::path cfg_dir = std::filesystem::current_path();
 #endif
+    std::string cfg_filename = (cfg_dir / std::string(g_hexagon_appcfg.cfgfilename)).string();
+    GGMLHEXAGON_LOG_ALWAYS("cfg_filename:%s", cfg_filename.c_str());
 
     hexagon_appcfg hexagoncfg_instance;
     bool cfg_loaded = hexagoncfg_instance.load(cfg_filename);
@@ -916,12 +890,11 @@ static void ggmlhexagon_load_cfg() {
     snprintf(g_hexagon_appcfg.version, GGMLHEXAGON_TMPBUF_LEN, "%s", version.c_str());
 
     if (cfg_loaded) {
-        GGMLHEXAGON_LOG_ALWAYS("load hexagon appcfg from %s", cfg_filename.c_str());
+        GGMLHEXAGON_LOG_ALWAYS("load backend's runtime settings from %s", cfg_filename.c_str());
     } else {
-        GGMLHEXAGON_LOG_ALWAYS("no hexagon appcfg file, using built-in defaults");
+        GGMLHEXAGON_LOG_ALWAYS("no backend runtime cfg file, using built-in defaults");
     }
     GGMLHEXAGON_LOG_ALWAYS("ggml_hexagon_version=%s", g_hexagon_appcfg.version);
-    GGMLHEXAGON_LOG_ALWAYS("runtime libpath=%s", g_hexagon_appcfg.runtime_libpath);
 
     // Parse device configuration from GGML_HEXAGON_DEVICES env var.
     // Supports two formats:
@@ -1024,8 +997,6 @@ static void ggmlhexagon_load_cfg() {
                                return s;
                            }().c_str());
 
-    ggmlhexagon_set_runtime_path(0, g_hexagon_appcfg.runtime_libpath);
-
     initialized = true;
 }
 
@@ -1054,18 +1025,6 @@ static void ggmlhexagon_check_valid_appcfg() {
         GGMLHEXAGON_LOG_WARN("invalid fa_select %d, reset to 2", g_hexagon_appcfg.fa_select);
         g_hexagon_appcfg.fa_select = 2;
     }
-}
-
-// Set the runtime library path where NPU skeleton .so files (libggml-htp-v*.so)
-// and ggml-hexagon.cfg are located. Must be called before any hexagon backend
-// registration to take effect. verified in the real Android APK
-GGML_BACKEND_API void ggml_hexagon_set_runtime_libpath(const char * path) {
-    if (path == nullptr) {
-        return;
-    }
-    strncpy(g_runtime_libpath_buf, path, sizeof(g_runtime_libpath_buf) - 1);
-    g_runtime_libpath_buf[sizeof(g_runtime_libpath_buf) - 1] = '\0';
-    g_hexagon_appcfg.runtime_libpath = g_runtime_libpath_buf;
 }
 
 // =================================================================================================
@@ -1198,57 +1157,6 @@ static bool ggmlhexagon_same_types(const ggml_backend_hexagon_context * ctx, con
         return false;
 
     return true;
-}
-
-static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path) {
-    GGML_UNUSED(device);
-#if defined(__ANDROID__)
-    // Android: LD_LIBRARY_PATH uses ':' as separator
-    std::string lib_runtime_path = path + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images";
-    if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    // ADSP_LIBRARY_PATH uses ';' as separator on all platforms
-    std::string adsp_runtime_path = path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp";
-    if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#elif defined(__linux__)
-    // Linux: LD_LIBRARY_PATH uses ':' as separator
-    std::string lib_runtime_path = path + ":/usr/local/lib:/usr/lib";
-    if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    std::string adsp_runtime_path = path + ";/usr/local/lib;/usr/lib";
-    if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#elif defined(_WIN32)
-    // WoS(Windows on Snapdragon): PATH uses ';' as separator
-    std::string lib_runtime_path = path + ";C:\\Windows\\System32;C:\\Windows\\SysWOW64";
-    if (0 == _putenv_s("PATH", lib_runtime_path.c_str())) {
-        GGMLHEXAGON_LOG_DEBUG("setenv PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    std::string adsp_runtime_path = path + ";C:\\Windows\\System32";
-    if (0 == _putenv_s("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str())) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#endif
 }
 
 static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
@@ -6934,23 +6842,14 @@ static const char * ggml_backend_hexagon_get_devname(size_t dev_num) {
     return "unknown";
 }
 
-static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath) {
+static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device) {
     ggmlhexagon_load_cfg();
     ggmlhexagon_check_valid_appcfg();
 
-    if (nullptr == runtime_libpath) {
-        runtime_libpath = g_hexagon_appcfg.runtime_libpath;
-    }
-
     GGMLHEXAGON_LOG_ALWAYS("device %d", device);
-    GGMLHEXAGON_LOG_ALWAYS("runtime libpath %s", runtime_libpath);
     if (device >= GGML_HEXAGON_MAX_DEVICES) {
         GGMLHEXAGON_LOG_ERROR("invalid device %d", device);
         return nullptr;
-    }
-
-    if (0 != strncmp(runtime_libpath, g_hexagon_appcfg.runtime_libpath, strlen(g_hexagon_appcfg.runtime_libpath))) {
-        ggmlhexagon_set_runtime_path(device, runtime_libpath);
     }
 
     // Get the device from registry
@@ -6984,7 +6883,7 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
 }
 
 ggml_backend_t ggml_backend_hexagon_init(void) {
-    return ggml_backend_hexagon_init_ext(0, nullptr);
+    return ggml_backend_hexagon_init_ext(0);
 }
 
 GGML_BACKEND_DL_IMPL(ggml_backend_hexagon_reg)
