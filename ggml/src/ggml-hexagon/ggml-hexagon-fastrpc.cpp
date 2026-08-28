@@ -102,7 +102,6 @@ static int                   ggmlhexagon_get_hvx_arch_ver(int domain, uint32_t *
 static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
 static bool                  ggml_backend_buffer_is_hexagon_repack(const ggml_backend_buffer * b);
 static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
-static void                  ggmlhexagon_set_runtime_path(size_t device, const std::string & path);
 static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
 static ggml_backend_t        ggml_backend_hexagon_init_ext(size_t device, const char * runtime_libpath);
 static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
@@ -1024,8 +1023,6 @@ static void ggmlhexagon_load_cfg() {
                                return s;
                            }().c_str());
 
-    ggmlhexagon_set_runtime_path(0, g_hexagon_appcfg.runtime_libpath);
-
     initialized = true;
 }
 
@@ -1198,57 +1195,6 @@ static bool ggmlhexagon_same_types(const ggml_backend_hexagon_context * ctx, con
         return false;
 
     return true;
-}
-
-static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path) {
-    GGML_UNUSED(device);
-#if defined(__ANDROID__)
-    // Android: LD_LIBRARY_PATH uses ':' as separator
-    std::string lib_runtime_path = path + ":/vendor/dsp/cdsp:/vendor/lib64:/vendor/dsp/dsp:/vendor/dsp/images";
-    if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    // ADSP_LIBRARY_PATH uses ';' as separator on all platforms
-    std::string adsp_runtime_path = path + ";/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/system/lib/rfsa/adsp;/vendor/dsp/dsp;/vendor/dsp/images;/dsp";
-    if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#elif defined(__linux__)
-    // Linux: LD_LIBRARY_PATH uses ':' as separator
-    std::string lib_runtime_path = path + ":/usr/local/lib:/usr/lib";
-    if (0 == setenv("LD_LIBRARY_PATH", lib_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv LD_LIBRARY_PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv LD_LIBRARY_PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    std::string adsp_runtime_path = path + ";/usr/local/lib;/usr/lib";
-    if (0 == setenv("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str(), 1)) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#elif defined(_WIN32)
-    // WoS(Windows on Snapdragon): PATH uses ';' as separator
-    std::string lib_runtime_path = path + ";C:\\Windows\\System32;C:\\Windows\\SysWOW64";
-    if (0 == _putenv_s("PATH", lib_runtime_path.c_str())) {
-        GGMLHEXAGON_LOG_DEBUG("setenv PATH %s successfully", lib_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv PATH %s failure", lib_runtime_path.c_str());
-    }
-
-    std::string adsp_runtime_path = path + ";C:\\Windows\\System32";
-    if (0 == _putenv_s("ADSP_LIBRARY_PATH", adsp_runtime_path.c_str())) {
-        GGMLHEXAGON_LOG_DEBUG("setenv ADSP_LIBRARY_PATH %s successfully", adsp_runtime_path.c_str());
-    } else {
-        GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
-    }
-#endif
 }
 
 static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
@@ -6947,10 +6893,6 @@ static ggml_backend_t ggml_backend_hexagon_init_ext(size_t device, const char * 
     if (device >= GGML_HEXAGON_MAX_DEVICES) {
         GGMLHEXAGON_LOG_ERROR("invalid device %d", device);
         return nullptr;
-    }
-
-    if (0 != strncmp(runtime_libpath, g_hexagon_appcfg.runtime_libpath, strlen(g_hexagon_appcfg.runtime_libpath))) {
-        ggmlhexagon_set_runtime_path(device, runtime_libpath);
     }
 
     // Get the device from registry
