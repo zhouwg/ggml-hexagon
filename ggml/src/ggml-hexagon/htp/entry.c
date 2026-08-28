@@ -382,7 +382,7 @@ static inline void weight_inval_unmark(const void * ptr) {
  * bit 0 (first-touch weight tracking) is a separate mechanism; see
  * weight_inval_check_and_mark() and INVAL_SRC_IF_NEEDED(). It is session-
  * scoped and reset on model reload (via execute_batch 0xFFFC bit 4) so
- * new weights at reused ION addresses are properly invalidated.
+ * new weights at reused mempool addresses are properly invalidated.
  */
 static inline bool dsp_range_contains(const void * r_base, size_t r_len,
                                       const void * q_base, size_t q_len) {
@@ -459,7 +459,7 @@ static inline void bulk_flush_sort(void) {
 
 /* Walk sorted list, merge adjacent/overlapping ranges, flush each merged
  * region once. Overlap defined as next_start <= cur_end (1B threshold:
- * touching ranges merge). Flushes in sorted order to preserve ION ordering.
+ * touching ranges merge). Flushes in sorted order to preserve mempool ordering.
  *
  * Uses ggml_htp_cache_flush_range_nosync() to avoid one syncht per region;
  * a single syncht is issued at the end so AP reads of the flushed tensors
@@ -547,10 +547,6 @@ static int vtcm_release_callback(unsigned int rctx, void * state) {
 // =================================================================================================
 static int power_on_hvx_hmx(struct dsp_context * ctx) {
     HAP_power_request_t req;
-
-    /* Note: ctx->power_ctx is left NULL (calloc) and passed as the context
-     * argument; HAP_power_set treats it as reserved on single-PD sessions,
-     * matching Qualcomm's original implementation. */
 
     /* Set client class */
     memset(&req, 0, sizeof(req));
@@ -699,7 +695,7 @@ static AEEResult hap_probe_dsp(remote_handle64 h) {
 }
 
 // =================================================================================================
-// Qualcomm compatibility layer (ported from Qualcomm's ggml-hexagon)
+// Qualcomm compatibility layer (ported from Qualcomm's dspqueue-based ggml-hexagon)
 // =================================================================================================
 // begin translation layer {
 
@@ -1352,11 +1348,10 @@ int ggml_htp_open(const char * uri, remote_handle64 * handle) {
         ctx->op_prof_min_us[i] = UINT64_MAX;
     }
 #endif
-    // Default to 0: no DSP-side cache optimizations beyond the baseline
-    // first-touch weight tracking. AP will push the configured bitmask via
+    // Default to 0: no DSP-side cache optimizations.
+    // AP will push the configured bitmask via
     // execute_batch(0xFFFC) right after ggml_htp_open returns. Until then,
-    // every code path that consults dsp_cache_mode sees 0 and behaves like
-    // baseline 29c1cf196.
+    // every code path that consults dsp_cache_mode sees 0
     ctx->dsp_cache_mode = 0;
     ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
     ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
@@ -1460,10 +1455,7 @@ int ggml_htp_open(const char * uri, remote_handle64 * handle) {
             /* VTCM: acquire once for the whole session (matches
              * htp/main.c htp_packet_callback pattern: acquire once at
              * session start, release once at session end).
-             * Avoids per-batch HAP_compute_res_acquire/release_cached churn
-             * (~8700 calls/session -> 2 calls/session) and the SDK's
-             * adsprpc FARF log noise. */
-            /* dsp_vtcm_acquire() uses g_dsp_ctx internally: publish ctx
+             * dsp_vtcm_acquire() uses g_dsp_ctx internally: publish ctx
              * now that all fields it reads are initialized. */
             g_dsp_ctx = ctx;
             dsp_vtcm_acquire();
@@ -1537,7 +1529,7 @@ int ggml_htp_open(const char * uri, remote_handle64 * handle) {
         if (max_avail_mb == 0) {
             printf("DSP malloc probe: even 16 MB failed!\n");
         } else {
-            printf("DSP malloc probe: max available = %zu MB (for work data only, cache uses ION)\n", max_avail_mb);
+            printf("DSP malloc probe: max available = %zu MB (for work data only, cache uses mempool)\n", max_avail_mb);
         }
     }
 
@@ -1812,7 +1804,7 @@ AEEResult ggml_htp_register_rpcmem(remote_handle64 h, uint32_t ion_fd, uint32_t 
     int32_t fd = (int32_t)ion_fd;
     uint64_t size = ((uint64_t)size_hi << 32) | (uint64_t)size_lo;
 
-    GGMLHEXAGON_LOG_INFO("[ION-REG] fd=%d, size=%llu bytes (%dMB)",
+    GGMLHEXAGON_LOG_INFO("[MEMPOOL-REG] fd=%d, size=%llu bytes (%dMB)",
                          fd, (unsigned long long)size, (int32_t)(size >> 20));
 
     int64_t t0_mmap = ggml_time_us();
@@ -1825,14 +1817,14 @@ AEEResult ggml_htp_register_rpcmem(remote_handle64 h, uint32_t ion_fd, uint32_t 
 
     if (va == NULL || va == (void *)-1) {
         g_dsp_ctx->mempool_dsp_base = NULL;
-        GGMLHEXAGON_LOG_ERROR("[ION-REG] HAP_mmap2 FAILED: returned %p (fd=%d, size=%llu)", va, fd, (unsigned long long)size);
+        GGMLHEXAGON_LOG_ERROR("[MEMPOOL-REG] HAP_mmap2 FAILED: returned %p (fd=%d, size=%llu)", va, fd, (unsigned long long)size);
         return AEE_EFAILED;
     }
 
     g_dsp_ctx->mempool_dsp_base = va;
     g_dsp_ctx->mempool_dsp_size = (size_t)size;
     // Use FARF(ALWAYS) so the timing log is visible via adb logcat on all builds
-    FARF(ALWAYS, "[ION-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB, time=%lld us)", va, fd, g_dsp_ctx->mempool_dsp_size / (1024*1024), (long long)dt_mmap);
+    FARF(ALWAYS, "[MEMPOOL-REG] HAP_mmap2 OK: va=%p (fd=%d, size=%zuMB, time=%lld us)", va, fd, g_dsp_ctx->mempool_dsp_size / (1024*1024), (long long)dt_mmap);
 
     return AEE_SUCCESS;
 }
@@ -1864,13 +1856,13 @@ static void dsp_queues_suspend(void) {
 }
 
 /*
- * ION-based op-batch execution: FastRPC only passes 2 scalars (offset, size) - all data is in the mempool.
+ * mempool-based op-batch execution: FastRPC only passes 2 scalars (offset, size) - all data is in the mempool.
  */
 AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint32_t batch_size) {
     g_dsp_ctx = (struct dsp_context *)h;
     if (!g_dsp_ctx) return AEE_EBADPARM;
     if (g_dsp_ctx->mempool_dsp_base == NULL) {
-        GGMLHEXAGON_LOG_ERROR("ION base not registered");
+        GGMLHEXAGON_LOG_ERROR("mempool base not registered");
         return AEE_EBADPARM;
     }
 
@@ -1895,7 +1887,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      *               intermediates). Only effective when bit 2 is also on.
      *               Mirrored dsts (flags&0x1) and final outputs always flush.
      *   bit 4 (0x10): reset weight_inval array    - clear first-touch tracking
-     *               so new model weights at reused ION addresses get properly
+     *               so new model weights at reused mempool addresses get properly
      *               invalidated after model unload/reload. */
     if (batch_size == 0xFFFC) {
         g_dsp_ctx->dsp_cache_mode = batch_offset & 0xFu;
@@ -1917,7 +1909,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     }
 
     /* Warmup mode: batch_size == 0xFFFB.
-     * AP calls this once after session init to warm up the FastRPC/ION path
+     * AP calls this once after session init to warm up the FastRPC/mempool path
      * without doing any real compute. Just logs and returns. */
     if (batch_size == 0xFFFB) {
         GGMLHEXAGON_LOG_INFO("[DSP-WARMUP] no-op warmup done");
@@ -1929,11 +1921,13 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const int64_t prof_batch_t0 = ggml_time_us();
 #endif
     /* Invalidate DSP cache for the batch descriptor before reading.
-     * ION is non-coherent: AP reuses the mempool and writes a new batch
-     * at the same offset, so DSP must invalidate to fetch fresh data.
-     * Use dcinva (invalidate only) instead of dccleaninva (clean+invalidate):
-     * dccleaninva would write back stale DSP cache lines to DRAM, overwriting
-     * the fresh data AP just flushed via DC CVAC. */
+     * mempool is non-coherent between CPU and NPU (no hardware cache
+     * coherency). FastRPC framework handles AP-side cache flush as part
+     * of ggml_htp_execute_batch(). DSP must invalidate its cache to see
+     * the fresh data from DDR.
+     * Use dcinva (invalidate only) instead of dcccleaninva (clean+invalidate):
+     * dcccleaninva would write back stale DSP cache lines to DRAM, overwriting
+     * the fresh data AP wrote. */
 #if HEX_OP_PROF
     const int64_t prof_hdr_t0 = ggml_time_us();
 #endif
@@ -1944,7 +1938,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     const hex_batch_hdr * hdr = (const hex_batch_hdr *)(base + batch_offset);
 
     if (hdr->n_ops == 0 || hdr->n_tensors == 0) {
-        GGMLHEXAGON_LOG_ERROR("empty ion-batch: n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+        GGMLHEXAGON_LOG_ERROR("empty mempool-batch: n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
         return AEE_EBADPARM;
     }
     if (hdr->n_tensors > DSP_OPT_MAX_TENSORS) {
@@ -2007,7 +2001,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
      * session (matches htp/main.c htp_packet_callback pattern). Per-batch
      * acquire/release removed: see dsp_vtcm_acquire in ggml_htp_open. */
 
-    GGMLHEXAGON_LOG_DEBUG("ion-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
+    GGMLHEXAGON_LOG_DEBUG("mempool-batch: start n_ops=%u n_tensors=%u", hdr->n_ops, hdr->n_tensors);
 
     /* Reset per-batch dst trackers.
      *  - prior_dst_ranges is consulted by bit 1; the per-op dst tracker
@@ -2135,7 +2129,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
             }
         }
 
-        GGMLHEXAGON_LOG_DEBUG("ion-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
+        GGMLHEXAGON_LOG_DEBUG("mempool-batch: op %u/%u opc=%d", i, hdr->n_ops, op->opcode);
 
         // Translation layer: map GGML op to HTP op, build octx, call execute_op.
         // For fused ops, AP sets htp_opcode directly (skip ggml_op_to_htp_op).
@@ -2143,12 +2137,12 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         if (op->htp_opcode != 0) {
             htp_op = (enum htp_op_code) op->htp_opcode;
         } else if (ggml_op_to_htp_op(op->opcode, op->params, &htp_op) != 0) {
-            GGMLHEXAGON_LOG_ERROR("ion-op %u: unsupported opcode %d", i, op->opcode);
+            GGMLHEXAGON_LOG_ERROR("mempool-op %u: unsupported opcode %d", i, op->opcode);
             dsp_queues_suspend();
             return AEE_EUNSUPPORTED;
         }
 
-        GGMLHEXAGON_LOG_DEBUG("ion-op %u: htp_op=%u opcode=%d", i, htp_op, op->opcode);
+        GGMLHEXAGON_LOG_DEBUG("mempool-op %u: htp_op=%u opcode=%d", i, htp_op, op->opcode);
 
         struct htp_ops_context octx;
 
@@ -2171,7 +2165,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
              * the op was routed here against fa_select policy (e.g. direct
              * graph_compute with fa_select=0). Reject instead of running it. */
             if (kp_kernel_type == HTP_FA_KERNEL_UNSUPPORTED) {
-                GGMLHEXAGON_LOG_ERROR("ion-op %u: FLASH_ATTN_EXT without precomputed params", i);
+                GGMLHEXAGON_LOG_ERROR("mempool-op %u: FLASH_ATTN_EXT without precomputed params", i);
                 dsp_queues_suspend();
                 return AEE_EUNSUPPORTED;
             }
@@ -2231,13 +2225,13 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                 (op_ret == HTP_STATUS_NO_SUPPORT)    ? "NO_SUPPORT"     :
                 (op_ret == HTP_STATUS_INVAL_PARAMS)  ? "INVAL_PARAMS"   :
                 (op_ret == HTP_STATUS_VTCM_TOO_SMALL) ? "VTCM_TOO_SMALL" : "UNKNOWN";
-            GGMLHEXAGON_LOG_ERROR("ion-op %u: execute_op returned %d/%s (htp_op=%d)",
+            GGMLHEXAGON_LOG_ERROR("mempool-op %u: execute_op returned %d/%s (htp_op=%d)",
                                   i, op_ret, st_name, htp_op);
             dsp_queues_suspend();
             return AEE_EFAILED;
         }
 
-        GGMLHEXAGON_LOG_DEBUG("ion-batch: op %u done", i);
+        GGMLHEXAGON_LOG_DEBUG("mempool-batch: op %u done", i);
 
         /* bit 2: bulk dst flush at batch end.
          * Also mark dst tensors as dirty so they get re-invalidated
@@ -2291,7 +2285,7 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
         }
     }
 
-    GGMLHEXAGON_LOG_DEBUG("ion-batch: all %u ops done", hdr->n_ops);
+    GGMLHEXAGON_LOG_DEBUG("mempool-batch: all %u ops done", hdr->n_ops);
 
 #if HEX_OP_PROF
     const int64_t prof_qs_t0 = ggml_time_us();
