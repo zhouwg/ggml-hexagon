@@ -32,80 +32,26 @@
 #include <algorithm>
 #include <cctype>
 
-#if defined(__ANDROID__) || defined(__linux__)
-#include <unistd.h>
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/sysinfo.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
+#ifdef __WIN32
+    #    define WIN32_LEAN_AND_MEAN
+    #    ifndef NOMINMAX
+    #       define NOMINMAX
+    #    endif
+    #    include <windows.h>
+    #    include <sal.h>
+#else
+    #include <unistd.h>
+    #include <sys/sysinfo.h>
 #endif
 
 #if defined(__ANDROID__)
-#include "android/log.h"
+    #include "android/log.h"
 #endif
 
-#include "rpcmem.h"
-#include "remote.h"
-#include "AEEStdErr.h"
-#include "htp-drv.h"
-#include "HAP_power.h"
-#include "HAP_farf.h"
-
-#include "ggml-hexagon.h"
-#include "ggml-impl.h"
-#include "ggml-backend-impl.h"
-
 #pragma clang diagnostic ignored "-Wnested-anon-types"
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
 #pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
-#define GGML_COMMON_DECL_C
-#include "ggml-common.h"
-#include "ggml-quants.h"
-
-#include "ggml_htp.h"
-#include "htp/dsp-ctx.h"
-#include "htp/htp-ops.h"
-#include "htp/hex-common.h"
-#include "htp/hex-fastdiv.h"
-#include "htp/get-rows-ops.h"
-#include "htp/set-rows-ops.h"
-#include "htp/matmul-ops.h"
-#include "htp/flash-attn-ops.h"
-#include "htp/unary-ops.h"
-
-// =================================================================================================
-//  section-1: forward declarations, global vars, macros
-// =================================================================================================
-#define GGML_HEXAGON_MAX_DEVICES                        16
-
-#define SIZE_IN_MB                                      (1 << 20)
-
-struct ggml_hexagon_device_config {
-    int physical_idx = 0;
-    int virtual_idx  = 0;
-    std::string name;
-};
-
-static ggml_hexagon_device_config opt_device_configs[GGML_HEXAGON_MAX_DEVICES];
-
-static int get_domain_id(int physical_idx) {
-    switch (physical_idx) {
-        case 0:  return 3;   // CDSP0 (all devices)
-        case 1:  return 4;   // CDSP1 (IQ9, IQ10)
-        case 2:  return 18;  // CDSP2 (IQ10)
-        case 3:  return 19;  // CDSP3 (IQ10)
-        default: return CDSP_DOMAIN_ID + physical_idx;
-    }
-}
-
-static std::string get_domain_name(int physical_idx) {
-    if (physical_idx == 0) {
-        return CDSP_DOMAIN_NAME;
-    }
-    return std::string("cdsp") + std::to_string(physical_idx);
-}
+#pragma clang diagnostic ignored "-Wmicrosoft-enum-value"
 
 #if !defined (_WIN32)
 #pragma weak remote_system_request
@@ -115,6 +61,35 @@ static std::string get_domain_name(int physical_idx) {
 #pragma weak fastrpc_mmap
 #pragma weak fastrpc_munmap
 #endif
+
+#include <AEEStdErr.h>
+#include <rpcmem.h>
+#include <remote.h>
+
+#define GGML_COMMON_IMPL_CPP
+#include "ggml-backend-impl.h"
+#include "ggml-common.h"
+#include "ggml-hexagon.h"
+#include "ggml-impl.h"
+#include "ggml-quants.h"
+#include "htp/htp-ops.h"
+#include "htp/dsp-ctx.h"
+#include "htp/matmul-ops.h"
+#include "htp/hex-common.h"
+#include "htp/hex-fastdiv.h"
+#include "htp/flash-attn-ops.h"
+#include "htp/unary-ops.h"
+#include "htp/get-rows-ops.h"
+#include "htp/set-rows-ops.h"
+#include "ggml_htp.h"
+#include "htp-drv.h"
+
+// =================================================================================================
+//  section-1: forward declarations, global vars, macros
+// =================================================================================================
+#define GGML_HEXAGON_MAX_DEVICES                        16
+
+#define SIZE_IN_MB                                      (1 << 20)
 
 // Forward declarations
 struct ggml_backend_hexagon_context;
@@ -180,6 +155,12 @@ struct ion_pool_region {
     size_t offset;      // byte offset from mempool base
     size_t size;        // allocation size in bytes
     bool   in_use;      // true if currently allocated
+};
+
+struct ggml_hexagon_device_config {
+    int physical_idx = 0;
+    int virtual_idx  = 0;
+    std::string name;
 };
 
 struct ggml_backend_hexagon_context {
@@ -348,6 +329,7 @@ struct ggml_backend_hexagon_context {
     // will execute an allreduce kernel synchronized via shared-memory
     // fence slots at these offsets within each device's mempool.
     // Currently unused because the AP-side allreduce path is used instead.
+    // Fence implementation will re-use the single mempool design in the FastRPC-based ggml-hexagon
     static constexpr size_t FENCE_SLOT_SIZE  = 128;
     static constexpr size_t FENCE_SLOTS_MAX  = GGML_HEXAGON_MAX_DEVICES;
 
@@ -421,7 +403,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .version                = {"0.99.7.8"},
 };
 
-//supported Snapdragon devices
+//TODO: add descriptors for more supported Snapdragon devices
 static struct qcom_socinfo g_hexagon_soc_info_table[] = {
         /* Qualcomm Snapdragon 8 Gen 2 */
         {
@@ -471,6 +453,9 @@ static char g_runtime_libpath_buf[512] =
     "C:\\temp\\"
 #endif
 ;
+
+//For multi-NPU support
+static ggml_hexagon_device_config opt_device_configs[GGML_HEXAGON_MAX_DEVICES];
 
 // =================================================================================================
 //  section-3: troubleshooting and profiler
@@ -605,7 +590,7 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
 }
 
-// dump accumulated performance statistics collected during graph_compute_batch
+// Dump accumulated performance statistics collected during graph_compute_batch
 static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx) {
     if (nullptr == ctx) {
         return;
@@ -1073,7 +1058,7 @@ static void ggmlhexagon_check_valid_appcfg() {
 
 // Set the runtime library path where NPU skeleton .so files (libggml-htp-v*.so)
 // and ggml-hexagon.cfg are located. Must be called before any hexagon backend
-// registration to take effect.
+// registration to take effect. verified in the real Android APK
 GGML_BACKEND_API void ggml_hexagon_set_runtime_libpath(const char * path) {
     if (path == nullptr) {
         return;
@@ -1122,6 +1107,7 @@ static size_t ggmlhexagon_htparch_hex_to_decimal(size_t htp_arch) {
     return a * 10 + b;
 }
 
+//Currently only support V73,V75,V79,V81, align with QCOM reference
 static const char * ggmlhexagon_get_htparch_desc(size_t htp_arch) {
     switch (htp_arch) {
         case V73:
@@ -1248,7 +1234,7 @@ static void ggmlhexagon_set_runtime_path(size_t device, const std::string & path
         GGMLHEXAGON_LOG_ERROR("setenv ADSP_LIBRARY_PATH %s failure", adsp_runtime_path.c_str());
     }
 #elif defined(_WIN32)
-    // WoA: PATH uses ';' as separator
+    // WoS(Windows on Snapdragon): PATH uses ';' as separator
     std::string lib_runtime_path = path + ";C:\\Windows\\System32;C:\\Windows\\SysWOW64";
     if (0 == _putenv_s("PATH", lib_runtime_path.c_str())) {
         GGMLHEXAGON_LOG_DEBUG("setenv PATH %s successfully", lib_runtime_path.c_str());
@@ -1291,6 +1277,23 @@ static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
 // =================================================================================================
 //  section-6: HTP helper functions
 // =================================================================================================
+static int get_domain_id(int physical_idx) {
+    switch (physical_idx) {
+        case 0:  return 3;   // CDSP0 (all devices)
+        case 1:  return 4;   // CDSP1 (IQ9, IQ10)
+        case 2:  return 18;  // CDSP2 (IQ10)
+        case 3:  return 19;  // CDSP3 (IQ10)
+        default: return CDSP_DOMAIN_ID + physical_idx;
+    }
+}
+
+static std::string get_domain_name(int physical_idx) {
+    if (physical_idx == 0) {
+        return CDSP_DOMAIN_NAME;
+    }
+    return std::string("cdsp") + std::to_string(physical_idx);
+}
+
 static const char * ggmlhexagon_get_dsp_name(int domain_id) {
     if (domain_id == 3)  return "CDSP0";
     if (domain_id == 4)  return "CDSP1";
@@ -1758,7 +1761,7 @@ static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
         ctx->ggmlop_handle = 0;
     }
     ggmlhexagon_deinit_rpcmempool(ctx);
-    //probe before domain_id is invalidated so AP-side domain queries still work
+    //Probe before domain_id is invalidated so AP-side domain queries still work
     if (ctx->domain_id >= 0) {
         ggmlhexagon_probe_dspinfo(ctx);
     }
@@ -1968,7 +1971,7 @@ bail:
 }
 
 // =================================================================================================
-//  section-7: pack & repack help functions
+//  section-7: pack & repack helper functions
 // =================================================================================================
 
 // ---- Tiled repack for HVX-quant MUL_MAT ----
@@ -2737,9 +2740,8 @@ static void repack_tiled_q4_0_to_q6k_buf(void * dst_data, const ggml_tensor * t,
 }
 
 // =================================================================================================
-//  section-8: Qualcomm compatibility layer(ported from Qualcomm's ggml-hexagon)
+//  section-8: Qualcomm compatibility layer(ported from Qualcomm's dspqueue-based ggml-hexagon)
 // =================================================================================================
-
 static inline size_t htp_mm_hvx_get_vtcm_sizes(
     int kernel_type, int wtype, uint32_t ne10, uint32_t src1_nrows,
     uint32_t n_threads,
@@ -2913,6 +2915,7 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
         case GGML_OP_SCALE:   *htp_op = HTP_OP_SCALE;       return true;
         case GGML_OP_SQR:     *htp_op = HTP_OP_SQR;         return true;
         case GGML_OP_SQRT:    *htp_op = HTP_OP_SQRT;        return true;
+        case GGML_OP_LOG:     *htp_op = HTP_OP_UNARY_LOG;   return true;
         case GGML_OP_TRI:     *htp_op = HTP_OP_TRI;         return true;
         case GGML_OP_UNARY:
             if (!op_params) return false;
@@ -2922,6 +2925,7 @@ static bool ggml_op_to_htp_op_unary(int32_t ggml_op, const int32_t * op_params, 
                 case GGML_UNARY_OP_SIGMOID:    *htp_op = HTP_OP_UNARY_SIGMOID;  return true;
                 case GGML_UNARY_OP_EXP:        *htp_op = HTP_OP_UNARY_EXP;      return true;
                 case GGML_UNARY_OP_SOFTPLUS:   *htp_op = HTP_OP_UNARY_SOFTPLUS; return true;
+                case GGML_UNARY_OP_ABS:        *htp_op = HTP_OP_UNARY_ABS;      return true;
                 case GGML_UNARY_OP_SILU:       *htp_op = HTP_OP_UNARY_SILU;     return true;
                 case GGML_UNARY_OP_GELU:
                 case GGML_UNARY_OP_GELU_QUICK: *htp_op = HTP_OP_UNARY_GELU;     return true;
@@ -4532,6 +4536,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_L2_NORM]        = hexagon_validate_norm_op;
     s_op_validators[GGML_OP_SQR]            = hexagon_validate_sqr_sqrt;
     s_op_validators[GGML_OP_SQRT]           = hexagon_validate_sqr_sqrt;
+    s_op_validators[GGML_OP_LOG]            = hexagon_validate_sqr_sqrt;
     s_op_validators[GGML_OP_ROPE]           = hexagon_validate_rope;
     s_op_validators[GGML_OP_SOFT_MAX]       = hexagon_validate_soft_max;
     s_op_validators[GGML_OP_UNARY]          = hexagon_validate_unary;
@@ -4580,7 +4585,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
 struct ggml_backend_hexagon_buffer_context {
     ~ggml_backend_hexagon_buffer_context() {
         if (buffer) {
-            if (is_ion_buffer) {
+            if (is_mempool_buffer) {
                 if (backend_ctx && backend_ctx->rpc_mempool) {
                     // Mark the mempool region as free so it can be reused
                     const char * buf_ptr = (const char *)buffer;
@@ -4630,7 +4635,7 @@ struct ggml_backend_hexagon_buffer_context {
 
     void * buffer       = nullptr;
     size_t buffer_size  = 0;
-    bool   is_ion_buffer= false;
+    bool   is_mempool_buffer= false;
 
     struct ggml_backend_hexagon_context * backend_ctx = nullptr;
 };
@@ -4962,7 +4967,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_
     GGMLHEXAGON_LOG_ALWAYS("[ALLOC] ENTER device=%d size=%zu bytes (%.2f MiB)", ctx->device, size, (double)size / (1024.0 * 1024.0));
     ggml_backend_hexagon_buffer_context * buffer_ctx = new ggml_backend_hexagon_buffer_context;
     buffer_ctx->backend_ctx = ctx;
-    buffer_ctx->is_ion_buffer = true;
+    buffer_ctx->is_mempool_buffer = true;
 
     size_t size_page = 4096;  // default page size if sysconf is unavailable
 #if defined(__ANDROID__) || defined(__linux__)
@@ -5062,7 +5067,7 @@ static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_
         GGMLHEXAGON_LOG_ALWAYS("%s: succeed to allocate %zu MiB\n", __func__, size / SIZE_IN_MB);
     }
     // Report allocation result and current mempool state
-    if (buffer_ctx->is_ion_buffer) {
+    if (buffer_ctx->is_mempool_buffer) {
         const char * mem_type = "heap";
         const char * data_ptr = (const char *)buffer_ctx->buffer;
         const char * pool_base = (const char *)ctx->rpc_mempool;
@@ -5259,7 +5264,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 
     ggml_backend_hexagon_context::cgraph_cache_entry * cached_entry = nullptr;
 
-    // track per-graph node statistics (what ggml core assigned to this backend)
+    // Track per-graph node statistics (what ggml core assigned to this backend)
     ctx->total_nodes_processed += graph_n_nodes;
     if (ctx->min_nodes_per_graph == 0 || graph_n_nodes < ctx->min_nodes_per_graph) {
         ctx->min_nodes_per_graph = graph_n_nodes;
@@ -5330,7 +5335,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     if (!cache_hit) {
-        // ---- collect supported ops (cache miss only) ----
+        // ---- Collect supported ops (cache miss only) ----
         supported_nodes.reserve(cgraph->n_nodes);
         for (int i = 0; i < cgraph->n_nodes; i++) {
             ggml_tensor * node = cgraph->nodes[i];
@@ -6771,8 +6776,6 @@ static bool ggml_backend_hexagon_comm_allreduce_tensor(void * comm_ctx_v, struct
     if (tensors[0]->type != GGML_TYPE_F16 && tensors[0]->type != GGML_TYPE_F32) {
         return false;
     }
-
-
 
     // AP-side allreduce: each CDSP only sees its own mempool, so cross-device
     // reduction must happen on the AP CPU.  Read all devices' partial results,
