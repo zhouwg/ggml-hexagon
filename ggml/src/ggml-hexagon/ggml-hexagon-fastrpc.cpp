@@ -85,39 +85,18 @@
 #include "htp-drv.h"
 
 // =================================================================================================
-//  section-1: forward declarations, global vars, macros
+//  section-1: forward declarations, macros
 // =================================================================================================
+// Macros
 #define GGML_HEXAGON_MAX_DEVICES                        16
 
 #define SIZE_IN_MB                                      (1 << 20)
 
 // Forward declarations
-struct ggml_backend_hexagon_context;
-struct ggml_backend_hexagon_reg_context;
-
-static int                   ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx);
-static const char *          ggmlhexagon_get_htparch_desc(size_t htp_arch);
-static size_t                ggmlhexagon_get_system_total_memory_in_bytes(void);
-static int                   ggmlhexagon_get_hvx_arch_ver(int domain, uint32_t * capability);
-static int                   hexagon_warmup_invoke_timed(ggml_backend_hexagon_context * ctx);
-static bool                  ggml_backend_buffer_is_hexagon_repack(const ggml_backend_buffer * b);
-static bool                  ggml_backend_hexagon_buffer_is_host(ggml_backend_buffer_type_t buft);
-static const char *          ggml_backend_hexagon_buffer_type_name(ggml_backend_buffer_type_t buft);
-static ggml_backend_t        ggml_backend_hexagon_init_ext(size_t device);
-static size_t                ggml_backend_hexagon_buffer_type_get_max_size(ggml_backend_buffer_type_t buft);
-static size_t                ggml_backend_hexagon_buffer_type_get_alignment(ggml_backend_buffer_type_t buft);
-static bool                  ggml_backend_hexagon_repack_buffer_is_host(ggml_backend_buffer_type_t buft);
-static bool                  ggmlhexagon_op_buffers_belong_to_dev(ggml_backend_dev_t dev, const ggml_tensor * op);
-static bool                  ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const ggml_tensor * t);
-static ggml_backend_t        ggml_backend_hexagon_device_init_backend(ggml_backend_dev_t dev, const char * params);
-static size_t                ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffer_type_t buft, const ggml_tensor * tensor);
-
-static ggml_backend_hexagon_context * ggml_backend_hexagon_ensure_context(ggml_backend_dev_t dev);
-static ggml_backend_buffer_t ggml_backend_hexagon_buffer_type_alloc_buffer(ggml_backend_buffer_type_t buft, size_t size);
-static bool                  ggml_hexagon_compute_fa_params(const ggml_backend_hexagon_context * ctx, const ggml_tensor * node, htp_fa_kernel_params * kparams);
+static bool                  ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const ggml_tensor * op);
 
 // =================================================================================================
-//  section-2: data structures
+//  section-2: data structures & global vars
 // =================================================================================================
 enum qcom_htp_arch {
     NONE = 0,
@@ -334,6 +313,11 @@ struct ggml_backend_hexagon_context {
     ~ggml_backend_hexagon_context();
 };
 
+struct ggml_backend_hexagon_reg_context {
+    std::vector<ggml_backend_dev_t> devices;
+    ~ggml_backend_hexagon_reg_context();
+};
+
 struct hexagon_appcfg_t {
     int dump_debug_info;        // enable/disable dump debug info for troubleshooting issues on AP side
     int thread_counts;          // thread_counts on HTP side
@@ -389,7 +373,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
-        .version                = {"0.99.7.9"},
+        .version                = {"0.10.0"},
 };
 
 //TODO: add descriptors for more supported Snapdragon devices
@@ -567,121 +551,6 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
     GGMLHEXAGON_LOG_VERBOSE("enable op_fusion:                 %d", g_hexagon_appcfg.enable_opfusion);
     GGMLHEXAGON_LOG_VERBOSE("running timestamp:%s", timestamp);
-}
-
-// Dump accumulated performance statistics collected during graph_compute_batch
-static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx) {
-    if (nullptr == ctx) {
-        return;
-    }
-    // Logging convention in this function (inverted from the usual level names):
-    //   VERBOSE -> terminal + adb logcat (key summary for immediate visibility)
-    //   ALWAYS  -> adb logcat only (detailed diagnostics for post-analysis)
-    uint32_t dsp_version = 0;
-    ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
-    size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
-    GGMLHEXAGON_LOG_VERBOSE("device info: %s, dsp arch version 0x%x, system mem size %zu MiB",
-                             ctx->socinfo.soc_desc, dsp_version, total_mem / SIZE_IN_MB);
-    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d async_fastrpc=%d extended_map=%d",
-                             ctx->device, ctx->name,
-                             ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
-                             ctx->socinfo.vtcm_size_in_mb,
-                             (int)ctx->has_hvx, (int)ctx->has_hmx,
-                             (int)ctx->has_async_fastrpc, (int)ctx->has_extended_map);
-    GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
-                             ctx->max_layer_idx_seen + 1);
-    GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p9=%lld us cum_graph=%lld us avg_p9=%lld us avg_graph=%lld us",
-                             (unsigned long long)ctx->rpc_batch_call_count,
-                             (long long)ctx->cum_p9_us, (long long)ctx->cumulative_graph_us,
-                             ctx->rpc_batch_call_count ? (long long)(ctx->cum_p9_us / (int64_t)ctx->rpc_batch_call_count) : 0,
-                             ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
-    GGMLHEXAGON_LOG_VERBOSE("graph nodes: min=%u max=%u total=%u",
-                             ctx->min_nodes_per_graph, ctx->max_nodes_per_graph, ctx->total_nodes_processed);
-    GGMLHEXAGON_LOG_VERBOSE("graph ops (post-fusion): min=%u max=%u",
-                             ctx->min_n_ops_per_call, ctx->max_n_ops_per_call);
-    GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p9=[%lld, %lld] us",
-                             (long long)ctx->min_graph_us, (long long)ctx->max_graph_us,
-                             (long long)ctx->min_p9_us, (long long)ctx->max_p9_us);
-    GGMLHEXAGON_LOG_VERBOSE("per-call overhead: n=%llu min=%lld max=%lld avg=%lld us",
-                             (unsigned long long)ctx->rpc_batch_call_count,
-                             (long long)ctx->min_rpc_overhead_us,
-                             (long long)ctx->max_rpc_overhead_us,
-                             ctx->rpc_batch_call_count ? (long long)(ctx->sum_rpc_overhead_us / (int64_t)ctx->rpc_batch_call_count) : 0);
-    GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
-                             (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
-    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p3=%lld p4=%lld p5=%lld p6=%lld p7=%lld p8=%lld p9=%lld p10=%lld unaccounted=%lld us",
-                             (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
-                             (long long)ctx->cum_p3_us, (long long)ctx->cum_p4_us,
-                             (long long)ctx->cum_p5_us, (long long)ctx->cum_p6_us,
-                             (long long)ctx->cum_p7_us,
-                             (long long)ctx->cum_p8_us, (long long)ctx->cum_p9_us,
-                             (long long)ctx->cum_p10_us,
-                             (long long)ctx->cum_unaccounted_us);
-    // Fine-grained: 2-way p9 split + per-call distribution
-    GGMLHEXAGON_LOG_VERBOSE("p9 2-way cumulative: rpc_setup=%lld dsp_exec=%lld us (sum=%lld)",
-                             (long long)ctx->cum_p9_rpc_setup_us,
-                             (long long)ctx->cum_p9_dsp_exec_us,
-                             (long long)(ctx->cum_p9_rpc_setup_us + ctx->cum_p9_dsp_exec_us));
-    GGMLHEXAGON_LOG_VERBOSE("rpc overhead (warmup): n=%u min=%lld max=%lld avg=%lld us (upper bound, pure FastRPC/mempool transport overhead)",
-                             ctx->rpc_overhead_count,
-                             (long long)ctx->rpc_overhead_min_us, (long long)ctx->rpc_overhead_max_us,
-                             ctx->rpc_overhead_count ? (long long)(ctx->rpc_overhead_sum_us / (int64_t)ctx->rpc_overhead_count) : 0);
-    const uint64_t total_cache_lookups = ctx->cgraph_cache_hits + ctx->cgraph_cache_misses;
-    GGMLHEXAGON_LOG_VERBOSE("cgraph cache: hits=%llu misses=%llu (hit_rate=%.1f%%)",
-                             (unsigned long long)ctx->cgraph_cache_hits,
-                             (unsigned long long)ctx->cgraph_cache_misses,
-                             total_cache_lookups ? (100.0 * ctx->cgraph_cache_hits / total_cache_lookups) : 0.0);
-
-    // MUL_MAT optimization diagnostics (PP). Cumulative across the run.
-    // - n_mul_mat_total: every MUL_MAT in supported_nodes (cache miss only)
-    // - n_hmx_used:      MUL_MAT dispatched to HMX (kparams.n_hmx == 1)
-    // - n_fused_qkv:     3x MUL_MAT (Q,K,V) merged into HTP_OP_MUL_MAT_NX
-    // - n_fused_ffn:     2x MUL_MAT (gate,up) merged into HTP_OP_MUL_MAT_NX
-    // - n_fused_mm_add:  MUL_MAT + ADD merged into HTP_OP_MUL_MAT_ADD
-    {
-        const double total = (double) ctx->n_mul_mat_total_cum;
-        const double hmx_pct  = total > 0 ? 100.0 * ctx->n_hmx_used_cum      / total : 0.0;
-        const double qkv_pct  = total > 0 ? 100.0 * (3 * ctx->n_fused_qkv_cum) / total : 0.0;
-        const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
-        const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
-        GGMLHEXAGON_LOG_VERBOSE("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
-                               "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
-                               (unsigned long long)ctx->n_mul_mat_total_cum,
-                               (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
-                               (unsigned long long)ctx->n_fused_qkv_cum, qkv_pct,
-                               (unsigned long long)ctx->n_fused_ffn_cum, ffn_pct,
-                               (unsigned long long)ctx->n_fused_mm_add_cum, add_pct);
-    }
-
-    // HMX eligibility diagnostic: why MUL_MATs fall back to HVX
-    {
-        uint64_t basic_total = ctx->n_hmx_basic_pass
-                             + ctx->n_hmx_basic_fail_ne01
-                             + ctx->n_hmx_basic_fail_ne00
-                             + ctx->n_hmx_basic_fail_wtype
-                             + ctx->n_hmx_basic_fail_batched
-                             + ctx->n_hmx_basic_fail_permuted
-                             + ctx->n_hmx_basic_fail_small_n;
-        if (basic_total > 0) {
-            GGMLHEXAGON_LOG_VERBOSE("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
-                                     (unsigned long long)basic_total,
-                                     (unsigned long long)ctx->n_hmx_basic_pass,
-                                     basic_total > 0 ? 100.0 * ctx->n_hmx_basic_pass / basic_total : 0.0);
-            GGMLHEXAGON_LOG_VERBOSE("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
-                                     (unsigned long long)ctx->n_hmx_basic_fail_ne01,
-                                     (unsigned long long)ctx->n_hmx_basic_fail_ne00,
-                                     (unsigned long long)ctx->n_hmx_basic_fail_wtype,
-                                     (unsigned long long)ctx->n_hmx_basic_fail_batched,
-                                     (unsigned long long)ctx->n_hmx_basic_fail_permuted,
-                                     (unsigned long long)ctx->n_hmx_basic_fail_small_n);
-            GGMLHEXAGON_LOG_VERBOSE("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
-                                     (unsigned long long)ctx->n_hmx_vtcm_pass,
-                                     (unsigned long long)ctx->n_hmx_vtcm_fail,
-                                     ctx->n_hmx_basic_pass > 0
-                                        ? 100.0 * ctx->n_hmx_vtcm_fail / ctx->n_hmx_basic_pass
-                                        : 0.0);
-        }
-    }
 }
 
 // =================================================================================================
@@ -873,7 +742,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.99.7.9");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.10.0");
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -1182,6 +1051,127 @@ static inline bool ggml_hexagon_is_hmx_weight_type(enum ggml_type type) {
     return type == GGML_TYPE_F16 || type == GGML_TYPE_F32 || ggml_hexagon_is_repack_type(type);
 }
 
+// Returns true if this buffer was allocated from the repack buffer type.
+// Repack buffers hold quantized weight data in tiled (HMX) layout and
+// require set_tensor/get_tensor to repack/unrepack across the boundary.
+static bool ggml_backend_buffer_is_hexagon_repack(const struct ggml_backend_buffer * b) {
+    auto * ctx = (ggml_backend_hexagon_context *)b->buft->context;
+    return b->buft == &ctx->repack_buffer_type;
+}
+
+// Dump accumulated performance statistics collected during graph_compute_batch
+// Logging convention in this function (inverted from the usual level names):
+//   VERBOSE -> terminal + adb logcat (key summary for immediate visibility)
+//   ALWAYS  -> adb logcat only (detailed diagnostics for post-analysis)
+static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx) {
+    if (nullptr == ctx) {
+        return;
+    }
+    size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
+    GGMLHEXAGON_LOG_VERBOSE("device info: %s, dsp arch version v%zu, system mem size %zu MiB",
+                             ctx->socinfo.soc_desc, ctx->socinfo.htp_arch, total_mem / SIZE_IN_MB);
+    GGMLHEXAGON_LOG_VERBOSE("device=%d name=%s arch=%s vtcm=%zuMB hvx=%d hmx=%d async_fastrpc=%d extended_map=%d",
+                             ctx->device, ctx->name,
+                             ggmlhexagon_get_htparch_desc(ctx->socinfo.htp_arch),
+                             ctx->socinfo.vtcm_size_in_mb,
+                             (int)ctx->has_hvx, (int)ctx->has_hmx,
+                             (int)ctx->has_async_fastrpc, (int)ctx->has_extended_map);
+    GGMLHEXAGON_LOG_VERBOSE("model: n_layer=%u (parsed from tensor name suffixes)",
+                             ctx->max_layer_idx_seen + 1);
+    GGMLHEXAGON_LOG_VERBOSE("rpc stats: batch_calls=%llu cum_p9=%lld us cum_graph=%lld us avg_p9=%lld us avg_graph=%lld us",
+                             (unsigned long long)ctx->rpc_batch_call_count,
+                             (long long)ctx->cum_p9_us, (long long)ctx->cumulative_graph_us,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->cum_p9_us / (int64_t)ctx->rpc_batch_call_count) : 0,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->cumulative_graph_us / (int64_t)ctx->rpc_batch_call_count) : 0);
+    GGMLHEXAGON_LOG_VERBOSE("graph nodes: min=%u max=%u total=%u",
+                             ctx->min_nodes_per_graph, ctx->max_nodes_per_graph, ctx->total_nodes_processed);
+    GGMLHEXAGON_LOG_VERBOSE("graph ops (post-fusion): min=%u max=%u",
+                             ctx->min_n_ops_per_call, ctx->max_n_ops_per_call);
+    GGMLHEXAGON_LOG_VERBOSE("per-call range: graph=[%lld, %lld] us p9=[%lld, %lld] us",
+                             (long long)ctx->min_graph_us, (long long)ctx->max_graph_us,
+                             (long long)ctx->min_p9_us, (long long)ctx->max_p9_us);
+    GGMLHEXAGON_LOG_VERBOSE("per-call overhead: n=%llu min=%lld max=%lld avg=%lld us",
+                             (unsigned long long)ctx->rpc_batch_call_count,
+                             (long long)ctx->min_rpc_overhead_us,
+                             (long long)ctx->max_rpc_overhead_us,
+                             ctx->rpc_batch_call_count ? (long long)(ctx->sum_rpc_overhead_us / (int64_t)ctx->rpc_batch_call_count) : 0);
+    GGMLHEXAGON_LOG_VERBOSE("max graph detail: dur=%lld us n_nodes=%u n_ops=%u",
+                             (long long)ctx->max_graph_us, ctx->max_graph_n_nodes, ctx->max_graph_n_ops);
+    GGMLHEXAGON_LOG_VERBOSE("AP phase cumulative: p1=%lld p2=%lld p3=%lld p4=%lld p5=%lld p6=%lld p7=%lld p8=%lld p9=%lld p10=%lld unaccounted=%lld us",
+                             (long long)ctx->cum_p1_us, (long long)ctx->cum_p2_us,
+                             (long long)ctx->cum_p3_us, (long long)ctx->cum_p4_us,
+                             (long long)ctx->cum_p5_us, (long long)ctx->cum_p6_us,
+                             (long long)ctx->cum_p7_us,
+                             (long long)ctx->cum_p8_us, (long long)ctx->cum_p9_us,
+                             (long long)ctx->cum_p10_us,
+                             (long long)ctx->cum_unaccounted_us);
+    // Fine-grained: 2-way p9 split + per-call distribution
+    GGMLHEXAGON_LOG_VERBOSE("p9 2-way cumulative: rpc_setup=%lld dsp_exec=%lld us (sum=%lld)",
+                             (long long)ctx->cum_p9_rpc_setup_us,
+                             (long long)ctx->cum_p9_dsp_exec_us,
+                             (long long)(ctx->cum_p9_rpc_setup_us + ctx->cum_p9_dsp_exec_us));
+    GGMLHEXAGON_LOG_VERBOSE("rpc overhead (warmup): n=%u min=%lld max=%lld avg=%lld us (upper bound, pure FastRPC/mempool transport overhead)",
+                             ctx->rpc_overhead_count,
+                             (long long)ctx->rpc_overhead_min_us, (long long)ctx->rpc_overhead_max_us,
+                             ctx->rpc_overhead_count ? (long long)(ctx->rpc_overhead_sum_us / (int64_t)ctx->rpc_overhead_count) : 0);
+    const uint64_t total_cache_lookups = ctx->cgraph_cache_hits + ctx->cgraph_cache_misses;
+    GGMLHEXAGON_LOG_VERBOSE("cgraph cache: hits=%llu misses=%llu (hit_rate=%.1f%%)",
+                             (unsigned long long)ctx->cgraph_cache_hits,
+                             (unsigned long long)ctx->cgraph_cache_misses,
+                             total_cache_lookups ? (100.0 * ctx->cgraph_cache_hits / total_cache_lookups) : 0.0);
+
+    // MUL_MAT optimization diagnostics (PP). Cumulative across the run.
+    // - n_mul_mat_total: every MUL_MAT in supported_nodes (cache miss only)
+    // - n_hmx_used:      MUL_MAT dispatched to HMX (kparams.n_hmx == 1)
+    // - n_fused_qkv:     3x MUL_MAT (Q,K,V) merged into HTP_OP_MUL_MAT_NX
+    // - n_fused_ffn:     2x MUL_MAT (gate,up) merged into HTP_OP_MUL_MAT_NX
+    // - n_fused_mm_add:  MUL_MAT + ADD merged into HTP_OP_MUL_MAT_ADD
+    {
+        const double total = (double) ctx->n_mul_mat_total_cum;
+        const double hmx_pct  = total > 0 ? 100.0 * ctx->n_hmx_used_cum      / total : 0.0;
+        const double qkv_pct  = total > 0 ? 100.0 * (3 * ctx->n_fused_qkv_cum) / total : 0.0;
+        const double ffn_pct  = total > 0 ? 100.0 * (2 * ctx->n_fused_ffn_cum) / total : 0.0;
+        const double add_pct  = total > 0 ? 100.0 * ctx->n_fused_mm_add_cum   / total : 0.0;
+        GGMLHEXAGON_LOG_VERBOSE("mul_mat coverage: total=%llu hmx=%llu (%.1f%%) qkv_fused=%llu (saves %.1f%%) "
+                               "ffn_fused=%llu (saves %.1f%%) mm_add_fused=%llu (saves %.1f%%)",
+                               (unsigned long long)ctx->n_mul_mat_total_cum,
+                               (unsigned long long)ctx->n_hmx_used_cum, hmx_pct,
+                               (unsigned long long)ctx->n_fused_qkv_cum, qkv_pct,
+                               (unsigned long long)ctx->n_fused_ffn_cum, ffn_pct,
+                               (unsigned long long)ctx->n_fused_mm_add_cum, add_pct);
+    }
+
+    // HMX eligibility diagnostic: why MUL_MATs fall back to HVX
+    {
+        uint64_t basic_total = ctx->n_hmx_basic_pass
+                             + ctx->n_hmx_basic_fail_ne01
+                             + ctx->n_hmx_basic_fail_ne00
+                             + ctx->n_hmx_basic_fail_wtype
+                             + ctx->n_hmx_basic_fail_batched
+                             + ctx->n_hmx_basic_fail_permuted
+                             + ctx->n_hmx_basic_fail_small_n;
+        if (basic_total > 0) {
+            GGMLHEXAGON_LOG_VERBOSE("hmx eligibility: total=%llu pass=%llu (%.1f%%)",
+                                     (unsigned long long)basic_total,
+                                     (unsigned long long)ctx->n_hmx_basic_pass,
+                                     basic_total > 0 ? 100.0 * ctx->n_hmx_basic_pass / basic_total : 0.0);
+            GGMLHEXAGON_LOG_VERBOSE("hmx basic fail: ne01_align=%llu ne00_align=%llu wtype=%llu batched=%llu permuted=%llu small_n=%llu",
+                                     (unsigned long long)ctx->n_hmx_basic_fail_ne01,
+                                     (unsigned long long)ctx->n_hmx_basic_fail_ne00,
+                                     (unsigned long long)ctx->n_hmx_basic_fail_wtype,
+                                     (unsigned long long)ctx->n_hmx_basic_fail_batched,
+                                     (unsigned long long)ctx->n_hmx_basic_fail_permuted,
+                                     (unsigned long long)ctx->n_hmx_basic_fail_small_n);
+            GGMLHEXAGON_LOG_VERBOSE("hmx vtcm: pass=%llu fail=%llu (%.1f%% of basic-pass)",
+                                     (unsigned long long)ctx->n_hmx_vtcm_pass,
+                                     (unsigned long long)ctx->n_hmx_vtcm_fail,
+                                     ctx->n_hmx_basic_pass > 0
+                                        ? 100.0 * ctx->n_hmx_vtcm_fail / ctx->n_hmx_basic_pass
+                                        : 0.0);
+        }
+    }
+}
+
 // =================================================================================================
 //  section-6: HTP helper functions
 // =================================================================================================
@@ -1423,7 +1413,7 @@ bail:
     return hexagon_error;
 }
 
-static int ggmlhexagon_get_hvx_arch_ver(int domain, uint32_t * capability) {
+static int ggmlhexagon_get_htp_arch_ver(int domain, uint32_t * capability) {
     int hexagon_error = AEE_SUCCESS;
     *capability = 0;
     if(remote_handle_control) {
@@ -1495,6 +1485,63 @@ static int ggmlhexagon_get_hvx_support_info(int domain, uint32_t attr, uint32_t 
 
 bail:
     return hexagon_error;
+}
+
+static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
+    if (ctx == nullptr) {
+        return 0;
+    }
+
+    int htp_arch         = 0;
+    uint32_t dsp_version = 0;
+    ggmlhexagon_get_htp_arch_ver(ctx->domain_id, &dsp_version);
+    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73
+        || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
+        //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
+        htp_arch = ggmlhexagon_htparch_hex_to_decimal(dsp_version);
+        struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_htparch(htp_arch);
+        GGML_ASSERT(nullptr != socinfo);
+        ctx->socinfo = *socinfo;
+        size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
+        GGMLHEXAGON_LOG_ALWAYS("device info: %s, %s, dsp arch version 0x%x, system mem size %zu MiB",
+                                socinfo->soc_desc, ggmlhexagon_get_htparch_desc(htp_arch), dsp_version, total_mem / SIZE_IN_MB);
+    } else {
+        GGMLHEXAGON_LOG_ERROR("device info: unknown dsp_version:0x%x", dsp_version);
+        GGML_ABORT("unsupported HTP architecture");
+    }
+
+    uint32_t vtcm_count = 0;
+    uint32_t vtcm_page  = 0;
+    ggmlhexagon_get_vtcm_info(ctx->domain_id, VTCM_COUNT, &vtcm_count);
+    ggmlhexagon_get_vtcm_info(ctx->domain_id, VTCM_PAGE, &vtcm_page);
+    ctx->has_vtcm = (vtcm_count > 0 && vtcm_page > 0);
+
+    uint32_t hmx_depth   = 0;
+    uint32_t hmx_spatial = 0;
+    //FIXME: better approach to get correct/accurate info
+    ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_DEPTH, &hmx_depth);
+    ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_SPATIAL, &hmx_spatial);
+
+    uint32_t hvx_support_128b = 0;
+    ggmlhexagon_get_hvx_support_info(ctx->domain_id, HVX_SUPPORT_128B, &hvx_support_128b);
+    ctx->has_hvx = (hvx_support_128b > 0);
+    ctx->has_hmx = (hmx_depth > 0 || hmx_spatial > 0);
+    // Fallback: DSPRPC_GET_DSP_INFO may not report HMX on some devices
+    // HMX is present on V73+ (Snapdragon 8 Gen 2 and later); the NPU skel is built with -mhmx.
+    if (!ctx->has_hmx && htp_arch >= V73) {
+        ctx->has_hmx = true;
+    }
+    GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
+    //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
+    ctx->has_async_fastrpc  = ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id);
+    ctx->has_extended_map   = ggmlhexagon_is_extended_map_supported(ctx->domain_id);
+    GGMLHEXAGON_LOG_ALWAYS("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
+                            "unsigned pd supported %d, async fastrpc supported %d, extended va map supported %d",
+                                ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
+                                ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
+                                (int)ctx->has_async_fastrpc,
+                                (int)ctx->has_extended_map);
+    return htp_arch;
 }
 
 static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
@@ -1599,63 +1646,6 @@ static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
         ctx->rpc_mempool_len        = 0;
         ctx->rpc_mempool_capacity   = 0;
     }
-}
-
-static int ggmlhexagon_probe_dspinfo(ggml_backend_hexagon_context * ctx) {
-    if (ctx == nullptr) {
-        return 0;
-    }
-
-    int htp_arch         = 0;
-    uint32_t dsp_version = 0;
-    ggmlhexagon_get_hvx_arch_ver(ctx->domain_id, &dsp_version);
-    if (dsp_version == 0x68 || dsp_version == 0x69 || dsp_version == 0x73
-        || dsp_version == 0x75 || dsp_version == 0x79 || dsp_version == 0x81) {
-        //0x68 -> 68, 0x69 -> 69, 0x73 -> 73, 0x75 -> 75, 0x79 -> 79, 0x81 -> 81
-        htp_arch = ggmlhexagon_htparch_hex_to_decimal(dsp_version);
-        struct qcom_socinfo * socinfo = ggmlhexagon_get_socinfo_from_htparch(htp_arch);
-        GGML_ASSERT(nullptr != socinfo);
-        ctx->socinfo = *socinfo;
-        size_t total_mem = ggmlhexagon_get_system_total_memory_in_bytes();
-        GGMLHEXAGON_LOG_ALWAYS("device info: %s, %s, dsp arch version 0x%x, system mem size %zu MiB",
-                                socinfo->soc_desc, ggmlhexagon_get_htparch_desc(htp_arch), dsp_version, total_mem / SIZE_IN_MB);
-    } else {
-        GGMLHEXAGON_LOG_ERROR("device info: unknown");
-        GGML_ASSERT(1 == 0);
-    }
-
-    uint32_t vtcm_count = 0;
-    uint32_t vtcm_page  = 0;
-    ggmlhexagon_get_vtcm_info(ctx->domain_id, VTCM_COUNT, &vtcm_count);
-    ggmlhexagon_get_vtcm_info(ctx->domain_id, VTCM_PAGE, &vtcm_page);
-    ctx->has_vtcm = (vtcm_count > 0 && vtcm_page > 0);
-
-    uint32_t hmx_depth   = 0;
-    uint32_t hmx_spatial = 0;
-    //FIXME: better approach to get correct/accurate info
-    ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_DEPTH, &hmx_depth);
-    ggmlhexagon_get_hmx_support_info(ctx->domain_id, HMX_SUPPORT_SPATIAL, &hmx_spatial);
-
-    uint32_t hvx_support_128b = 0;
-    ggmlhexagon_get_hvx_support_info(ctx->domain_id, HVX_SUPPORT_128B, &hvx_support_128b);
-    ctx->has_hvx = (hvx_support_128b > 0);
-    ctx->has_hmx = (hmx_depth > 0 || hmx_spatial > 0);
-    // Fallback: DSPRPC_GET_DSP_INFO may not report HMX on some devices
-    // HMX is present on V73+ (Snapdragon 8 Gen 2 and later); the NPU skel is built with -mhmx.
-    if (!ctx->has_hmx && htp_arch >= V73) {
-        ctx->has_hmx = true;
-    }
-    GGMLHEXAGON_LOG_DEBUG("dsp arch version %d, vtcm_count %d, vtcm_page %d", htp_arch, vtcm_count, vtcm_page);
-    //FIXME: hmx_depth/hmx_spatial report 0 via DSPRPC_GET_DSP_INFO on some devices
-    ctx->has_async_fastrpc  = ggmlhexagon_is_async_fastrpc_supported(ctx->domain_id);
-    ctx->has_extended_map   = ggmlhexagon_is_extended_map_supported(ctx->domain_id);
-    GGMLHEXAGON_LOG_ALWAYS("device %d caps: has_vtcm=%d,has_hvx=%d,has_hmx=%d,hvx_support_128b %d,"
-                            "unsigned pd supported %d, async fastrpc supported %d, extended va map supported %d",
-                                ctx->device, (int)ctx->has_vtcm, (int)ctx->has_hvx, (int)ctx->has_hmx, hvx_support_128b,
-                                ggmlhexagon_is_unsignedpd_supported(ctx->domain_id),
-                                (int)ctx->has_async_fastrpc,
-                                (int)ctx->has_extended_map);
-    return htp_arch;
 }
 
 static void ggmlhexagon_deinit_cdsp(ggml_backend_hexagon_context * ctx) {
@@ -3735,125 +3725,6 @@ finalize:
 // =================================================================================================
 //  section-9: backend implementation
 // =================================================================================================
-ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev)
-    : device(dev_id),
-      backend(nullptr),
-      socinfo(),
-      n_threads(6),
-      physical_idx(0),
-      virtual_idx(0),
-      domain_id(CDSP_DOMAIN_ID),
-      session_id(0),
-      ggmlop_handle(0),
-      rpc_mempool_capacity(0),
-      rpc_mempool_len(0),
-      rpc_mempool_usage(0),
-      rpc_mempool_handle(0),
-      rpc_mempool(nullptr),
-      rpc_mempool_dsp_base(nullptr),
-      dsp_need_weight_inval_reset(false),
-      rpc_batch_call_count(0),
-      cumulative_graph_us(0),
-      last_graph_end_us(0),
-      max_nodes_per_graph(0),
-      min_nodes_per_graph(0),
-      total_nodes_processed(0),
-      min_graph_us(0),
-      max_graph_us(0),
-      max_graph_n_nodes(0),
-      max_graph_n_ops(0),
-      min_n_ops_per_call(0),
-      max_n_ops_per_call(0),
-      min_p9_us(0),
-      max_p9_us(0),
-      max_layer_idx_seen(0),
-      min_rpc_overhead_us(0),
-      max_rpc_overhead_us(0),
-      sum_rpc_overhead_us(0),
-      cum_p1_us(0),
-      cum_p2_us(0),
-      cum_p3_us(0),
-      cum_p4_us(0),
-      cum_p5_us(0),
-      cum_p6_us(0),
-      cum_p7_us(0),
-      cum_p8_us(0),
-      cum_p9_us(0),
-      cum_p9_rpc_setup_us(0),
-      cum_p9_dsp_exec_us(0),
-      cum_p10_us(0),
-      cum_unaccounted_us(0),
-      rpc_overhead_min_us(0),
-      rpc_overhead_max_us(0),
-      rpc_overhead_sum_us(0),
-      rpc_overhead_count(0),
-      n_mul_mat_total_cum(0),
-      n_hmx_used_cum(0),
-      n_fused_qkv_cum(0),
-      n_fused_ffn_cum(0),
-      n_fused_mm_add_cum(0),
-      n_hmx_basic_pass(0),
-      n_hmx_basic_fail_ne01(0),
-      n_hmx_basic_fail_ne00(0),
-      n_hmx_basic_fail_wtype(0),
-      n_hmx_basic_fail_batched(0),
-      n_hmx_basic_fail_permuted(0),
-      n_hmx_basic_fail_small_n(0),
-      n_hmx_vtcm_pass(0),
-      n_hmx_vtcm_fail(0),
-      buffer_type{},
-      repack_buffer_type{},
-      has_vtcm(false),
-      has_hvx(false),
-      has_hmx(false),
-      has_async_fastrpc(false),
-      has_extended_map(false),
-      warned_qkv_name(false),
-      set_tensor_call_count(0) {
-    snprintf(name, sizeof(name), "HTP%d", dev_id);
-    snprintf(desc, sizeof(desc), "Qualcomm NPU(HTP%d)", dev_id);
-    snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
-    snprintf(repack_buft_name, sizeof(repack_buft_name), "hexagon-ion-buffer-%s-REPACK", name);
-    lib[0] = '\0';
-
-    buffer_type.iface.get_name         = ggml_backend_hexagon_buffer_type_name;
-    buffer_type.iface.alloc_buffer     = ggml_backend_hexagon_buffer_type_alloc_buffer;
-    buffer_type.iface.get_alignment    = ggml_backend_hexagon_buffer_type_get_alignment;
-    buffer_type.iface.get_max_size     = ggml_backend_hexagon_buffer_type_get_max_size;
-    buffer_type.iface.get_alloc_size   = ggml_backend_hexagon_buffer_type_get_alloc_size;
-    buffer_type.iface.is_host          = ggml_backend_hexagon_buffer_is_host;
-    buffer_type.device  = dev;
-    buffer_type.context = this;
-
-    // Repack buffer type: same mempool as buffer_type, but is_host=false
-    repack_buffer_type.iface.get_name         = ggml_backend_hexagon_buffer_type_name;
-    repack_buffer_type.iface.alloc_buffer     = ggml_backend_hexagon_buffer_type_alloc_buffer;
-    repack_buffer_type.iface.get_alignment    = ggml_backend_hexagon_buffer_type_get_alignment;
-    repack_buffer_type.iface.get_max_size     = ggml_backend_hexagon_buffer_type_get_max_size;
-    repack_buffer_type.iface.get_alloc_size   = ggml_backend_hexagon_buffer_type_get_alloc_size;
-    repack_buffer_type.iface.is_host          = ggml_backend_hexagon_repack_buffer_is_host;
-    repack_buffer_type.device  = dev;
-    repack_buffer_type.context = this;
-
-    // Pre-size the cgraph cache to avoid rehashing during inference. With
-    // max_load_factor=0.5 and reserve(1024) the bucket array can hold ~1024
-    // entries before rehash; observed peak is ~227 (gemma-4/qwen3), so this keeps the
-    // load low and lookup latency stable.
-    cgraph_cache.max_load_factor(0.5f);
-    cgraph_cache.reserve(1024);
-
-    int result = ggmlhexagon_init_dsp(this);
-    if (0 != result) {
-        GGMLHEXAGON_LOG_ERROR("init hexagon dsp failure for device %d", dev_id);
-        throw std::runtime_error("ggml-hexagon: failed to init NPU session");
-    }
-}
-
-ggml_backend_hexagon_context::~ggml_backend_hexagon_context() {
-    ggmlhexagon_deinit_cdsp(this);
-    ggmlhexagon_print_running_timestamp(NULL);
-}
-
 static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                                           ggml_backend_hexagon_context * ctx) {
     const struct ggml_tensor * src0 = dst->src[0];
@@ -4476,7 +4347,7 @@ static bool ggmlhexagon_can_handle_op_through_cdsp(ggml_backend_dev_t dev, const
         return true;
     }
 
-    if (!ggmlhexagon_op_buffers_belong_to_dev(dev, op_tensor)) {
+    if (!ggmlhexagon_is_op_on_device(dev, op_tensor)) {
         return false;
     }
 
@@ -4536,7 +4407,7 @@ struct ggml_backend_hexagon_buffer_context {
                 }
             } else {
                 GGMLHEXAGON_LOG_ALWAYS("it shouldn't come here");
-                GGML_ASSERT(1 == 0);
+                GGML_ABORT("it shouldn't come here");
             }
         }
     }
@@ -5057,25 +4928,14 @@ static bool ggml_backend_hexagon_repack_buffer_is_host(ggml_backend_buffer_type_
     return false;
 }
 
-// Returns true if this buffer was allocated from the repack buffer type.
-// Repack buffers hold quantized weight data in tiled (HMX) layout and
-// require set_tensor/get_tensor to repack/unrepack across the boundary.
-static bool ggml_backend_buffer_is_hexagon_repack(const struct ggml_backend_buffer * b) {
-    auto * ctx = (ggml_backend_hexagon_context *)b->buft->context;
-    return b->buft == &ctx->repack_buffer_type;
-}
-
-// Session consistency check:
-//   - tensor is null:                  neutral, accept (compute-temporary-like)
-//   - tensor has no buffer assigned:   neutral, accept (scheduler will route)
-//   - buffer is hexagon (main or repack) on this device: accept
-//   - buffer is hexagon on a different device: reject (wrong session)
-//   - buffer is non-hexagon (e.g. CPU): reject (scheduler should keep on CPU)
-//
-// Both the main and repack bufts store the owning ggml_backend_hexagon_context
-// pointer at buft->context (set in the constructor as `buffer_type.context = this`).
-// The current device's context lives at dev->context.
-static bool ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const struct ggml_tensor * t) {
+// Check if a tensor's buffer is compatible with this device's hexagon session.
+// Returns true if:
+//   - tensor or buffer is null (not yet allocated, scheduler will route)
+//   - buffer belongs to this device's hexagon context
+// Returns false if:
+//   - buffer is non-hexagon (e.g. CPU)
+//   - buffer belongs to a different hexagon device (wrong session)
+static bool ggmlhexagon_is_tensor_buffer_on_device(ggml_backend_dev_t dev, const struct ggml_tensor * t) {
     if (!t || !t->buffer) {
         return true;
     }
@@ -5085,7 +4945,6 @@ static bool ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const 
     }
     ggml_backend_hexagon_context * dev_ctx  = (ggml_backend_hexagon_context *)dev->context;
     ggml_backend_hexagon_context * buft_ctx = (ggml_backend_hexagon_context *)buft->context;
-    // same logic as ggml_backend_hexagon_device_supports_buft
     return buft_ctx->device == dev_ctx->device;
 }
 
@@ -5094,12 +4953,12 @@ static bool ggmlhexagon_tensor_buffer_is_owned_by(ggml_backend_dev_t dev, const 
 // the scheduler can incorrectly assign an op to a device whose tensors live
 // in another device's mempool region, which would fault on the NPU since
 // mempool mappings are not shared across separate FastRPC sessions.
-static bool ggmlhexagon_op_buffers_belong_to_dev(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
-    if (!ggmlhexagon_tensor_buffer_is_owned_by(dev, op)) {
+static bool ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const struct ggml_tensor * op) {
+    if (!ggmlhexagon_is_tensor_buffer_on_device(dev, op)) {
         return false;
     }
     for (int i = 0; i < GGML_MAX_SRC; i++) {
-        if (!ggmlhexagon_tensor_buffer_is_owned_by(dev, op->src[i])) {
+        if (!ggmlhexagon_is_tensor_buffer_on_device(dev, op->src[i])) {
             return false;
         }
     }
@@ -5109,6 +4968,125 @@ static bool ggmlhexagon_op_buffers_belong_to_dev(ggml_backend_dev_t dev, const s
 static const char * ggml_backend_hexagon_name(ggml_backend_t backend) {
     ggml_backend_hexagon_context * ctx = (ggml_backend_hexagon_context *) backend->context;
     return ctx->name;
+}
+
+ggml_backend_hexagon_context::ggml_backend_hexagon_context(int dev_id, ggml_backend_dev_t dev)
+    : device(dev_id),
+      backend(nullptr),
+      socinfo(),
+      n_threads(6),
+      physical_idx(0),
+      virtual_idx(0),
+      domain_id(CDSP_DOMAIN_ID),
+      session_id(0),
+      ggmlop_handle(0),
+      rpc_mempool_capacity(0),
+      rpc_mempool_len(0),
+      rpc_mempool_usage(0),
+      rpc_mempool_handle(0),
+      rpc_mempool(nullptr),
+      rpc_mempool_dsp_base(nullptr),
+      dsp_need_weight_inval_reset(false),
+      rpc_batch_call_count(0),
+      cumulative_graph_us(0),
+      last_graph_end_us(0),
+      max_nodes_per_graph(0),
+      min_nodes_per_graph(0),
+      total_nodes_processed(0),
+      min_graph_us(0),
+      max_graph_us(0),
+      max_graph_n_nodes(0),
+      max_graph_n_ops(0),
+      min_n_ops_per_call(0),
+      max_n_ops_per_call(0),
+      min_p9_us(0),
+      max_p9_us(0),
+      max_layer_idx_seen(0),
+      min_rpc_overhead_us(0),
+      max_rpc_overhead_us(0),
+      sum_rpc_overhead_us(0),
+      cum_p1_us(0),
+      cum_p2_us(0),
+      cum_p3_us(0),
+      cum_p4_us(0),
+      cum_p5_us(0),
+      cum_p6_us(0),
+      cum_p7_us(0),
+      cum_p8_us(0),
+      cum_p9_us(0),
+      cum_p9_rpc_setup_us(0),
+      cum_p9_dsp_exec_us(0),
+      cum_p10_us(0),
+      cum_unaccounted_us(0),
+      rpc_overhead_min_us(0),
+      rpc_overhead_max_us(0),
+      rpc_overhead_sum_us(0),
+      rpc_overhead_count(0),
+      n_mul_mat_total_cum(0),
+      n_hmx_used_cum(0),
+      n_fused_qkv_cum(0),
+      n_fused_ffn_cum(0),
+      n_fused_mm_add_cum(0),
+      n_hmx_basic_pass(0),
+      n_hmx_basic_fail_ne01(0),
+      n_hmx_basic_fail_ne00(0),
+      n_hmx_basic_fail_wtype(0),
+      n_hmx_basic_fail_batched(0),
+      n_hmx_basic_fail_permuted(0),
+      n_hmx_basic_fail_small_n(0),
+      n_hmx_vtcm_pass(0),
+      n_hmx_vtcm_fail(0),
+      buffer_type{},
+      repack_buffer_type{},
+      has_vtcm(false),
+      has_hvx(false),
+      has_hmx(false),
+      has_async_fastrpc(false),
+      has_extended_map(false),
+      warned_qkv_name(false),
+      set_tensor_call_count(0) {
+    snprintf(name, sizeof(name), "HTP%d", dev_id);
+    snprintf(desc, sizeof(desc), "Qualcomm NPU(HTP%d)", dev_id);
+    snprintf(buft_name, sizeof(buft_name), "hexagon-ion-buffer-%s", name);
+    snprintf(repack_buft_name, sizeof(repack_buft_name), "hexagon-ion-buffer-%s-REPACK", name);
+    lib[0] = '\0';
+
+    buffer_type.iface.get_name         = ggml_backend_hexagon_buffer_type_name;
+    buffer_type.iface.alloc_buffer     = ggml_backend_hexagon_buffer_type_alloc_buffer;
+    buffer_type.iface.get_alignment    = ggml_backend_hexagon_buffer_type_get_alignment;
+    buffer_type.iface.get_max_size     = ggml_backend_hexagon_buffer_type_get_max_size;
+    buffer_type.iface.get_alloc_size   = ggml_backend_hexagon_buffer_type_get_alloc_size;
+    buffer_type.iface.is_host          = ggml_backend_hexagon_buffer_is_host;
+    buffer_type.device  = dev;
+    buffer_type.context = this;
+
+    // Repack buffer type: same mempool as buffer_type, but is_host=false
+    repack_buffer_type.iface.get_name         = ggml_backend_hexagon_buffer_type_name;
+    repack_buffer_type.iface.alloc_buffer     = ggml_backend_hexagon_buffer_type_alloc_buffer;
+    repack_buffer_type.iface.get_alignment    = ggml_backend_hexagon_buffer_type_get_alignment;
+    repack_buffer_type.iface.get_max_size     = ggml_backend_hexagon_buffer_type_get_max_size;
+    repack_buffer_type.iface.get_alloc_size   = ggml_backend_hexagon_buffer_type_get_alloc_size;
+    repack_buffer_type.iface.is_host          = ggml_backend_hexagon_repack_buffer_is_host;
+    repack_buffer_type.device  = dev;
+    repack_buffer_type.context = this;
+
+    // Pre-size the cgraph cache to avoid rehashing during inference. With
+    // max_load_factor=0.5 and reserve(1024) the bucket array can hold ~1024
+    // entries before rehash; observed peak is ~227 (gemma-4/qwen3), so this keeps the
+    // load low and lookup latency stable.
+    cgraph_cache.max_load_factor(0.5f);
+    cgraph_cache.reserve(1024);
+
+    int result = ggmlhexagon_init_dsp(this);
+    if (0 != result) {
+        GGMLHEXAGON_LOG_ERROR("init hexagon dsp failure for device %d", dev_id);
+        throw std::runtime_error("ggml-hexagon: failed to init NPU session");
+    }
+}
+
+ggml_backend_hexagon_context::~ggml_backend_hexagon_context() {
+    ggmlhexagon_deinit_cdsp(this);
+    ggmlhexagon_print_running_timestamp(NULL);
 }
 
 static void ggml_backend_hexagon_free(ggml_backend_t backend) {
@@ -6409,20 +6387,17 @@ static ggml_guid_t ggml_backend_hexagon_guid() {
     return &guid;
 }
 
-struct ggml_backend_hexagon_reg_context {
-    std::vector<ggml_backend_dev_t> devices;
-    ~ggml_backend_hexagon_reg_context() {
-        for (auto * dev : devices) {
-            // context persists across inferences (not freed in ggml_backend_hexagon_free),
-            // so it is always present and must be cleaned up here.
-            if (dev->context) {
-                auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-                delete hctx;
-            }
-            delete dev;
+ggml_backend_hexagon_reg_context::~ggml_backend_hexagon_reg_context() {
+    for (auto * dev : devices) {
+        // context persists across inferences (not freed in ggml_backend_hexagon_free),
+        // so it is always present and must be cleaned up here.
+        if (dev->context) {
+            auto * hctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
+            delete hctx;
         }
+        delete dev;
     }
-};
+}
 
 // Lazily create the context (NPU session + mempool) if it doesn't exist yet.
 // The ggml framework calls get_buffer_type / supports_buft BEFORE init_backend
