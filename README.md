@@ -134,6 +134,9 @@ The `llama.cpp` project is build on top of the [ggml](https://github.com/ggml-or
 - self-build-jz
   https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz, the default branch, FastRPC-based ggml-hexagon & upstream dspqueue-based ggml-hexagon can be found in this branch.
 
+- pr_to_upstream_v3
+  [https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz](https://github.com/ggml-hexagon/ggml-hexagon/tree/pr_to_upstream_v3), PR to upstream llama.cpp, aka https://github.com/ggml-org/llama.cpp/pull/27642.
+
 ## Why FastRPC-based ggml-hexagon backend is still meaningful?
 - The implementation of the prebuilt `libggmldsp-skel.so` is complicated&dirty: last year(2025) I built a closed-source version by porting a full ggml-core to Qualcomm's DSP/NPU side (supporting fully quantized & non-quantized mulmat op, theoretically supporting all ggml ops). The open-source code of `libggmldsp-skel.so` can now be found in JZ's ggml-hexagon at [`ggml/src/ggml-hexagon/htp/`](ggml/src/ggml-hexagon/htp/) - including the FastRPC entry point ([`entry.c`](ggml/src/ggml-hexagon/htp/entry.c)) and session context ([`dsp-ctx.h`](ggml/src/ggml-hexagon/htp/dsp-ctx.h)).
 - [The data path in Qualcomm's official ggml-hexaon backend](https://github.com/zhouwg/ggml-hexagon/discussions/33) is completely/exactly similar to [my implementation in this forked llama.cpp project](https://github.com/zhouwg/ggml-hexagon/tree/self-build-jz) or [my PR in the upstream llama.cpp project](https://github.com/ggml-org/llama.cpp/pull/12326).
