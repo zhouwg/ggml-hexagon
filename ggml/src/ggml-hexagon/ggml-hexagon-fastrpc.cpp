@@ -6421,11 +6421,20 @@ static const char * ggml_backend_hexagon_device_get_description(ggml_backend_dev
 
 static const char * ggml_backend_hexagon_device_get_name(ggml_backend_dev_t dev) {
     struct ggml_backend_hexagon_context * ctx = static_cast<ggml_backend_hexagon_context *>(dev->context);
-    if (nullptr == ctx) {
-        GGMLHEXAGON_LOG_ALWAYS("pls check why ctx is null");
-        return "unknown";
+    if (nullptr != ctx) {
+        return ctx->name;
     }
-    return ctx->name;
+    // Before lazy init, dev->context is null.  Resolve the device index from
+    // the registry and return the name from opt_device_configs.
+    auto * reg_ctx = (ggml_backend_hexagon_reg_context *)g_reg_ctx;
+    if (reg_ctx) {
+        for (size_t i = 0; i < reg_ctx->devices.size(); i++) {
+            if (reg_ctx->devices[i] == dev) {
+                return opt_device_configs[i].name.c_str();
+            }
+        }
+    }
+    return "unknown";
 }
 
 static void ggml_backend_hexagon_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {

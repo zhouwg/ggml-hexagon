@@ -112,8 +112,10 @@ function resolve_model_name()
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
 #unified command-line parameters used during inference testing for fair performance comparison of PP and TG across the dspqueue and mempool/FastRPC ggml-hexagon variants
-#running_params=" -ngl 99 -t 6 -n 256 --no-warmup --load-mode none --poll 1000 --cpu-mask 0xfc --cpu-strict 1 --ctx-size 8192 --ubatch-size 1024 -fa on"
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+#verified and test on 8Gen4 & 8Gen3
+#running_params=" --device HTP0 --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+#--device HTP0 is not mandatory for pure HTP tests, so these running_params can be used for dspqueue-based ggml-hexagon, fastrpc-based ggml-hexagon, cpu-only
+running_params=" --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 
 ######## part-3: utilities and functions ########
 
@@ -890,7 +892,7 @@ function prepare_run_on_phone()
 
     update_cfg
 
-    check_prebuilt_models
+    #check_prebuilt_models
 
     # AB test mode: if update_fastrpc_libs/update_dspqueue_libs/update_cpu_libs set the marker,
     # skip lib/skel push - user has manually set up the runtime.
