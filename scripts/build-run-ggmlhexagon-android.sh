@@ -93,7 +93,8 @@ function resolve_model_name()
 
 PROMPT_STRING="Hello, good morning, you are a powerful domain expert and know many things, now pls help to introduce the movie Once Upon a Time in America briefly, pls pay attention short then 1000 words\n"
 
-running_params=" -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 64 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
+#--device HTP0 is not mandatory for pure HTP tests, so these running_params can be used for dspqueue-based ggml-hexagon, fastrpc-based ggml-hexagon, cpu-only
+running_params=" --cpu-mask 0xfc --cpu-strict 1 -ngl 99 -t 6 -n 256 --ctx-size 8192 --ubatch-size 1024 --poll 1000 --no-warmup --load-mode none -fa on --jinja -st"
 
 ######## part-3: utilities and functions ########
 
