@@ -1931,7 +1931,7 @@ static size_t ggml_hexagon_repacked_size(enum ggml_type type, int64_t ne0, int64
     return (size_t)(ne0_p / 32) * (ne1_p / 32) * tile_size * ne2 * ne3;
 }
 
-static void repack_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const block_q4_0 * src_matrix = (const block_q4_0 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
@@ -1939,43 +1939,48 @@ static void repack_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, v
     const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
-    for (int i3 = 0; i3 < ne3; i3++) {
-        for (int i2 = 0; i2 < ne2; i2++) {
-            const block_q4_0 * src_expert = src_matrix + (i3 * ne2 + i2) * (ne1 * (ne0 / 32));
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
 
-            for (int ct = 0; ct < n_col_tiles; ct++) {
-                for (int kt = 0; kt < n_k_tiles; kt++) {
-                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_q4_0 * src_slice = src_matrix + (slice_idx - start_slice) * (ne1 * (ne0 / 32));
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
 
-                    uint8_t tile_quants[32][32];
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+
+                uint8_t tile_quants[32][32];
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    if (r < ne1 && kt < ne0 / 32) {
+                        unpack_q4_0_quants(tile_quants[row], &src_slice[r * (ne0 / 32) + kt]);
+                    } else {
+                        memset(tile_quants[row], 8, 32);
+                    }
+                }
+
+                for (int cp = 0; cp < 16; cp++) {
                     for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        if (r < ne1 && kt < ne0 / 32) {
-                            unpack_q4_0_quants(tile_quants[row], &src_expert[r * (ne0 / 32) + kt]);
-                        } else {
-                            memset(tile_quants[row], 8, 32);
-                        }
+                        tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
                     }
+                }
 
-                    for (int cp = 0; cp < 16; cp++) {
-                        for (int row = 0; row < 32; row++) {
-                            tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
-                        }
-                    }
-
-                    ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
-                    for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_expert[r * (ne0 / 32) + kt].d : 0;
-                    }
+                ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_slice[r * (ne0 / 32) + kt].d : 0;
                 }
             }
         }
     }
 }
 
-static void repack_q4_1_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q4_1_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const block_q4_1 * src_matrix = (const block_q4_1 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
@@ -1983,41 +1988,46 @@ static void repack_q4_1_tiled_to_buf(const ggml_tensor * t, const void * data, v
     const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
-    for (int i3 = 0; i3 < ne3; i3++) {
-        for (int i2 = 0; i2 < ne2; i2++) {
-            const block_q4_1 * src_expert = src_matrix + (i3 * ne2 + i2) * (ne1 * (ne0 / 32));
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
 
-            for (int ct = 0; ct < n_col_tiles; ct++) {
-                for (int kt = 0; kt < n_k_tiles; kt++) {
-                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_q4_1 * src_slice = src_matrix + (slice_idx - start_slice) * (ne1 * (ne0 / 32));
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
 
-                    uint8_t tile_quants[32][32];
-                    for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        if (r < ne1 && kt < ne0 / 32) {
-                            unpack_q4_1_quants(tile_quants[row], &src_expert[r * (ne0 / 32) + kt]);
-                        } else {
-                            memset(tile_quants[row], 0, 32);
-                        }
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+
+                uint8_t tile_quants[32][32];
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    if (r < ne1 && kt < ne0 / 32) {
+                        unpack_q4_1_quants(tile_quants[row], &src_slice[r * (ne0 / 32) + kt]);
+                    } else {
+                        memset(tile_quants[row], 0, 32);
                     }
+                }
 
-                    for (int cp = 0; cp < 16; cp++) {
-                        for (int row = 0; row < 32; row++) {
-                            tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
-                        }
-                    }
-
-                    ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+                for (int cp = 0; cp < 16; cp++) {
                     for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        if (r < ne1 && kt < ne0 / 32) {
-                            scale_dst[2 * row + 0] = src_expert[r * (ne0 / 32) + kt].d;
-                            scale_dst[2 * row + 1] = src_expert[r * (ne0 / 32) + kt].m;
-                        } else {
-                            scale_dst[2 * row + 0] = 0;
-                            scale_dst[2 * row + 1] = 0;
-                        }
+                        tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
+                    }
+                }
+
+                ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    if (r < ne1 && kt < ne0 / 32) {
+                        scale_dst[2 * row + 0] = src_slice[r * (ne0 / 32) + kt].d;
+                        scale_dst[2 * row + 1] = src_slice[r * (ne0 / 32) + kt].m;
+                    } else {
+                        scale_dst[2 * row + 0] = 0;
+                        scale_dst[2 * row + 1] = 0;
                     }
                 }
             }
@@ -2025,7 +2035,7 @@ static void repack_q4_1_tiled_to_buf(const ggml_tensor * t, const void * data, v
     }
 }
 
-static void repack_q8_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q8_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const block_q8_0 * src_matrix = (const block_q8_0 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
@@ -2033,31 +2043,36 @@ static void repack_q8_0_tiled_to_buf(const ggml_tensor * t, const void * data, v
     const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
-    for (int i3 = 0; i3 < ne3; i3++) {
-        for (int i2 = 0; i2 < ne2; i2++) {
-            const block_q8_0 * src_expert = src_matrix + (i3 * ne2 + i2) * (ne1 * (ne0 / 32));
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
 
-            for (int ct = 0; ct < n_col_tiles; ct++) {
-                for (int kt = 0; kt < n_k_tiles; kt++) {
-                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_q8_0 * src_slice = src_matrix + (slice_idx - start_slice) * (ne1 * (ne0 / 32));
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
 
-                    for (int cp = 0; cp < 16; cp++) {
-                        int col0 = cp * 2;
-                        int col1 = col0 + 1;
-                        for (int row = 0; row < 32; row++) {
-                            int64_t r = ct * 32 + row;
-                            const block_q8_0 * b = (r < ne1 && kt < ne0 / 32) ? &src_expert[r * (ne0 / 32) + kt] : NULL;
-                            tile_dst[cp * 64 + 2 * row + 0] = b ? b->qs[col0] : 0;
-                            tile_dst[cp * 64 + 2 * row + 1] = b ? b->qs[col1] : 0;
-                        }
-                    }
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
 
-                    ggml_half * scale_dst = (ggml_half *)(tile_dst + 1024);
+                for (int cp = 0; cp < 16; cp++) {
+                    int col0 = cp * 2;
+                    int col1 = col0 + 1;
                     for (int row = 0; row < 32; row++) {
                         int64_t r = ct * 32 + row;
-                        scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_expert[r * (ne0 / 32) + kt].d : 0;
+                        const block_q8_0 * b = (r < ne1 && kt < ne0 / 32) ? &src_slice[r * (ne0 / 32) + kt] : NULL;
+                        tile_dst[cp * 64 + 2 * row + 0] = b ? b->qs[col0] : 0;
+                        tile_dst[cp * 64 + 2 * row + 1] = b ? b->qs[col1] : 0;
                     }
+                }
+
+                ggml_half * scale_dst = (ggml_half *)(tile_dst + 1024);
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_slice[r * (ne0 / 32) + kt].d : 0;
                 }
             }
         }
@@ -2065,7 +2080,7 @@ static void repack_q8_0_tiled_to_buf(const ggml_tensor * t, const void * data, v
 }
 
 // Q4_K -> Q4_0 tiled for NPU matmul (lossy conversion, runs once at load).
-static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q4k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2080,7 +2095,7 @@ static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const block_q4_K * src_expert = (const block_q4_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q4k);
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+            uint8_t * matrix_dst = (uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
 
             for (int ct = 0; ct < n_col_tiles; ct++) {
                 for (int row = 0; row < 32; row++) {
@@ -2119,12 +2134,14 @@ static void repack_q4k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
             }
         }
     }
+    GGML_UNUSED(offset);
+    GGML_UNUSED(size);
 }
 
 // Q6_K weights are converted to Q4_0 (dequant Q6_K -> f32 -> requant Q4_0)
 // and stored in the Q4_0 tiled layout, so the NPU reuses the Q4_0 matmul
 // kernels. Same approach as Q4_K conversion above.
-static void repack_q6k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q6k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2139,7 +2156,7 @@ static void repack_q6k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const block_q6_K * src_expert = (const block_q6_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q6k);
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+            uint8_t * matrix_dst = (uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
 
             for (int ct = 0; ct < n_col_tiles; ct++) {
                 for (int row = 0; row < 32; row++) {
@@ -2178,12 +2195,14 @@ static void repack_q6k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
             }
         }
     }
+    GGML_UNUSED(offset);
+    GGML_UNUSED(size);
 }
 
 // Q5_K weights are converted to Q4_0 (dequant Q5_K -> f32 -> requant Q4_0)
 // and stored in the Q4_0 tiled layout, so the NPU reuses the Q4_0 matmul
 // kernels. Same approach as Q4_K/Q6_K conversion above.
-static void repack_q5k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_q5k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2198,7 +2217,7 @@ static void repack_q5k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const block_q5_K * src_expert = (const block_q5_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q5k);
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+            uint8_t * matrix_dst = (uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
 
             for (int ct = 0; ct < n_col_tiles; ct++) {
                 for (int row = 0; row < 32; row++) {
@@ -2237,9 +2256,11 @@ static void repack_q5k_as_q4_0_tiled_to_buf(const ggml_tensor * t, const void * 
             }
         }
     }
+    GGML_UNUSED(offset);
+    GGML_UNUSED(size);
 }
 
-static void repack_mxfp4_tiled_to_buf(const ggml_tensor * t, const void * data, void * dst_buf) {
+static void repack_mxfp4_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const block_mxfp4 * src_matrix = (const block_mxfp4 *) data;
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
@@ -2247,36 +2268,41 @@ static void repack_mxfp4_tiled_to_buf(const ggml_tensor * t, const void * data, 
     const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_MXFP4;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
-    for (int i3 = 0; i3 < ne3; i3++) {
-        for (int i2 = 0; i2 < ne2; i2++) {
-            const block_mxfp4 * src_expert = src_matrix + (i3 * ne2 + i2) * (ne1 * (ne0 / 32));
-            uint8_t * matrix_dst = (uint8_t *) dst_buf + (i3 * ne2 + i2) * matrix_size;
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
 
-            for (int ct = 0; ct < n_col_tiles; ct++) {
-                for (int kt = 0; kt < n_k_tiles; kt++) {
-                    uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_mxfp4 * src_slice = src_matrix + (slice_idx - start_slice) * (ne1 * (ne0 / 32));
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
 
-                    uint8_t tile_quants[32][32];
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                uint8_t * tile_dst = matrix_dst + (ct * n_k_tiles + kt) * tile_size;
+
+                uint8_t tile_quants[32][32];
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    if (r < ne1 && kt < ne0 / 32) {
+                        unpack_mxfp4_quants(tile_quants[row], &src_slice[r * (ne0 / 32) + kt]);
+                    } else {
+                        memset(tile_quants[row], 0, 32);
+                    }
+                }
+
+                for (int cp = 0; cp < 16; cp++) {
                     for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        if (r < ne1 && kt < ne0 / 32) {
-                            unpack_mxfp4_quants(tile_quants[row], &src_expert[r * (ne0 / 32) + kt]);
-                        } else {
-                            memset(tile_quants[row], 0, 32);
-                        }
+                        tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
                     }
+                }
 
-                    for (int cp = 0; cp < 16; cp++) {
-                        for (int row = 0; row < 32; row++) {
-                            tile_dst[cp * 32 + row] = (tile_quants[row][2 * cp + 1] << 4) | tile_quants[row][2 * cp];
-                        }
-                    }
-
-                    uint8_t * scale_dst = tile_dst + 512;
-                    for (int row = 0; row < 32; row++) {
-                        int64_t r = ct * 32 + row;
-                        scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_expert[r * (ne0 / 32) + kt].e : 0;
-                    }
+                uint8_t * scale_dst = tile_dst + 512;
+                for (int row = 0; row < 32; row++) {
+                    int64_t r = ct * 32 + row;
+                    scale_dst[row] = (r < ne1 && kt < ne0 / 32) ? src_slice[r * (ne0 / 32) + kt].e : 0;
                 }
             }
         }
@@ -2285,8 +2311,8 @@ static void repack_mxfp4_tiled_to_buf(const ggml_tensor * t, const void * data, 
 
 // Inverse repack: convert tiled layout back to canonical GGML layout.
 // Used by get_tensor so CPU backends can read weight data in original format.
-static void repack_tiled_q4_0_to_buf(void * dst_data, const ggml_tensor * t, size_t size) {
-    block_q4_0 * dst_matrix = (block_q4_0 *) dst_data;
+static void repack_tiled_q4_0(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_q4_0 * dst_matrix = (block_q4_0 *) data;
     int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     int64_t ne0_padded = hex_round_up((uint32_t)ne0, 32);
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
@@ -2331,11 +2357,12 @@ static void repack_tiled_q4_0_to_buf(void * dst_data, const ggml_tensor * t, siz
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
-static void repack_tiled_q4_1_to_buf(void * dst_data, const ggml_tensor * t, size_t size) {
-    block_q4_1 * dst_matrix = (block_q4_1 *) dst_data;
+static void repack_tiled_q4_1(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_q4_1 * dst_matrix = (block_q4_1 *) data;
     int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     int64_t ne0_padded = hex_round_up((uint32_t)ne0, 32);
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
@@ -2381,13 +2408,14 @@ static void repack_tiled_q4_1_to_buf(void * dst_data, const ggml_tensor * t, siz
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
-// Inverse of repack_q8_0_tiled_to_buf: convert Q8_0 tiled layout back to
+// Inverse of repack_q8_0_tiled: convert Q8_0 tiled layout back to
 // canonical Q8_0 blocks. Used by get_tensor for CPU reference comparison.
-static void repack_tiled_q8_0_to_buf(void * dst_data, const ggml_tensor * t, size_t size) {
-    block_q8_0 * dst_matrix = (block_q8_0 *) dst_data;
+static void repack_tiled_q8_0(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_q8_0 * dst_matrix = (block_q8_0 *) data;
     int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     int64_t ne0_padded = hex_round_up((uint32_t)ne0, 32);
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
@@ -2429,13 +2457,14 @@ static void repack_tiled_q8_0_to_buf(void * dst_data, const ggml_tensor * t, siz
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
-// Inverse of repack_mxfp4_tiled_to_buf: convert MXFP4 tiled layout back to
+// Inverse of repack_mxfp4_tiled: convert MXFP4 tiled layout back to
 // canonical MXFP4 blocks. Used by get_tensor for CPU reference comparison.
-static void repack_tiled_mxfp4_to_buf(void * dst_data, const ggml_tensor * t, size_t size) {
-    block_mxfp4 * dst_matrix = (block_mxfp4 *) dst_data;
+static void repack_tiled_mxfp4(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_mxfp4 * dst_matrix = (block_mxfp4 *) data;
     int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     int64_t ne0_padded = hex_round_up((uint32_t)ne0, 32);
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
@@ -2486,29 +2515,32 @@ static void repack_tiled_mxfp4_to_buf(void * dst_data, const ggml_tensor * t, si
 // BF16 weights are stored as F16 bytes in the repack buffer so the NPU can
 // reuse the F16 matmul kernels. Conversion is exact for values inside the
 // F16 exponent range, which always holds for trained projection weights.
-static void repack_bf16_to_f16(const ggml_tensor * t, const void * data) {
+static void repack_bf16_to_f16(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     const int64_t n = ggml_nelements(t);
     const ggml_bf16_t * src = (const ggml_bf16_t *) data;
     ggml_fp16_t *       dst = (ggml_fp16_t *) t->data;
     for (int64_t i = 0; i < n; i++) {
         dst[i] = ggml_fp32_to_fp16(ggml_bf16_to_fp32(src[i]));
     }
+    GGML_UNUSED(offset);
+    GGML_UNUSED(size);
 }
 
 // Inverse of repack_bf16_to_f16, used by get_tensor for host read-back.
-static void repack_f16_to_bf16(const ggml_tensor * t, void * data, size_t size) {
+static void repack_f16_to_bf16(const ggml_tensor * t, void * data, size_t offset, size_t size) {
     const int64_t n = (int64_t)(size / sizeof(ggml_bf16_t));
     const ggml_fp16_t * src = (const ggml_fp16_t *) t->data;
     ggml_bf16_t *       dst = (ggml_bf16_t *) data;
     for (int64_t i = 0; i < n; i++) {
         dst[i] = ggml_fp32_to_bf16(ggml_fp16_to_fp32(src[i]));
     }
+    GGML_UNUSED(offset);
 }
 
-// Inverse of repack_q4k_as_q4_0_tiled_to_buf, used by get_tensor for host
+// Inverse of repack_q4k_as_q4_0_tiled, used by get_tensor for host
 // read-back: gather each canonical Q4_0 row from the tiled layout, dequant
 // to f32 and requant to Q4_K. Row-at-a-time to keep scratch small.
-static void repack_tiled_q4_0_to_q4k_buf(void * dst_data, const ggml_tensor * t, size_t size) {
+static void repack_tiled_q4_0_to_q4k(void * data, const ggml_tensor * t, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2523,7 +2555,7 @@ static void repack_tiled_q4_0_to_q4k_buf(void * dst_data, const ggml_tensor * t,
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const uint8_t * matrix_src = (const uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
-            block_q4_K * dst_expert = (block_q4_K *) dst_data + (i3 * ne2 + i2) * (ne1 * nb_q4k);
+            block_q4_K * dst_expert = (block_q4_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q4k);
 
             for (int64_t r = 0; r < ne1; r++) {
                 const int ct  = (int)(r / 32);
@@ -2546,13 +2578,14 @@ static void repack_tiled_q4_0_to_q4k_buf(void * dst_data, const ggml_tensor * t,
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
-// Inverse of repack_q5k_as_q4_0_tiled_to_buf, used by get_tensor for host
+// Inverse of repack_q5k_as_q4_0_tiled, used by get_tensor for host
 // read-back: gather each canonical Q4_0 row from the tiled layout, dequant
 // to f32 and requant to Q5_K. Row-at-a-time to keep scratch small.
-static void repack_tiled_q4_0_to_q5k_buf(void * dst_data, const ggml_tensor * t, size_t size) {
+static void repack_tiled_q4_0_to_q5k(void * data, const ggml_tensor * t, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2567,7 +2600,7 @@ static void repack_tiled_q4_0_to_q5k_buf(void * dst_data, const ggml_tensor * t,
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const uint8_t * matrix_src = (const uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
-            block_q5_K * dst_expert = (block_q5_K *) dst_data + (i3 * ne2 + i2) * (ne1 * nb_q5k);
+            block_q5_K * dst_expert = (block_q5_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q5k);
 
             for (int64_t r = 0; r < ne1; r++) {
                 const int ct  = (int)(r / 32);
@@ -2590,13 +2623,14 @@ static void repack_tiled_q4_0_to_q5k_buf(void * dst_data, const ggml_tensor * t,
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
-// Inverse of repack_q6k_as_q4_0_tiled_to_buf, used by get_tensor for host
+// Inverse of repack_q6k_as_q4_0_tiled, used by get_tensor for host
 // read-back: gather each canonical Q4_0 row from the tiled layout, dequant
 // to f32 and requant to Q6_K. Row-at-a-time to keep scratch small.
-static void repack_tiled_q4_0_to_q6k_buf(void * dst_data, const ggml_tensor * t, size_t size) {
+static void repack_tiled_q4_0_to_q6k(void * data, const ggml_tensor * t, size_t offset, size_t size) {
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
@@ -2611,7 +2645,7 @@ static void repack_tiled_q4_0_to_q6k_buf(void * dst_data, const ggml_tensor * t,
     for (int i3 = 0; i3 < ne3; i3++) {
         for (int i2 = 0; i2 < ne2; i2++) {
             const uint8_t * matrix_src = (const uint8_t *) t->data + (i3 * ne2 + i2) * matrix_size;
-            block_q6_K * dst_expert = (block_q6_K *) dst_data + (i3 * ne2 + i2) * (ne1 * nb_q6k);
+            block_q6_K * dst_expert = (block_q6_K *) data + (i3 * ne2 + i2) * (ne1 * nb_q6k);
 
             for (int64_t r = 0; r < ne1; r++) {
                 const int ct  = (int)(r / 32);
@@ -2634,6 +2668,7 @@ static void repack_tiled_q4_0_to_q6k_buf(void * dst_data, const ggml_tensor * t,
             }
         }
     }
+    GGML_UNUSED(offset);
     GGML_UNUSED(size);
 }
 
@@ -4469,7 +4504,6 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
         const char * dp                     = (const char *)tensor->data;
         const char * base                   = (const char *)hctx->rpc_mempool;
         const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
-        GGML_ASSERT(offset == 0);
         GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
 
         switch (tensor->type) {
@@ -4477,7 +4511,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_IQ4_NL:  // identical block layout to Q4_0
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q4_0_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4486,7 +4520,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q4_1:
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q4_1_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q4_1_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4495,7 +4529,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q8_0: {
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q8_0_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q8_0_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4505,7 +4539,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_MXFP4:
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_mxfp4_tiled_to_buf(tensor, data, tensor->data);
+                    repack_mxfp4_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4514,7 +4548,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_BF16:
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_bf16_to_f16(tensor, data);
+                    repack_bf16_to_f16(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4523,7 +4557,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q4_K:
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q4k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q4k_as_q4_0_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4532,7 +4566,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q5_K: {
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q5k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q5k_as_q4_0_tiled(tensor, data, offset, size);
                 } else {
                     // weight lives on heap (model too big for mempool); CPU fallback needs raw Q5_K bytes
                     memcpy(tensor->data, data, size);
@@ -4542,7 +4576,7 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
             case GGML_TYPE_Q6_K:
                 if (dp >= base && dp < end) {
                     GGMLHEXAGON_LOG_DEBUG("repack");
-                    repack_q6k_as_q4_0_tiled_to_buf(tensor, data, tensor->data);
+                    repack_q6k_as_q4_0_tiled(tensor, data, offset, size);
                 } else {
                     GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                     memcpy(tensor->data, data, size);
@@ -4575,7 +4609,6 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
         const char * dp                     = (const char *)tensor->data;
         const char * base                   = (const char *)hctx->rpc_mempool;
         const char * end                    = base + (ptrdiff_t)hctx->rpc_mempool_len;
-        GGML_ASSERT(offset == 0);
         GGML_ASSERT(offset + size <= ggml_nbytes(tensor));
         if (size == ggml_nbytes(tensor)) {
             switch (tensor->type) {
@@ -4583,7 +4616,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_IQ4_NL:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q4_0_to_buf(data, tensor, size);
+                        repack_tiled_q4_0(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4592,7 +4625,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q4_1:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q4_1_to_buf(data, tensor, size);
+                        repack_tiled_q4_1(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4601,7 +4634,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q8_0:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q8_0_to_buf(data, tensor, size);
+                        repack_tiled_q8_0(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4610,7 +4643,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_MXFP4:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_mxfp4_to_buf(data, tensor, size);
+                        repack_tiled_mxfp4(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4619,7 +4652,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_BF16:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_f16_to_bf16(tensor, data, size);
+                        repack_f16_to_bf16(tensor, data, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4628,7 +4661,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q4_K:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q4_0_to_q4k_buf(data, tensor, size);
+                        repack_tiled_q4_0_to_q4k(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4637,7 +4670,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q5_K:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q4_0_to_q5k_buf(data, tensor, size);
+                        repack_tiled_q4_0_to_q5k(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -4646,7 +4679,7 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                 case GGML_TYPE_Q6_K:
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
-                        repack_tiled_q4_0_to_q6k_buf(data, tensor, size);
+                        repack_tiled_q4_0_to_q6k(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
