@@ -134,8 +134,10 @@ struct ion_pool_region {
 };
 
 struct ggml_hexagon_device_config {
-    int physical_idx = 0;
-    int virtual_idx  = 0;
+    int         physical_idx = 0;
+    int         virtual_idx  = 0;
+    int         domain_id    = 0;
+    std::string domain_name;
     std::string name;
 };
 
@@ -1175,23 +1177,6 @@ static void ggmlhexagon_dump_perf_stats(const ggml_backend_hexagon_context * ctx
 // =================================================================================================
 //  section-6: HTP helper functions
 // =================================================================================================
-static int get_domain_id(int physical_idx) {
-    switch (physical_idx) {
-        case 0:  return 3;   // CDSP0 (all devices)
-        case 1:  return 4;   // CDSP1 (IQ9, IQ10)
-        case 2:  return 18;  // CDSP2 (IQ10)
-        case 3:  return 19;  // CDSP3 (IQ10)
-        default: return CDSP_DOMAIN_ID + physical_idx;
-    }
-}
-
-static std::string get_domain_name(int physical_idx) {
-    if (physical_idx == 0) {
-        return CDSP_DOMAIN_NAME;
-    }
-    return std::string("cdsp") + std::to_string(physical_idx);
-}
-
 static const char * ggmlhexagon_get_dsp_name(int domain_id) {
     if (domain_id == 3)  return "CDSP0";
     if (domain_id == 4)  return "CDSP1";
@@ -1202,13 +1187,93 @@ static const char * ggmlhexagon_get_dsp_name(int domain_id) {
     return buf;
 }
 
+// Enumerate NPU (aka CDSP) domains via FASTRPC_GET_DOMAINS if supported,
+// and populate domain_id and domain_name for all configured devices.
+static void ggmlhexagon_discover_devices() {
+    std::unordered_map<int, fastrpc_domain> cdsp_map;
+    bool discovery_supported = false;
+
+    system_req_payload domain_info = {};
+    domain_info.id              = FASTRPC_GET_DOMAINS;
+    domain_info.sys.domains     = nullptr;
+    domain_info.sys.max_domains = 0;
+    domain_info.sys.flags       = DOMAINS_LIST_FLAGS_SET_TYPE(0, FASTRPC_NSP);
+
+    int err = remote_system_request(&domain_info);
+    if (err == AEE_SUCCESS && domain_info.sys.num_domains > 0) {
+        std::vector<fastrpc_domain> domains(domain_info.sys.num_domains);
+        domain_info.sys.domains     = domains.data();
+        domain_info.sys.max_domains = (int) domains.size();
+
+        err = remote_system_request(&domain_info);
+        if (err == AEE_SUCCESS) {
+            discovery_supported = true;
+            const int n_domains = std::min(domain_info.sys.num_domains, (int) domains.size());
+            for (int i = 0; i < n_domains; i++) {
+                GGMLHEXAGON_LOG_ALWAYS("FASTRPC_GET_DOMAINS[%d]: type %d id %d name '%s' status %d instance-id %d\n",
+                                      i, (int) domains[i].type, domains[i].id, domains[i].name, domains[i].status, domains[i].instance_id);
+                if (domains[i].type != FASTRPC_NSP) {
+                    GGMLHEXAGON_LOG_ALWAYS("  skipping non-CDSP domain (type=%d)\n", (int) domains[i].type);
+                    continue;
+                }
+                if (!domains[i].status) {
+                    GGMLHEXAGON_LOG_ALWAYS("  skipping CDSP domain id=%d (status=down)\n", domains[i].id);
+                    continue;
+                }
+                cdsp_map[domains[i].instance_id] = domains[i];
+                GGMLHEXAGON_LOG_ALWAYS("using CDSP domain: instance-id %d id %d name '%s'\n",
+                                      domains[i].instance_id, domains[i].id, domains[i].name);
+            }
+        } else {
+            GGMLHEXAGON_LOG_WARN("FASTRPC_GET_DOMAINS fetch failed (0x%x), using static CDSP domains\n", (unsigned) err);
+        }
+    } else if (err != AEE_SUCCESS) {
+        GGMLHEXAGON_LOG_ALWAYS("FASTRPC_GET_DOMAINS query failed (0x%x), using static CDSP domains\n", (unsigned) err);
+    }
+
+    // Populate domain IDs and names for all configured devices
+    int ndev = g_hexagon_appcfg.ndev;
+    for (int i = 0; i < ndev; i++) {
+        auto & cfg = opt_device_configs[i];
+        if (discovery_supported) {
+            auto it = cdsp_map.find(cfg.physical_idx);
+            if (it != cdsp_map.end()) {
+                cfg.domain_id   = it->second.id;
+                cfg.domain_name = it->second.name;
+            } else {
+                GGMLHEXAGON_LOG_ERROR("physical CDSP core %d not found on device (%zu CDSP core(s) available)\n",
+                                      cfg.physical_idx, cdsp_map.size());
+                cfg.domain_id   = -1;
+                cfg.domain_name = "";
+            }
+        } else {
+            switch (cfg.physical_idx) {
+                case 0:
+                    cfg.domain_id   = 3;
+                    cfg.domain_name = CDSP_DOMAIN_NAME;
+                    break;
+                case 1:
+                    cfg.domain_id   = 4;
+                    cfg.domain_name = "cdsp1";
+                    break;
+                default:
+                    GGMLHEXAGON_LOG_ERROR("physical CDSP core %d not supported without dynamic discovery\n",
+                                          cfg.physical_idx);
+                    cfg.domain_id   = -1;
+                    cfg.domain_name = "";
+                    break;
+            }
+        }
+    }
+}
+
 static int ggmlhexagon_get_vtcm_info(int domain, uint32_t attr, uint32_t * capability) {
     int hexagon_error = AEE_SUCCESS;
     *capability = 0;
 
     if (attr != VTCM_PAGE && attr != VTCM_COUNT) {
         hexagon_error = AEE_EBADPARM;
-        GGMLHEXAGON_LOG_DEBUG("unsupported attr, only VTCM_PAGE and VTCM_COUNT supported");
+        GGMLHEXAGON_LOG_ALWAYS("unsupported attr, only VTCM_PAGE and VTCM_COUNT supported");
         goto bail;
     }
 
@@ -1674,8 +1739,6 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     int hexagon_error           = AEE_SUCCESS;
     int domain_id               = CDSP_DOMAIN_ID;
     bool got_uri                = false;
-    const char * uri            = NULL;
-    domain * my_domain          = NULL;
     bool is_unsignedpd_enabled  = false;
     char final_uri[512];
     char htp_uri[256];
@@ -1683,7 +1746,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
     if (nullptr == ctx)
         return 1;
     if (0 != ctx->ggmlop_handle) {
-        GGMLHEXAGON_LOG_DEBUG("already init HTP with backend %d(%s)", ctx->device, ctx->name);
+        GGMLHEXAGON_LOG_ALWAYS("already init HTP with backend %d(%s)", ctx->device, ctx->name);
         return 0;
     }
     if (!remote_session_control) {
@@ -1692,29 +1755,44 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         goto bail;
     }
 
-    // Resolve physical/virtual device indices and compute the Hexagon domain ID.
+    // Resolve physical/virtual device indices and the Hexagon domain ID.
     {
         ggml_hexagon_device_config & cfg = opt_device_configs[ctx->device];
         ctx->physical_idx = cfg.physical_idx;
         ctx->virtual_idx  = cfg.virtual_idx;
-        domain_id         = get_domain_id(cfg.physical_idx);
+        domain_id         = cfg.domain_id;
     }
+
+    if (domain_id < 0) {
+        GGMLHEXAGON_LOG_ERROR("init HTP with backend %d(%s) phys=%d virt=%d: invalid domain_id %d",
+                              ctx->device, ctx->name, ctx->physical_idx, ctx->virtual_idx, domain_id);
+        hexagon_error = AEE_EBADPARM;
+        goto bail;
+    }
+
     GGMLHEXAGON_LOG_ALWAYS("init HTP with backend %d(%s) phys=%d virt=%d domain=%d",
                            ctx->device, ctx->name, ctx->physical_idx, ctx->virtual_idx, domain_id);
 
     ctx->ggmlop_handle = 0;
-    my_domain = htpdrv_get_domain(domain_id);
-    if (NULL == my_domain) {
-        GGMLHEXAGON_LOG_ERROR("unable to get domain struct %d", domain_id);
-        goto bail;
+
+    // Enable Unsigned PD for all domains before session reservation.
+    {
+        struct remote_rpc_control_unsigned_module u;
+        u.domain = -1;
+        u.enable = 1;
+        int err  = remote_session_control(DSPRPC_CONTROL_UNSIGNED_MODULE, (void *) &u, sizeof(u));
+        if (err != AEE_SUCCESS) {
+            GGMLHEXAGON_LOG_ERROR("failed to enable unsigned PD: error 0x%x\n", err);
+            hexagon_error = err;
+            goto bail;
+        }
     }
-    uri = my_domain->uri;
-    GGMLHEXAGON_LOG_DEBUG("domain uri=%s", uri);
+
     // Reserve new FastRPC session for virtual sessions (virt_idx > 0).
     ctx->session_id = 0;
     if (ctx->virtual_idx > 0) {
         struct remote_rpc_reserve_new_session n;
-        std::string dom_name = get_domain_name(ctx->physical_idx);
+        std::string dom_name = opt_device_configs[ctx->device].domain_name;
         n.domain_name_len  = dom_name.size();
         n.domain_name      = const_cast<char *>(dom_name.c_str());
         char sess_name[32];
@@ -1724,7 +1802,7 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
         int err = remote_session_control(FASTRPC_RESERVE_NEW_SESSION, (void *) &n, sizeof(n));
         if (err != AEE_SUCCESS) {
-            GGMLHEXAGON_LOG_WARN("FASTRPC_RESERVE_NEW_SESSION failed for device %d (phys=%d virt=%d): error 0x%x",
+            GGMLHEXAGON_LOG_ALWAYS("FASTRPC_RESERVE_NEW_SESSION failed for device %d (phys=%d virt=%d): error 0x%x",
                                  ctx->device, ctx->physical_idx, ctx->virtual_idx, err);
             hexagon_error = err;
             goto bail;
@@ -1733,27 +1811,30 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         domain_id       = n.effective_domain_id;
         GGMLHEXAGON_LOG_VERBOSE("reserved new session: device=%d phys=%d virt=%d session_id=%d effective_domain_id=%d",
                              ctx->device, ctx->physical_idx, ctx->virtual_idx, ctx->session_id, domain_id);
-    }
+    } else {
+        // Resolve effective domain ID for primary sessions.
+        const std::string & dom_name = opt_device_configs[ctx->device].domain_name;
+        struct remote_rpc_effective_domain_id eff = {};
+        eff.domain_name     = const_cast<char *>(dom_name.c_str());
+        eff.domain_name_len = dom_name.size();
+        eff.session_id      = 0;
 
-    is_unsignedpd_enabled = ggmlhexagon_is_unsignedpd_supported(domain_id);
-    if (!is_unsignedpd_enabled) {
-        GGMLHEXAGON_LOG_ERROR("unsigned PD not allowed on domain %d, using signed offload", domain_id);
-        goto bail;
+        int err = remote_session_control(FASTRPC_GET_EFFECTIVE_DOMAIN_ID, (void *) &eff, sizeof(eff));
+        if (err == AEE_SUCCESS) {
+            domain_id = eff.effective_domain_id;
+        } else {
+            GGMLHEXAGON_LOG_ALWAYS("FASTRPC_GET_EFFECTIVE_DOMAIN_ID returned 0x%x, using domain_id %d\n", err, domain_id);
+        }
     }
 
     ctx->domain_id = domain_id;
     GGMLHEXAGON_LOG_ALWAYS("using Hexagon domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
+
+    is_unsignedpd_enabled = ggmlhexagon_is_unsignedpd_supported(domain_id);
     GGMLHEXAGON_LOG_ALWAYS("unsignedpd_enabled %d", is_unsignedpd_enabled);
-    if (is_unsignedpd_enabled) {
-        struct remote_rpc_control_unsigned_module data;
-        data.enable = 1;
-        data.domain = domain_id;
-        hexagon_error = remote_session_control(DSPRPC_CONTROL_UNSIGNED_MODULE, (void *)&data, sizeof(data));
-        GGMLHEXAGON_LOG_DEBUG("remote_session_control returned %d for configuring unsigned PD", hexagon_error);
-        if (AEE_SUCCESS != hexagon_error) {
-            GGMLHEXAGON_LOG_ERROR("error 0x%x: remote_session_control failed", hexagon_error);
-            goto bail;
-        }
+    if (!is_unsignedpd_enabled) {
+        GGMLHEXAGON_LOG_ERROR("unsigned PD not allowed on domain %d, using signed offload", domain_id);
+        goto bail;
     }
 
     // Probe arch and build the versioned dsp skel URI
@@ -1766,10 +1847,10 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
 
     // Build the final URI for ggml_htp_open.
     // session_id > 0: use FASTRPC_GET_URI to obtain the session-specific URI.
-    // session_id == 0 (or FASTRPC_GET_URI failure): concatenate htp_uri + domain uri.
+    // session_id == 0 (or FASTRPC_GET_URI failure): concatenate htp_uri + domain params.
     if (ctx->session_id > 0) {
         struct remote_rpc_get_uri u = {};
-        std::string dom_name = get_domain_name(ctx->physical_idx);
+        std::string dom_name = opt_device_configs[ctx->device].domain_name;
         u.session_id      = ctx->session_id;
         u.domain_name     = const_cast<char *>(dom_name.c_str());
         u.domain_name_len = dom_name.size();
@@ -1780,17 +1861,18 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         int err = remote_session_control(FASTRPC_GET_URI, (void *) &u, sizeof(u));
         if (err == AEE_SUCCESS) {
             got_uri = true;
-            GGMLHEXAGON_LOG_DEBUG("session URI for session_id=%d: %s", ctx->session_id, final_uri);
+            GGMLHEXAGON_LOG_ALWAYS("session URI for session_id=%d: %s", ctx->session_id, final_uri);
         } else {
-            GGMLHEXAGON_LOG_WARN("FASTRPC_GET_URI failed for session_id=%d: error 0x%x, fallback to %s%s",
-                                 ctx->session_id, err, htp_uri, uri);
+            GGMLHEXAGON_LOG_ALWAYS("FASTRPC_GET_URI failed for session_id=%d: error 0x%x", ctx->session_id, err);
         }
     }
     if (!got_uri) {
-        snprintf(final_uri, sizeof(final_uri), "%s%s", htp_uri, uri);
+        const std::string & dom_name = opt_device_configs[ctx->device].domain_name;
+        snprintf(final_uri, sizeof(final_uri), "%s&_dom=%s&_session=%u",
+                 htp_uri, dom_name.c_str(), ctx->session_id);
     }
 
-    GGMLHEXAGON_LOG_DEBUG("ggmlop domain uri: %s", final_uri);
+    GGMLHEXAGON_LOG_ALWAYS("ggmlop domain uri: %s", final_uri);
     hexagon_error = ggml_htp_open(final_uri, &ctx->ggmlop_handle);
     if (AEE_SUCCESS == hexagon_error) {
         GGMLHEXAGON_LOG_ALWAYS("succeed to open domain %d(%s)", domain_id, ggmlhexagon_get_dsp_name(domain_id));
@@ -6193,7 +6275,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
 // (RMS_NORM+MUL, MUL_MAT+ADD) are kept adjacent so the inline fusion still
 // triggers. Only independent MUL_MAT groups (single node, quantized src0) are
 // eligible for reordering.
-static void ggml_backend_hexagon_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * gf) {
+static void ggml_backend_hexagon_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * gf, struct ggml_backend_graph_optimize_params * params) {
     GGML_ASSERT(backend);
     GGML_ASSERT(gf);
 
@@ -6800,6 +6882,8 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
                 GGMLHEXAGON_LOG_ERROR("htpdrv_init failed with error %d", ret);
                 return nullptr;
             }
+
+            ggmlhexagon_discover_devices();
 
             int ndev = g_hexagon_appcfg.ndev;
             ggml_backend_hexagon_reg_context * ctx = new ggml_backend_hexagon_reg_context;
