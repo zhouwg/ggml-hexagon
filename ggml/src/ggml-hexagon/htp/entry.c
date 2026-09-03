@@ -144,6 +144,7 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_MUL_MAT_ADD:     return "MUL_MAT_ADD";
         case HTP_OP_MUL_MAT_ID:      return "MUL_MAT_ID";
         case HTP_OP_MUL_MAT_NX:      return "MUL_MAT_NX";
+        case HTP_OP_MUL_MAT_ID_NX:   return "MUL_MAT_ID_NX";
         case HTP_OP_MUL:             return "MUL";
         case HTP_OP_ADD:             return "ADD";
         case HTP_OP_SUB:             return "SUB";
@@ -764,6 +765,7 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_MUL_MAT]         = op_matmul,
     [HTP_OP_MUL_MAT_ID]      = op_matmul_id,
     [HTP_OP_MUL_MAT_NX]      = op_matmul_nx,
+    [HTP_OP_MUL_MAT_ID_NX]  = op_matmul_id_nx,
     [HTP_OP_MUL_MAT_ADD]     = op_matmul,
     [HTP_OP_NORM]            = op_unary,
     [HTP_OP_RMS_NORM]        = op_unary,
