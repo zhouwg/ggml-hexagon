@@ -92,6 +92,8 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   (default)           -> gemma-4-E2B-it-Q4_0.gguf
 #   nanbeige-3b-q80     -> Nanbeige_Nanbeige4.2-3B-Q8_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
+#   spark-1b            -> Spark-X2.5-1.7B.gguf
+#   spark-4b            -> Spark-X2.5-4B.gguf
 function resolve_model_name()
 {
     case "$1" in
@@ -105,6 +107,8 @@ function resolve_model_name()
         nanbeige-3b-q80)    echo "/sdcard/Nanbeige_Nanbeige4.2-3B-Q8_0.gguf";;
         minicpm5-1b)        echo "/sdcard/minicpm5-1b-q4_0.gguf";;
         minicpm5-1b-q80)    echo "/sdcard/MiniCPM5-1B-Q8_0.gguf";;
+        spark-1b)           echo "/sdcard/Spark-X2.5-1.7B.gguf";;
+        spark-4b)           echo "/sdcard/Spark-X2.5-4B.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
 }
@@ -667,6 +671,12 @@ function check_prebuilt_models()
 
     #635 MiB
     check_and_download_model minicpm5-1b-q4_0.gguf               https://huggingface.co/Elmermoreno/MiniCPM5-1B-Q4_0-GGUF/resolve/main/minicpm5-1b-q4_0.gguf
+
+    #3.2 GiB
+    #check_and_download_model Spark-X2.5-1.7B.gguf               https://huggingface.co/XHToken/Spark-X2.5-1.7B-GGUF/resolve/main/Spark-X2.5-1.7B.gguf
+
+    #7.7 GiB
+    #check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
     set -e
 }
 
@@ -1664,6 +1674,8 @@ function show_usage()
     echo "    llama3        -> Llama-3.2-1B-Instruct-Q4_0.gguf"
     echo "    nanbeige-3b   -> Nanbeige_Nanbeige4.2-3B-Q4_0.gguf"
     echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
+    echo "    spark-1b      -> Spark-X2.5-1.7B.gguf"
+    echo "    spark-4b      -> Spark-X2.5-4B.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
