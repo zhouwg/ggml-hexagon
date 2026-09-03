@@ -4,7 +4,7 @@
 # this script will setup local dev envs automatically
 #
 # 2024--2026 The ggml authors
-# GitHub:  https://github.com/zhouwg/ggml-hexagon
+# GitHub:  https://github.com/ggml-hexagon/ggml-hexagon
 #
 set -e
 

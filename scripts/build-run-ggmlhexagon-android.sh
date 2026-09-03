@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# This single-source file is part of JZ's ggml-hexagon.
+# This single-source file is part of FastRPC-based ggml-hexagon.
 # 2024--2026 The ggml authors
-# GitHub:  https://github.com/zhouwg/ggml-hexagon
+# GitHub:  https://github.com/ggml-hexagon/ggml-hexagon
 #
 # this script will setup local dev envs automatically and docker is not needed for purpose of simplify workflow.
 #
 # this script is AI Agent friendly and verified with Trae AI Agent.
 #
-# 1. build&verify llama.cpp + mempool/FastRPC ggml-hexagon backend(aka JZ's ggml-hexagon, ggml-hexagon-fastrpc.cpp + entry.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 1. build&verify llama.cpp + mempool/FastRPC ggml-hexagon backend(ggml-hexagon-fastrpc.cpp + entry.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
-# 2. build&verify llama.cpp + dspqueue ggml-hexagon backend(aka Qualcomm's ggml-hexagon, ggml-hexagon.cpp + main.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
+# 2. build&verify llama.cpp + dspqueue ggml-hexagon backend(Qualcomm's official ggml-hexagon, ggml-hexagon.cpp + main.c + hexagon kernels) on Linux for Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended)
 #
 # 3. performance comparison of the dspqueue variant and the mempool/FastRPC variant on Android phone equipped with Qualcomm Snapdragon mobile SoC(8Elite is recommended & verified)
 #
