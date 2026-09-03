@@ -92,6 +92,8 @@
 
 #define SIZE_IN_MB                                      (1 << 20)
 
+#define GGML_HEXAGON_VERSION                            "0.10.4"
+
 // Forward declarations
 static bool                  ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const ggml_tensor * op);
 
@@ -375,7 +377,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
-        .version                = {"0.10.2"},
+        .version                = {GGML_HEXAGON_VERSION},
 };
 
 //TODO: add descriptors for more supported Snapdragon devices
@@ -744,7 +746,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.10.2");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, GGML_HEXAGON_VERSION);
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
@@ -5264,7 +5266,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     std::vector<ggml_tensor *>  local_tensor_src;
     std::vector<hex_op_desc>    local_hex_ops;
     std::vector<uint8_t>        local_is_weight;
-    std::vector<int32_t>        local_mirror_offset;  // per-tensor heap mirror mempool offset, -1 = none
+    std::vector<uint32_t>       local_mirror_offset;  // per-tensor heap mirror mempool offset, UINT32_MAX = none
 
     // supported_nodes is only required to build descriptors on cache miss.
     // On a cache hit we restore the derived descriptors directly, skipping this
@@ -5916,7 +5918,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
     }
 
     // Step 3: Build per-tensor mirror offset lookup and mirrors list for copy-back.
-    local_mirror_offset.assign(n_tensors, -1);
+    local_mirror_offset.assign(n_tensors, UINT32_MAX);
     for (int32_t tidx = 0; tidx < (int32_t)n_tensors; tidx++) {
         ggml_tensor * t = tensor_src[tidx];
         if (!t->data) continue;
@@ -5927,9 +5929,21 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         }
 
         auto it = buffer_mirrors_map.find(t->data);
-        if (it == buffer_mirrors_map.end() || !it->second.allocated) continue;
+        if (it == buffer_mirrors_map.end() || !it->second.allocated) {
+            GGMLHEXAGON_LOG_ERROR("mempool-batch: Step3 SKIP tensor[%d/%d] '%s' data=%p"
+                " op=%d ne=[%lld,%lld,%lld,%lld] type=%d in_map=%d allocated=%d map_size=%zu",
+                tidx, (int)n_tensors, (t->name[0] != 0) ? t->name : "?",
+                t->data, (int)t->op,
+                (long long)t->ne[0], (long long)t->ne[1],
+                (long long)t->ne[2], (long long)t->ne[3],
+                (int)t->type,
+                it != buffer_mirrors_map.end() ? 1 : 0,
+                (it != buffer_mirrors_map.end() && it->second.allocated) ? 1 : 0,
+                buffer_mirrors_map.size());
+            continue;
+        }
 
-        local_mirror_offset[tidx] = (int32_t)it->second.mirror_offset;
+        local_mirror_offset[tidx] = it->second.mirror_offset;
 
         ion_mirror m;
         m.tensor_idx    = tidx;
@@ -6063,15 +6077,27 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             td->flags = is_weight[i] ? 2 : 0;  // 2=weight (skip NPU first-touch invalidation)
         } else {
             // heap tensor: look up mempool offset
-            int32_t moff = local_mirror_offset[i];
-            if (moff >= 0) {
-                td->data_offset = (uint32_t)moff;
+            uint32_t moff = local_mirror_offset[i];
+            if (moff != UINT32_MAX) {
+                td->data_offset = moff;
                 td->flags = 1;  // writable (mirrored)
             } else {
                 // No mirror means t->data was NULL (Phase 5 mirrors every
                 // non-pool tensor). Offset 0 would alias the first pool region,
                 // so refuse the batch instead of letting the NPU stomp weights.
-                GGMLHEXAGON_LOG_ERROR("mempool-batch: tensor[%d] has no data and no mirror; aborting batch", i);
+                GGMLHEXAGON_LOG_ERROR("mempool-batch: tensor[%d] has no data and no mirror; aborting batch"
+                    " name='%s' op=%d data=%p view_src=%p view_offs=%zu"
+                    " ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu]"
+                    " buffer=%p type=%d local_mirror_offset_size=%zu",
+                    i,
+                    (t->name[0] != 0) ? t->name : "?",
+                    (int)t->op, t->data,
+                    t->view_src, (size_t)t->view_offs,
+                    (long long)t->ne[0], (long long)t->ne[1],
+                    (long long)t->ne[2], (long long)t->ne[3],
+                    t->nb[0], t->nb[1], t->nb[2], t->nb[3],
+                    t->buffer, (int)t->type,
+                    local_mirror_offset.size());
                 std::sort(temp_region_indices.begin(), temp_region_indices.end(), std::greater<size_t>());
                 for (size_t ri : temp_region_indices) {
                     ctx->ion_regions.erase(ctx->ion_regions.begin() + ri);
