@@ -2968,8 +2968,9 @@ static void ggml_hexagon_precompute_unary_params(
 
     kparams->n_threads = n_threads;
 
-    const size_t src0_data_row_size = (size_t) src0->ne[0] * sizeof(float);
-    const size_t dst_data_row_size  = (size_t) dst->ne[0]  * sizeof(float);
+    const size_t elem_size = ggml_type_size(src0->type);
+    const size_t src0_data_row_size = (size_t) src0->ne[0] * elem_size;
+    const size_t dst_data_row_size  = (size_t) dst->ne[0]  * elem_size;
 
     const size_t src0_row_size_aligned = hex_round_up((uint32_t) src0_data_row_size, 128);
     const size_t dst_row_size_aligned  = hex_round_up((uint32_t) dst_data_row_size,  128);
@@ -3000,7 +3001,7 @@ static void ggml_hexagon_precompute_unary_params(
     htp_unary_vtcm_layout_build(&L, op, (uint32_t) src0->ne[0], (uint32_t) dst->ne[0],
                                 op == HTP_OP_RMS_NORM_MUL ? (uint32_t) src1->ne[0] : 0,
                                 broadcast_weight, n_threads, vtcm_size_budget,
-                                &col_tile, &vtcm_row_per_thread);
+                                elem_size, &col_tile, &vtcm_row_per_thread);
 
     kparams->col_tile              = col_tile;
     kparams->vtcm_row_per_thread   = vtcm_row_per_thread;
@@ -4030,7 +4031,7 @@ static bool hexagon_validate_rms_norm(ggml_backend_hexagon_context * ctx, const 
 static bool hexagon_validate_norm_op(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
     GGML_UNUSED(ctx);
     const ggml_tensor * src0 = op->src[0];
-    if (src0->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32)
+    if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) || src0->type != op->type)
         return false;
     if (!ggml_are_same_shape(src0, op))
         return false;
@@ -4091,6 +4092,14 @@ static bool hexagon_validate_unary(ggml_backend_hexagon_context * ctx, const ggm
     const ggml_tensor * src0 = op->src[0];
     const int unary_op = (int)op->op_params[0];
     switch (unary_op) {
+        case GGML_UNARY_OP_ABS:
+            if ((src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16) || src0->type != op->type)
+                return false;
+            if (!ggml_are_same_shape(src0, op))
+                return false;
+            if (!ggml_is_contiguous(op))
+                return false;
+            return true;
         case GGML_UNARY_OP_SILU:
         case GGML_UNARY_OP_GELU:
         case GGML_UNARY_OP_GELU_QUICK:
