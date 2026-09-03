@@ -92,6 +92,8 @@
 
 #define SIZE_IN_MB                                      (1 << 20)
 
+#define GGML_HEXAGON_VERSION                            "0.10.4"
+
 // Forward declarations
 static bool                  ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const ggml_tensor * op);
 
@@ -375,7 +377,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_trace_bit1   = 0,
         .enable_graph_optimize  = 1,
         .cfgfilename            = "ggml-hexagon.cfg",
-        .version                = {"0.10.3"},
+        .version                = {GGML_HEXAGON_VERSION},
 };
 
 //TODO: add descriptors for more supported Snapdragon devices
@@ -744,7 +746,7 @@ static void ggmlhexagon_load_cfg() {
         GGMLHEXAGON_LOG_INFO("%s", tmposs.str().c_str());
     });
     std::string version; //version of ggml-hexagon
-    hexagoncfg_instance.get_stringvalue("general", "version", version, "0.10.3");
+    hexagoncfg_instance.get_stringvalue("general", "version", version, GGML_HEXAGON_VERSION);
     hexagoncfg_instance.get_intvalue("general", "dump_debug_info", g_hexagon_appcfg.dump_debug_info, 0);
 
     hexagoncfg_instance.get_intvalue("cdsp", "thread_counts", g_hexagon_appcfg.thread_counts, 6);
