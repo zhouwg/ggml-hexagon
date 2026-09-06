@@ -94,6 +94,8 @@ GGUF_MODEL_NAME=/sdcard/gemma-4-E2B-it-Q4_0.gguf
 #   minicpm5-1b-q80     -> MiniCPM5-1B-Q8_0.gguf
 #   spark-1b            -> Spark-X2.5-1.7B.gguf
 #   spark-4b            -> Spark-X2.5-4B.gguf
+#   qwen3-9b-mtp        -> Qwen3.5-9B-D2-A-MTP-attnQ4.gguf
+#   macro-8b            -> Marco-Nano-Instruct.Q4_0.gguf
 function resolve_model_name()
 {
     case "$1" in
@@ -109,6 +111,8 @@ function resolve_model_name()
         minicpm5-1b-q80)    echo "/sdcard/MiniCPM5-1B-Q8_0.gguf";;
         spark-1b)           echo "/sdcard/Spark-X2.5-1.7B.gguf";;
         spark-4b)           echo "/sdcard/Spark-X2.5-4B.gguf";;
+        qwen3-9b-mtp)       echo "/sdcard/Qwen3.5-9B-D2-A-MTP-attnQ4.gguf";;
+        macro-8b)           echo "/sdcard/Marco-Nano-Instruct.Q4_0.gguf";;
         *)                  echo "" ; return 1 ;;
     esac
 }
@@ -677,6 +681,13 @@ function check_prebuilt_models()
 
     #7.7 GiB
     #check_and_download_model Spark-X2.5-4B.gguf                  https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B.gguf
+
+    #4.57 GiB
+    #check_and_download_model Marco-Nano-Instruct.Q4_0.gguf        https://huggingface.co/gat45/snapdragon-test-npu/resolve/main/Marco-Nano-Instruct.Q4_0.gguf
+
+    #2.11 GiB
+    #check_and_download_model Qwen3.5-9B-D2-A-MTP-attnQ4.gguf      https://huggingface.co/gat45/snapdragon-test-npu/resolve/main/Qwen3.5-9B-D2-A-MTP-attnQ4.gguf
+
     set -e
 }
 
@@ -1676,6 +1687,8 @@ function show_usage()
     echo "    minicpm5-1b   -> minicpm5-1b-q4_0.gguf"
     echo "    spark-1b      -> Spark-X2.5-1.7B.gguf"
     echo "    spark-4b      -> Spark-X2.5-4B.gguf"
+    echo "    qwen3-9b-mtp  -> Qwen3.5-9B-D2-A-MTP-attnQ4.gguf"
+    echo "    macro-8b      -> Marco-Nano-Instruct.Q4_0.gguf"
     echo "    (default)     -> gemma-4-E2B-it-Q4_0.gguf"
     echo "  Examples:"
     echo "    $0 run_llamacli/run_llamabench              # run gemma4-e2b inference test on an Qualcomm mobile SoC-based Android phone"
