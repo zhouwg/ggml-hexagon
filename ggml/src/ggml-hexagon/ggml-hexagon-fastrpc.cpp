@@ -106,7 +106,7 @@
 
 #define SIZE_IN_MB                                      (1 << 20)
 
-#define GGML_HEXAGON_VERSION                            "0.5.8"
+#define GGML_HEXAGON_VERSION                            "0.5.9"
 
 // Forward declarations
 static bool                  ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const ggml_tensor * op);
