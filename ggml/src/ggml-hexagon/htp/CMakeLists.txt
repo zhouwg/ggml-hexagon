@@ -41,6 +41,7 @@ set(HTP_OPS_SRCS
     argsort-ops.c
     im2col-ops.c
     roll-ops.c
+    pool-ops.c
     allreduce-ops.c
 )
 
