@@ -1826,80 +1826,87 @@ static int ggmlhexagon_init_rpcmempool(ggml_backend_hexagon_context * ctx) {
     size_t targets_legacy[] = { 3830, 3072, 2048 };
     size_t * targets        = (htp_arch > 75) ? targets_79plus : targets_legacy;
     size_t   n_targets      = (htp_arch > 75) ? sizeof(targets_79plus) / sizeof(targets_79plus[0])
-                                              : sizeof(targets_legacy) / sizeof(targets_legacy[0]);
-    for (size_t i = 0; i < n_targets; i++) {
-        size_t pool_size = targets[i] - 8;
-        uint8_t * buf = static_cast<uint8_t *>(rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, pool_size * SIZE_IN_MB));
-        if (buf) {
-            ctx->rpc_mempool          = buf;
-            ctx->rpc_mempool_capacity = targets[i] * SIZE_IN_MB;
-            ctx->rpc_mempool_len      = pool_size * SIZE_IN_MB;
-            GGMLHEXAGON_LOG_ALWAYS("rpc mempool: %zu MiB allocated (target %zu MiB, device %d)",
-                                    pool_size, targets[i], ctx->device);
-            goto mempool_acquired;
-        }
-        GGMLHEXAGON_LOG_DEBUG("init rpc mempool: alloc %zu MiB failed, trying next smaller target", pool_size);
-    }
-    GGMLHEXAGON_LOG_ERROR("init rpc mempool: all allocation attempts failure");
-    return 3;
-
-mempool_acquired:
-    ctx->rpc_mempool_handle = rpcmem_to_fd(ctx->rpc_mempool);
-    if (ctx->rpc_mempool_handle < 0) {
-        GGMLHEXAGON_LOG_ERROR("rpcmem_to_fd failed for %p", ctx->rpc_mempool);
-        rpcmem_free(ctx->rpc_mempool);
-        ctx->rpc_mempool = nullptr;
-        return 4;
-    }
-    GGMLHEXAGON_LOG_INFO("rpc mempool handle %d",       ctx->rpc_mempool_handle);
-    GGMLHEXAGON_LOG_INFO("rpc mempool addr %p",         ctx->rpc_mempool);
-    GGMLHEXAGON_LOG_INFO("rpc mempool size %zu (%zu MB)", ctx->rpc_mempool_len, ctx->rpc_mempool_len / SIZE_IN_MB);
+                                       : sizeof(targets_legacy) / sizeof(targets_legacy[0]);
     // Register mempool with FastRPC kernel driver.
     // rpc_mmap_mode = 0: FASTRPC_MAP_FD_DELAYED (default), defers NPU-side mapping until HAP_mmap2().
     // rpc_mmap_mode = 1: FASTRPC_MAP_FD (eager), creates immediate kernel-level mapping and pins pages.
-    enum fastrpc_map_flags mmap_flags = (g_hexagon_appcfg.rpc_mmap_mode == 1)
-                                        ? FASTRPC_MAP_FD
-                                        : FASTRPC_MAP_FD_DELAYED;
+    enum fastrpc_map_flags mmap_flags = (g_hexagon_appcfg.rpc_mmap_mode == 1) ? FASTRPC_MAP_FD : FASTRPC_MAP_FD_DELAYED;
     const char * mmap_mode_str = (g_hexagon_appcfg.rpc_mmap_mode == 1) ? "EAGER" : "DELAYED";
-    int mmap_err = fastrpc_mmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, 0, ctx->rpc_mempool_len, mmap_flags);
-    if (mmap_err != 0) {
-        GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(%s) returned %d (fd=%d), aborting backend init",
-                               mmap_mode_str, mmap_err, ctx->rpc_mempool_handle);
-        rpcmem_free(ctx->rpc_mempool);
-        ctx->rpc_mempool = nullptr;
-        return 5;
-    }
-    GGMLHEXAGON_LOG_INFO("fastrpc_mmap(%s) OK: fd=%d, size=%zu MB",
-                          mmap_mode_str, ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB);
 
-    // Register mempool on NPU side via pure-scalar IDL call.
-    // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
-    // implicit fd_mmap_create when dsptensor.data pointers are passed.
-    // The NPU will call HAP_mmap2(fd) to get a user-space-accessible VA.
-    uint32_t ion_fd  = (uint32_t)ctx->rpc_mempool_handle;
-    uint32_t size_lo = (uint32_t)(ctx->rpc_mempool_len & 0xFFFFFFFF);
-    uint32_t size_hi = (uint32_t)((ctx->rpc_mempool_len >> 32) & 0xFFFFFFFF);
+    for (size_t i = 0; i < n_targets; i++) {
+        size_t pool_size = targets[i] - 8;
+        // Allocate heap memory for the mempool.
+        // RPCMEM_HEAP_ID_SYSTEM: Allocates from the system memory heap.
+        // RPCMEM_DEFAULT_FLAGS: Standard flags for heap allocation.
+        uint8_t * buf = static_cast<uint8_t *>(rpcmem_alloc2(RPCMEM_HEAP_ID_SYSTEM, RPCMEM_DEFAULT_FLAGS, pool_size * SIZE_IN_MB));
+        if (!buf) {
+            GGMLHEXAGON_LOG_DEBUG("rpcmem_alloc2 failed for %zu MiB, trying smaller target", pool_size);
+            continue;
+        }
 
-    int64_t t0_reg = ggml_time_us();
-    int reg_err = ggml_htp_register_rpcmem(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
-    int64_t dt_reg = ggml_time_us() - t0_reg;
-    if (reg_err != AEE_SUCCESS) {
-        GGMLHEXAGON_LOG_ERROR("dsp_register_rpcmem failed: 0x%x, aborting backend init", reg_err);
-        fastrpc_munmap(ctx->domain_id, ctx->rpc_mempool_handle, ctx->rpc_mempool, ctx->rpc_mempool_len);
-        rpcmem_free(ctx->rpc_mempool);
-        ctx->rpc_mempool = nullptr;
-        return 6;
-    }
-    GGMLHEXAGON_LOG_ALWAYS("registered mempool base via scalar call: fd=%d, size=%zu MB, time=%lld us",
-                            ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB, (long long)dt_reg);
-    GGMLHEXAGON_LOG_ALWAYS("mempool layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);
-    // Prime the RPC overhead profiler with a few no-op warmup calls to get
-    // a meaningful min/max/avg distribution without polluting the pool.
-    for (int i = 0; i < 6; i++) {
-        (void)hexagon_warmup_invoke_timed(ctx);
-    }
+        GGMLHEXAGON_LOG_ALWAYS("rpc mempool: %zu MiB allocated (target %zu MiB, device %d)",
+                                    pool_size, targets[i], ctx->device);
+        // Translate the heap memory to a file descriptor (fd).
+        // This fd is used to share the memory with the DSP via FastRPC.
+        int fd = rpcmem_to_fd(buf);
+        if (fd < 0) {
+            GGMLHEXAGON_LOG_ERROR("rpcmem_to_fd failed for %p, trying smaller target", buf);
+            rpcmem_free(buf);
+            continue;
+        }
+        GGMLHEXAGON_LOG_INFO("rpc mempool handle %d", fd);
+        GGMLHEXAGON_LOG_INFO("rpc mempool addr %p", buf);
+        GGMLHEXAGON_LOG_INFO("rpc mempool size %zu (%zu MB)", pool_size * SIZE_IN_MB, pool_size);
+        int mmap_err = fastrpc_mmap(ctx->domain_id, fd, buf, 0, pool_size * SIZE_IN_MB, mmap_flags);
+        if (mmap_err != 0) {
+            GGMLHEXAGON_LOG_ERROR("fastrpc_mmap(%s) failed: %d (fd=%d, size=%zu MiB), trying smaller target", 
+                                   mmap_mode_str, mmap_err, fd, pool_size);
+            rpcmem_free(buf);
+            continue;
+        }
+        GGMLHEXAGON_LOG_INFO("fastrpc_mmap(%s) OK: fd=%d, size=%zu MB", 
+                              mmap_mode_str, fd, pool_size);
+        // Register mempool on NPU side via pure-scalar IDL call.
+        // This avoids FastRPC's fdlist_fd_from_buf() scan that triggers
+        // implicit fd_mmap_create when dsptensor.data pointers are passed.
+        // The NPU will call HAP_mmap2(fd) to get a user-space-accessible VA.
+        uint32_t ion_fd  = static_cast<uint32_t>(fd);
+        uint32_t size_lo = static_cast<uint32_t>(pool_size * SIZE_IN_MB & 0xFFFFFFFF);
+        uint32_t size_hi = static_cast<uint32_t>((pool_size * SIZE_IN_MB >> 32) & 0xFFFFFFFF);
 
-    return 0;
+        int64_t t0_reg = ggml_time_us();
+        int reg_err = ggml_htp_register_rpcmem(ctx->ggmlop_handle, ion_fd, size_lo, size_hi);
+        int64_t dt_reg = ggml_time_us() - t0_reg;
+        if (reg_err != AEE_SUCCESS) {
+            GGMLHEXAGON_LOG_ALWAYS("dsp_register_rpcmem failed: 0x%x (size=%zu MiB), trying smaller target", reg_err, pool_size);
+            int unmap_err = fastrpc_munmap(ctx->domain_id, fd, buf, pool_size * SIZE_IN_MB);
+            if (unmap_err != 0) {
+                GGMLHEXAGON_LOG_ERROR("fastrpc_munmap failed: %d, cannot safely retry", unmap_err);
+                rpcmem_free(buf);
+                return 6;
+            }
+            rpcmem_free(buf);
+            continue;
+        }
+        // Commit the pool to the context only after successful DSP registration.
+        // Failed attempts must not leave partially initialized or dangling state.
+        ctx->rpc_mempool          = buf;
+        ctx->rpc_mempool_handle   = fd;
+        ctx->rpc_mempool_capacity = targets[i] * SIZE_IN_MB;
+        ctx->rpc_mempool_len      = pool_size * SIZE_IN_MB;
+        
+        GGMLHEXAGON_LOG_ALWAYS("registered mempool base via scalar call: fd=%d, size=%zu MB, time=%lld us", 
+                                ctx->rpc_mempool_handle, ctx->rpc_mempool_len / SIZE_IN_MB, (long long)dt_reg);
+        GGMLHEXAGON_LOG_ALWAYS("mempool layout: total=%zuMB", ctx->rpc_mempool_len / SIZE_IN_MB);  
+        // Prime the RPC overhead profiler with a few no-op warmup calls to get
+        // a meaningful min/max/avg distribution without polluting the pool
+        for (int j = 0; j < 6; j++) {
+            (void)hexagon_warmup_invoke_timed(ctx);
+        }
+        return 0;
+    }
+    GGMLHEXAGON_LOG_ERROR("init rpc mempool: all allocation or registration attempts failed");
+    return 3;
 }
 
 static void ggmlhexagon_deinit_rpcmempool(ggml_backend_hexagon_context * ctx) {
