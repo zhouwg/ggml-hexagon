@@ -176,6 +176,9 @@ struct dsp_context {
     // Power
     int power_ctx;
     void * hexagon_power_ctx;
+    // HTP_POWER_MODE_* from htp-ops.h. Default BURST at open. AP can change it
+    // via execute_batch(0xFFFC) bits 8..11 with bit 12 set (see ggml_htp_execute_batch).
+    uint32_t power_mode;
 
     // HMX
     int hmx_available;

@@ -196,11 +196,13 @@ static const char * htp_op_short_name(unsigned int op) {
         case HTP_OP_CLAMP:           return "CLAMP";
         case HTP_OP_LEAKY_RELU:      return "LEAKY_RELU";
         case HTP_OP_IM2COL:          return "IM2COL";
+        case HTP_OP_IM2COL_3D:       return "IM2COL_3D";
         case HTP_OP_GATED_DELTA_NET: return "GATED_DELTA_NET";
         case HTP_OP_ROLL:            return "ROLL";
         case HTP_OP_POOL_2D:         return "POOL_2D";
         case HTP_OP_POOL_1D:         return "POOL_1D";
         case HTP_OP_TRI:             return "TRI";
+        case HTP_OP_HADAMARD:        return "HADAMARD";
         case HTP_OP_INVALID:         return "INVALID";
         default:                     return NULL;
     }
@@ -560,8 +562,88 @@ static int vtcm_release_callback(unsigned int rctx, void * state) {
 // =================================================================================================
 // IDL helper functions
 // =================================================================================================
-static int power_on_hvx_hmx(struct dsp_context * ctx) {
+// Non-BURST modes leave DCVS enabled and keep the HTP awake.
+// BURST pins all corners to MAX and disables DCVS.
+// Corner constants are from HAP_power.h (HAP_dcvs_voltage_corner_t / HAP_dcvs_exp_vcorner_t).
+struct htp_power_profile {
+    boolean  dcvs_enable;
+    uint32_t bus_min_corner;
+    uint32_t bus_max_corner;
+    uint32_t bus_target_corner;
+    uint32_t core_min_corner;
+    uint32_t core_max_corner;
+    uint32_t core_target_corner;
+    boolean  sleep_disable;
+    uint32_t hmx_min_corner;    // only used when __HVX_ARCH__ >= 75
+    uint32_t hmx_max_corner;
+    uint32_t hmx_target_corner;
+    uint32_t hmx_perf_mode;
+};
+
+#define HTP_POWER_PROFILE_ENTRY(min_c, max_c, hmx_c) \
+    { \
+        .dcvs_enable        = TRUE, \
+        .bus_min_corner     = (min_c), \
+        .bus_max_corner     = (max_c), \
+        .bus_target_corner  = (max_c), \
+        .core_min_corner    = (min_c), \
+        .core_max_corner    = (max_c), \
+        .core_target_corner = (max_c), \
+        .sleep_disable      = TRUE, \
+        .hmx_min_corner     = (hmx_c), \
+        .hmx_max_corner     = (hmx_c), \
+        .hmx_target_corner  = (hmx_c), \
+        .hmx_perf_mode      = HAP_CLK_PERF_HIGH, \
+    }
+
+static const struct htp_power_profile htp_power_profiles[HTP_POWER_MODE_COUNT] = {
+    [HTP_POWER_MODE_LOW_POWER_SAVER] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_SVS2, HAP_DCVS_VCORNER_SVS2, HAP_DCVS_EXP_VCORNER_MIN_SVS),
+    [HTP_POWER_MODE_POWER_SAVER] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_SVS, HAP_DCVS_VCORNER_SVS_PLUS, HAP_DCVS_EXP_VCORNER_SVS),
+    [HTP_POWER_MODE_HIGH_POWER_SAVER] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_SVS_PLUS, HAP_DCVS_VCORNER_NOM, HAP_DCVS_EXP_VCORNER_SVS_L2),
+    [HTP_POWER_MODE_LOW_BALANCED] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_NOM, HAP_DCVS_VCORNER_NOM_PLUS, HAP_DCVS_EXP_VCORNER_NOM),
+    [HTP_POWER_MODE_BALANCED] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_NOM_PLUS, HAP_DCVS_VCORNER_TURBO, HAP_DCVS_EXP_VCORNER_NOM_L1),
+    [HTP_POWER_MODE_HIGH_PERFORMANCE] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_TURBO, HAP_DCVS_VCORNER_TURBO_PLUS, HAP_DCVS_EXP_VCORNER_TUR_L2),
+    [HTP_POWER_MODE_SUSTAINED_HIGH_PERFORMANCE] =
+        HTP_POWER_PROFILE_ENTRY(HAP_DCVS_VCORNER_NOM_PLUS, HAP_DCVS_VCORNER_TURBO_PLUS, HAP_DCVS_EXP_VCORNER_TUR_L2),
+    [HTP_POWER_MODE_BURST] = {
+        .dcvs_enable        = FALSE,
+        .bus_min_corner     = HAP_DCVS_VCORNER_MAX,
+        .bus_max_corner     = HAP_DCVS_VCORNER_MAX,
+        .bus_target_corner  = HAP_DCVS_VCORNER_MAX,
+        .core_min_corner    = HAP_DCVS_VCORNER_MAX,
+        .core_max_corner    = HAP_DCVS_VCORNER_MAX,
+        .core_target_corner = HAP_DCVS_VCORNER_MAX,
+        .sleep_disable      = TRUE,
+        .hmx_min_corner     = HAP_DCVS_EXP_VCORNER_MAX,
+        .hmx_max_corner     = HAP_DCVS_EXP_VCORNER_MAX,
+        .hmx_target_corner  = HAP_DCVS_EXP_VCORNER_MAX,
+        .hmx_perf_mode      = HAP_CLK_PERF_HIGH,
+    },
+};
+
+#undef HTP_POWER_PROFILE_ENTRY
+
+// Idempotent: safe to call again when the AP changes power mode at runtime.
+static int power_on_hvx_hmx(struct dsp_context * ctx, uint32_t power_mode) {
     HAP_power_request_t req;
+
+    if (power_mode >= HTP_POWER_MODE_COUNT) {
+        GGMLHEXAGON_LOG_ERROR("invalid power_mode %u, falling back to burst", (unsigned) power_mode);
+        power_mode = HTP_POWER_MODE_BURST;
+    }
+    const struct htp_power_profile * pwr = &htp_power_profiles[power_mode];
+    GGMLHEXAGON_LOG_INFO("power_mode %u : dcvs_enable %d bus[%u,%u,%u] core[%u,%u,%u] sleep_disable %d hmx[%u,%u,%u]",
+                         (unsigned) power_mode, (int) pwr->dcvs_enable,
+                         (unsigned) pwr->bus_min_corner, (unsigned) pwr->bus_max_corner, (unsigned) pwr->bus_target_corner,
+                         (unsigned) pwr->core_min_corner, (unsigned) pwr->core_max_corner, (unsigned) pwr->core_target_corner,
+                         (int) pwr->sleep_disable,
+                         (unsigned) pwr->hmx_min_corner, (unsigned) pwr->hmx_max_corner, (unsigned) pwr->hmx_target_corner);
 
     /* Set client class */
     memset(&req, 0, sizeof(req));
@@ -576,18 +658,18 @@ static int power_on_hvx_hmx(struct dsp_context * ctx) {
     memset(&req, 0, sizeof(req));
     req.type = HAP_power_set_DCVS_v3;
     req.dcvs_v3.set_dcvs_enable = 1;
-    req.dcvs_v3.dcvs_enable = 0;  // disable DVFS, pin to fixed frequency for stable performance
+    req.dcvs_v3.dcvs_enable = pwr->dcvs_enable;
     req.dcvs_v3.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
     req.dcvs_v3.set_bus_params = 1;
-    req.dcvs_v3.bus_params.min_corner = HAP_DCVS_VCORNER_MAX;
-    req.dcvs_v3.bus_params.max_corner = HAP_DCVS_VCORNER_MAX;
-    req.dcvs_v3.bus_params.target_corner = HAP_DCVS_VCORNER_MAX;
+    req.dcvs_v3.bus_params.min_corner = pwr->bus_min_corner;
+    req.dcvs_v3.bus_params.max_corner = pwr->bus_max_corner;
+    req.dcvs_v3.bus_params.target_corner = pwr->bus_target_corner;
     req.dcvs_v3.set_core_params = 1;
-    req.dcvs_v3.core_params.min_corner = HAP_DCVS_VCORNER_MAX;
-    req.dcvs_v3.core_params.max_corner = HAP_DCVS_VCORNER_MAX;
-    req.dcvs_v3.core_params.target_corner = HAP_DCVS_VCORNER_MAX;
+    req.dcvs_v3.core_params.min_corner = pwr->core_min_corner;
+    req.dcvs_v3.core_params.max_corner = pwr->core_max_corner;
+    req.dcvs_v3.core_params.target_corner = pwr->core_target_corner;
     req.dcvs_v3.set_sleep_disable = 1;
-    req.dcvs_v3.sleep_disable = 1;
+    req.dcvs_v3.sleep_disable = pwr->sleep_disable;
 
     GGMLHEXAGON_LOG_INFO("__HVX_ARCH__ = %d\n", __HVX_ARCH__);
 
@@ -617,10 +699,10 @@ static int power_on_hvx_hmx(struct dsp_context * ctx) {
     req.hmx_v2.set_power = 1;
     req.hmx_v2.power_up = 1;
     req.hmx_v2.set_clock = 1;
-    req.hmx_v2.target_corner = HAP_DCVS_EXP_VCORNER_MAX;
-    req.hmx_v2.min_corner = HAP_DCVS_EXP_VCORNER_MAX;
-    req.hmx_v2.max_corner = HAP_DCVS_EXP_VCORNER_MAX;
-    req.hmx_v2.perf_mode = HAP_CLK_PERF_HIGH;
+    req.hmx_v2.target_corner = pwr->hmx_target_corner;
+    req.hmx_v2.min_corner = pwr->hmx_min_corner;
+    req.hmx_v2.max_corner = pwr->hmx_max_corner;
+    req.hmx_v2.perf_mode = pwr->hmx_perf_mode;
     GGMLHEXAGON_LOG_INFO("Setting HMX clock with HMX_v2 for v75+ architecture");
     if (HAP_power_set((void *)&ctx->power_ctx, &req) != 0) {
         GGMLHEXAGON_LOG_ERROR("HAP_power_set HMX_v2 failed, continuing without HMX");
@@ -638,6 +720,7 @@ static int power_on_hvx_hmx(struct dsp_context * ctx) {
 #endif
 
     GGMLHEXAGON_LOG_INFO("HAP_power_set for HVX and HMX succeeded");
+    ctx->power_mode = power_mode;
     return 0;
 }
 
@@ -828,11 +911,13 @@ static const htp_op_func_t g_op_dispatch[HTP_OP_INVALID] = {
     [HTP_OP_PAD]             = op_pad,
     [HTP_OP_CONCAT]          = op_concat,
     [HTP_OP_IM2COL]          = op_im2col,
+    [HTP_OP_IM2COL_3D]       = op_im2col_3d,
     [HTP_OP_GATED_DELTA_NET] = op_gated_delta_net,
     [HTP_OP_ROLL]            = op_roll,
     [HTP_OP_POOL_2D]         = op_pool_2d,
     [HTP_OP_POOL_1D]         = op_pool_1d,
     [HTP_OP_TRI]             = op_unary,
+    [HTP_OP_HADAMARD]        = op_unary,
     [HTP_OP_FENCE]           = op_fence,
     [HTP_OP_ALLREDUCE]       = op_allreduce,
     [HTP_OP_ALLREDUCE_ADD]   = op_allreduce,
@@ -894,14 +979,44 @@ static inline void hex_tensor_to_dsptensor(const hex_tensor_desc * ht,
 
 // Convert hex_tensor_desc directly to htp_tensor. Eliminates the intermediate
 // dsptensor step for op dispatch. Mirrors htp/main.c prep_tensor: data pointer
-// is computed from mempool base + offset. flags is never read on the mempool path;
-// cache coherency is handled by entry.c itself.
+// is computed from mempool base + offset.
+// hex_tensor_desc.flags uses the fastrpc cache encoding (0=ION, 1=mirrored,
+// 2=weight); htp_tensor.flags uses HTP_TENSOR_* bits. Kernels pick tiled vs
+// flat matmul via htp_tensor_is_tiled(), so the repack marker must be
+// translated here (PR-30635 dropped HTP_TYPE_*_TILED). Only quantized types
+// are stored in tiled layout; F16/F32/BF16 stay flat even when flagged weight.
+static inline bool htp_storage_type_is_tiled(int type) {
+    switch (type) {
+        case HTP_TYPE_Q4_0:
+        case HTP_TYPE_IQ4_NL:
+        case HTP_TYPE_Q4_1:
+        case HTP_TYPE_Q4_K:
+        case HTP_TYPE_Q8_0:
+        case HTP_TYPE_Q5_K:
+        case HTP_TYPE_Q6_K:
+        case HTP_TYPE_Q3_K:
+        case HTP_TYPE_Q2_K:
+        case HTP_TYPE_Q1_0:
+        case HTP_TYPE_Q2_0:
+        case HTP_TYPE_MXFP4:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static inline void hex_tensor_to_htp_tensor(const hex_tensor_desc * ht,
                                              const char * ion_base,
                                              struct htp_tensor * htp) {
     htp->data  = (uint64_t)(uintptr_t)(ion_base + ht->data_offset);
     htp->size  = (uint32_t)ht->data_len;
-    htp->flags = HTP_TENSOR_FLUSHED;
+    htp->flags = 0;
+    if (ht->flags == 2) {
+        htp->flags |= HTP_TENSOR_WEIGHT;
+        if (htp_storage_type_is_tiled(ht->type)) {
+            htp->flags |= HTP_TENSOR_TILED;
+        }
+    }
     htp->type  = (uint16_t)ht->type;
     htp->bi    = 0;
     htp->ne[0] = (uint32_t)ht->ne[0];
@@ -948,6 +1063,7 @@ static int ggml_op_to_htp_op(int32_t ggml_op, const int32_t * op_params,
         case GGML_OP_ARGSORT: *htp_op = HTP_OP_ARGSORT;     return 0;
         case GGML_OP_PAD:     *htp_op = HTP_OP_PAD;         return 0;
         case GGML_OP_IM2COL:  *htp_op = HTP_OP_IM2COL;      return 0;
+        case GGML_OP_IM2COL_3D: *htp_op = HTP_OP_IM2COL_3D; return 0;
         case GGML_OP_GATED_DELTA_NET: *htp_op = HTP_OP_GATED_DELTA_NET; return 0;
         case GGML_OP_ROLL:   *htp_op = HTP_OP_ROLL;        return 0;
         case GGML_OP_POOL_2D: *htp_op = HTP_OP_POOL_2D;   return 0;
@@ -1071,13 +1187,16 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
 
     const bool is_repack = (wtype == HTP_TYPE_Q4_0 || wtype == HTP_TYPE_Q4_1 ||
                             wtype == HTP_TYPE_Q8_0 || wtype == HTP_TYPE_IQ4_NL ||
-                            wtype == HTP_TYPE_MXFP4);
+                            wtype == HTP_TYPE_MXFP4 || wtype == HTP_TYPE_Q3_K ||
+                            wtype == HTP_TYPE_Q2_K || wtype == HTP_TYPE_Q1_0 ||
+                            wtype == HTP_TYPE_Q2_0);
     const bool is_hmx_wtype = (wtype == HTP_TYPE_F16 || wtype == HTP_TYPE_F32 || is_repack);
     if (!is_hmx_wtype) return false;
 
     const bool is_batched = (ne02 * ne03 > 1 || ne12 * ne13 > 1);
 
-    const int ne00_padded = is_repack ? hex_round_up(ne00, 32) : (int) ne00;
+    // Q1_0/Q2_0 use non-square tiles (K = 128 / 64); other tiled types use K = 32.
+    const int ne00_padded = is_repack ? hex_round_up(ne00, htp_tensor_get_tile_k(wtype)) : (int) ne00;
     const int ne01_padded = is_repack ? hex_round_up(ne01, 32) : (int) ne01;
     const int ne11_padded = hex_round_up(ne11, 32);
 
@@ -1091,7 +1210,7 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
     if (src0->nb[0] > src0->nb[1] || src1->nb[0] > src1->nb[1]) return false;
     if (ne11 <= HTP_MM_HMX_MIN_NROWS) return false;
 
-    const uint32_t aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+    const uint32_t aligned_tile_size = htp_tensor_get_tile_padded_size(wtype);
     const bool     pipeline          = htp_mm_hmx_pipeline(ne11);
     const int      n_threads         = (int) octx->n_threads;
     const size_t   vtcm_budget       = g_dsp_ctx->vtcm_size;
@@ -1147,17 +1266,15 @@ static bool build_mm_hmx_params(struct htp_ops_context * octx,
     kparams->n_chunk            = (int32_t) best_n_chunk;
     kparams->n_threads          = n_threads;
     kparams->n_act_threads      = best_act_threads;
-    kparams->tile_size          = (int32_t) htp_mm_get_weight_tile_size(wtype);
+    kparams->tile_size          = (int32_t) htp_tensor_get_tile_size(wtype);
     kparams->aligned_tile_size  = (int32_t) aligned_tile_size;
-    kparams->act_row_size       = (int32_t)((wtype == HTP_TYPE_Q4_1)
-                                            ? htp_mm_q8_1_tiled_row_size(ne10)
-                                            : htp_mm_q8_0_tiled_row_size(ne10));
+    kparams->act_row_size       = (int32_t) htp_mm_tiled_act_row_size(wtype, ne10);
     kparams->vtcm_size          = (int32_t) best_vtcm_size;
     kparams->vtcm_src0_size     = 0;
     kparams->vtcm_act_size      = 0;
     kparams->vtcm_dst_size      = 0;
     kparams->n_prefetch         = 16;
-    kparams->kernel_type        = is_batched ? HTP_MM_KERNEL_HMX_F16_BATCHED
+    kparams->kernel_type        = is_batched ? HTP_MM_KERNEL_HMX_BATCHED
                                              : HTP_MM_KERNEL_HMX_2D;
     // Used by HMX kernels for activation DMA/work split (matmul-ops.c).
     kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) best_act_threads);
@@ -1240,17 +1357,15 @@ static int build_mm_kernel_params(struct htp_ops_context * octx) {
         kparams->vtcm_act_size  = (int32_t) vtcm_src1_size;
         kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
     } else {
-        // Quantized HVX path (Q4_0, Q4_1, Q5_0, Q8_0, IQ4_NL, MXFP4)
-        kparams->tile_size         = (int32_t) htp_mm_get_weight_tile_size(wtype);
-        kparams->aligned_tile_size = (int32_t) htp_mm_get_weight_aligned_tile_size(wtype);
+        // Quantized HVX path (Q4_0, Q4_1, Q8_0, IQ4_NL, MXFP4, K-quants, Q1_0, Q2_0)
+        kparams->tile_size         = (int32_t) htp_tensor_get_tile_size(wtype);
+        kparams->aligned_tile_size = (int32_t) htp_tensor_get_tile_padded_size(wtype);
 
-        const bool k_align   = (ne10 % 32 == 0);
+        const bool k_align   = (ne10 % htp_tensor_get_tile_k(wtype) == 0);
         const bool try_tiled = k_align && kparams->tile_size > 0;
 
         if (!try_tiled) return -1;
-        kparams->act_row_size = (int32_t)((wtype == HTP_TYPE_Q4_1)
-            ? htp_mm_q8_1_tiled_row_size(ne10)
-            : htp_mm_q8_0_tiled_row_size(ne10));
+        kparams->act_row_size = (int32_t) htp_mm_tiled_act_row_size(wtype, ne10);
         kparams->kernel_type = (src1_nrows < octx->n_threads)
             ? HTP_MM_KERNEL_HVX_QUANT_BLOCK
             : HTP_MM_KERNEL_HVX_QUANT_ROW;
@@ -1368,6 +1483,9 @@ int ggml_htp_open(const char * uri, remote_handle64 * handle) {
     ctx->dsp_cache_mode = 0;
     ctx->dsp_cache_trace_bit0 = 0;  // default off; AP pushes via 0xFFFC bit 16
     ctx->dsp_cache_trace_bit1 = 0;  // default off; AP pushes via 0xFFFC bit 17
+    // BURST preserves the historic hardcoded policy. AP can select another
+    // profile via execute_batch(0xFFFC) bits 8..11 with bit 12 set.
+    ctx->power_mode = HTP_POWER_MODE_BURST;
 
     printf("uri %s\n", uri);
     GGMLHEXAGON_LOG_INFO("uri    = %s\n", uri);
@@ -1391,7 +1509,7 @@ int ggml_htp_open(const char * uri, remote_handle64 * handle) {
     printf("hw_nhvx = %lu\n", hw_nhvx);
 
     /* Step 1: Power up HVX and HMX */
-    int power_result = power_on_hvx_hmx(ctx);
+    int power_result = power_on_hvx_hmx(ctx, ctx->power_mode);
     if (power_result != 0) {
         printf("power_on_hvx_hmx failed (%d), continuing without HMX\n", power_result);
         ctx->hmx_available = 0;
@@ -1849,6 +1967,8 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
     /* dsp_cache_mode config mode: batch_size == 0xFFFC. batch_offset encodes
      *   bits  0..3 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush / selective bulk flush)
      *   bit   4    : reset weight_inval first-touch array (model reload)
+     *   bits  8..11: power_mode (HTP_POWER_MODE_* from htp-ops.h), used only when bit 12 is set
+     *   bit  12    : power_mode_valid (1 = apply bits 8..11 as the new DCVS/HMX power profile)
      *   bit  16    : dsp_cache_trace_bit0 (1 = emit [DSP-CACHE-TRACE-BIT0] per bit 0 decision)
      *   bit  17    : dsp_cache_trace_bit1 (1 = emit [DSP-CACHE-TRACE-BIT1] per bit 1 decision)
      * Pushed by AP at ggmlhexagon_init_cdsp() time. Bit definitions:
@@ -1883,6 +2003,18 @@ AEEResult ggml_htp_execute_batch(remote_handle64 h, uint32_t batch_offset, uint3
                              (batch_offset & 0x10u) ? 1 : 0,
                              g_dsp_ctx->dsp_cache_trace_bit0,
                              g_dsp_ctx->dsp_cache_trace_bit1);
+        // Power mode select: bits 8..11 + valid bit 12. Re-applies the full
+        // DCVS/HMX profile (power_on_hvx_hmx is idempotent). Keeps BURST when
+        // the valid bit is clear so older AP payloads do not change the mode.
+        if (batch_offset & 0x1000u) {
+            const uint32_t new_mode = (batch_offset >> 8) & 0xFu;
+            if (power_on_hvx_hmx(g_dsp_ctx, new_mode) == 0) {
+                GGMLHEXAGON_LOG_INFO("[DSP-POWER-MODE] power_mode=%u applied", (unsigned) g_dsp_ctx->power_mode);
+            } else {
+                GGMLHEXAGON_LOG_ERROR("[DSP-POWER-MODE] power_mode=%u apply failed, keeping %u",
+                                      (unsigned) new_mode, (unsigned) g_dsp_ctx->power_mode);
+            }
+        }
         return AEE_SUCCESS;
     }
 

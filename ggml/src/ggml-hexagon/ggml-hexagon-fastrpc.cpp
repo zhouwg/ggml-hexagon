@@ -95,6 +95,7 @@
 #include "htp/cpy-ops.h"
 #include "htp/concat-ops.h"
 #include "htp/argsort-ops.h"
+#include "htp/im2col-ops.h"
 #include "ggml_htp.h"
 #include "htp-drv.h"
 
@@ -106,7 +107,7 @@
 
 #define SIZE_IN_MB                                      (1 << 20)
 
-#define GGML_HEXAGON_VERSION                            "0.5.9"
+#define GGML_HEXAGON_VERSION                            "0.5.10"
 
 // Forward declarations
 static bool                  ggmlhexagon_is_op_on_device(ggml_backend_dev_t dev, const ggml_tensor * op);
@@ -255,7 +256,7 @@ struct ggml_backend_hexagon_context {
 
     // HMX eligibility diagnostic counters (why MUL_MATs fall back to HVX)
     uint64_t n_hmx_basic_pass          = 0;     // passed basic HMX eligibility
-    uint64_t n_hmx_basic_fail_ne01     = 0;     // ne01_padded %% 32 != 0
+    uint64_t n_hmx_basic_fail_ne01     = 0;     // raw ne[1] % 32 != 0 and is_matmul_id
     uint64_t n_hmx_basic_fail_ne00     = 0;     // ne00 %% 32 != 0
     uint64_t n_hmx_basic_fail_wtype    = 0;     // weight type not HMX-compatible
     uint64_t n_hmx_basic_fail_batched  = 0;     // batched non-F16
@@ -385,6 +386,10 @@ struct hexagon_appcfg_t {
                                 //   op/src/ptr/len. Pushed to NPU at init via bit 17 of the same
                                 //   execute_batch(0xFFFC) payload. Pair with dsp_cache_trace_bit0
                                 //   to localize the stale-L2-read culprit.
+    int power_mode;             // HTP DCVS/HMX power mode (HTP_POWER_MODE_* from htp-ops.h).
+                                //   Config [cdsp] power_mode, overridden by GGML_HEXAGON_POWER_MODE.
+                                //   Pushed to NPU at init via execute_batch(0xFFFC) bits 8..11
+                                //   with bit 12 set (see dsp-ctx.h).
     int enable_graph_optimize;  // enable/disable cgraph reorder pass
     int enable_graph_cache;     // enable/disable graph cache (1=enable, 0=disable, default=1)
     float mirror_threshold;     // ION mempool utilization (usage/len) above which QKV/FFN NX
@@ -414,6 +419,7 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .dsp_cache_mode         = 5,
         .dsp_cache_trace_bit0   = 0,
         .dsp_cache_trace_bit1   = 0,
+        .power_mode             = HTP_POWER_MODE_BURST,
         .enable_graph_optimize  = 1,
         .enable_graph_cache     = 1,
         .mirror_threshold       = 0.9f,
@@ -421,6 +427,35 @@ static struct hexagon_appcfg_t g_hexagon_appcfg = {
         .version                = {GGML_HEXAGON_VERSION},
         .enabled_ops            = "all",
 };
+
+static const std::pair<const char *, int> g_htp_power_mode_names[] = {
+    { "low_power_saver",            HTP_POWER_MODE_LOW_POWER_SAVER },
+    { "power_saver",                HTP_POWER_MODE_POWER_SAVER },
+    { "high_power_saver",           HTP_POWER_MODE_HIGH_POWER_SAVER },
+    { "low_balanced",               HTP_POWER_MODE_LOW_BALANCED },
+    { "balanced",                   HTP_POWER_MODE_BALANCED },
+    { "high_performance",           HTP_POWER_MODE_HIGH_PERFORMANCE },
+    { "sustained_high_performance", HTP_POWER_MODE_SUSTAINED_HIGH_PERFORMANCE },
+    { "burst",                      HTP_POWER_MODE_BURST },
+};
+
+static int ggmlhexagon_power_mode_from_str(const char * s) {
+    for (auto & e : g_htp_power_mode_names) {
+        if (strcasecmp(s, e.first) == 0) {
+            return e.second;
+        }
+    }
+    return -1;
+}
+
+static const char * ggmlhexagon_power_mode_to_str(int mode) {
+    for (auto & e : g_htp_power_mode_names) {
+        if (e.second == mode) {
+            return e.first;
+        }
+    }
+    return "unknown";
+}
 
 // Op fusion bitmask flags (mirrors Qualcomm's ggml_hexagon_fusion_flags).
 enum opfusion_flag_t {
@@ -608,8 +643,9 @@ static void ggmlhexagon_print_running_timestamp(ggml_backend_hexagon_context * c
     ggmlhexagon_get_timestring(timestamp);
     GGMLHEXAGON_LOG_VERBOSE("rpc_mmap_mode:                    %d", g_hexagon_appcfg.rpc_mmap_mode);
     GGMLHEXAGON_LOG_VERBOSE("dsp_cache_mode:                   %d", g_hexagon_appcfg.dsp_cache_mode);
-    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit0:             %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
-    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit1:             %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
+    GGMLHEXAGON_LOG_VERBOSE("dsp_power_mode:                   %s", ggmlhexagon_power_mode_to_str(g_hexagon_appcfg.power_mode));
+    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit0:              %d", g_hexagon_appcfg.dsp_cache_trace_bit0);
+    GGMLHEXAGON_LOG_ALWAYS("dsp_cache_trace_bit1:              %d", g_hexagon_appcfg.dsp_cache_trace_bit1);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(NPU):              %d", g_hexagon_appcfg.dump_diag_info);
     GGMLHEXAGON_LOG_VERBOSE("dump diag info(AP):               %d", g_hexagon_appcfg.dump_debug_info);
     GGMLHEXAGON_LOG_VERBOSE("enable graph_optimize:            %d", g_hexagon_appcfg.enable_graph_optimize);
@@ -950,6 +986,16 @@ static void ggmlhexagon_load_cfg() {
     hexagoncfg_instance.get_intvalue("cdsp", "enable_graph_cache", g_hexagon_appcfg.enable_graph_cache, 1);
     hexagoncfg_instance.get_floatvalue("cdsp", "mirror_threshold", g_hexagon_appcfg.mirror_threshold, 0.9f);
     hexagoncfg_instance.get_stringvalue("cdsp", "enabled_ops", g_hexagon_appcfg.enabled_ops, "");
+    std::string power_mode_str; // HTP DCVS/HMX power profile name, see g_htp_power_mode_names
+    hexagoncfg_instance.get_stringvalue("cdsp", "power_mode", power_mode_str, "burst");
+    if (!power_mode_str.empty()) {
+        int m = ggmlhexagon_power_mode_from_str(power_mode_str.c_str());
+        if (m < 0) {
+            GGMLHEXAGON_LOG_WARN("unknown power_mode '%s', falling back to 'burst'", power_mode_str.c_str());
+        } else {
+            g_hexagon_appcfg.power_mode = m;
+        }
+    }
 
     snprintf(g_hexagon_appcfg.version, GGMLHEXAGON_TMPBUF_LEN, "%s", version.c_str());
 
@@ -1060,6 +1106,17 @@ static void ggmlhexagon_load_cfg() {
                                }
                                return s;
                            }().c_str());
+
+    // GGML_HEXAGON_POWER_MODE overrides [cdsp] power_mode (names in g_htp_power_mode_names).
+    const char * str_power_mode = getenv("GGML_HEXAGON_POWER_MODE");
+    if (str_power_mode && str_power_mode[0] != '\0') {
+        int m = ggmlhexagon_power_mode_from_str(str_power_mode);
+        if (m < 0) {
+            GGMLHEXAGON_LOG_WARN("unknown GGML_HEXAGON_POWER_MODE '%s', falling back to 'burst'", str_power_mode);
+        } else {
+            g_hexagon_appcfg.power_mode = m;
+        }
+    }
     initialized = true;
 }
 
@@ -1077,6 +1134,11 @@ static void ggmlhexagon_check_valid_appcfg() {
     if (g_hexagon_appcfg.dsp_cache_mode < 0 || g_hexagon_appcfg.dsp_cache_mode > 15) {
         GGMLHEXAGON_LOG_WARN("invalid dsp_cache_mode %d, reset to 5", g_hexagon_appcfg.dsp_cache_mode);
         g_hexagon_appcfg.dsp_cache_mode = 5;
+    }
+
+    if (g_hexagon_appcfg.power_mode < 0 || g_hexagon_appcfg.power_mode >= HTP_POWER_MODE_COUNT) {
+        GGMLHEXAGON_LOG_WARN("invalid power_mode %d, reset to burst", g_hexagon_appcfg.power_mode);
+        g_hexagon_appcfg.power_mode = HTP_POWER_MODE_BURST;
     }
 
     if (g_hexagon_appcfg.rpc_mmap_mode < 0 || g_hexagon_appcfg.rpc_mmap_mode > 1) {
@@ -1232,7 +1294,8 @@ static inline bool ggml_hexagon_is_repack_type(enum ggml_type type) {
            type == GGML_TYPE_Q8_0 || type == GGML_TYPE_IQ4_NL ||
            type == GGML_TYPE_MXFP4 || type == GGML_TYPE_Q4_K ||
            type == GGML_TYPE_Q5_K || type == GGML_TYPE_Q6_K ||
-           type == GGML_TYPE_Q3_K || type == GGML_TYPE_Q2_K;
+           type == GGML_TYPE_Q3_K || type == GGML_TYPE_Q2_K ||
+           type == GGML_TYPE_Q1_0 || type == GGML_TYPE_Q2_0;
 }
 
 // Some weight types are stored in the repack buffer in a different format
@@ -2106,6 +2169,8 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // special mode (no IDL change). batch_offset = packed payload, batch_size = mode tag.
         // Payload bit layout (low bits are dsp_cache_mode):
         //   bits  0..3 : dsp_cache_mode (first-touch weight / prior-dst skip / bulk dst flush / selective bulk flush)
+        //   bits  8..11: power_mode (HTP_POWER_MODE_*, see dsp-ctx.h power_mode)
+        //   bit  12    : power_mode valid (set when bits 8..11 carry a power_mode)
         //   bit  16    : dsp_cache_trace_bit0 (1 = emit [NPU-CACHE-TRACE-BIT0] per bit 0 decision)
         //   bit  17    : dsp_cache_trace_bit1 (1 = emit [NPU-CACHE-TRACE-BIT1] per bit 1 decision)
         // See the dsp_cache_mode and dsp_cache_trace_bit{0,1} comments in hexagon_appcfg_t.
@@ -2116,20 +2181,23 @@ static int ggmlhexagon_init_dsp(ggml_backend_hexagon_context * ctx) {
         // the bitmask is silently dropped.
         {
             const uint32_t mode_bits    = (uint32_t)g_hexagon_appcfg.dsp_cache_mode & 0xFu;
+            const uint32_t power_bits   = (((uint32_t)g_hexagon_appcfg.power_mode & 0xFu) << 8) | 0x1000u;
             const uint32_t trace_bit0   = (g_hexagon_appcfg.dsp_cache_trace_bit0 ? 0x10000u : 0u);
             const uint32_t trace_bit1   = (g_hexagon_appcfg.dsp_cache_trace_bit1 ? 0x20000u : 0u);
-            const uint32_t payload      = trace_bit1 | trace_bit0 | mode_bits;
+            const uint32_t payload      = trace_bit1 | trace_bit0 | power_bits | mode_bits;
             int opts_err = ggml_htp_execute_batch(ctx->ggmlop_handle, payload, 0xFFFC);
             if (AEE_SUCCESS != opts_err) {
-                GGMLHEXAGON_LOG_WARN("set dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d failed: 0x%x (NPU-side optimizations disabled)",
-                                     mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
+                GGMLHEXAGON_LOG_WARN("set dsp_cache_mode=0x%x + power_mode=%s + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d failed: 0x%x (NPU-side optimizations disabled)",
+                                     mode_bits, ggmlhexagon_power_mode_to_str(g_hexagon_appcfg.power_mode),
+                                     g_hexagon_appcfg.dsp_cache_trace_bit0,
                                      g_hexagon_appcfg.dsp_cache_trace_bit1, opts_err);
                 g_hexagon_appcfg.dsp_cache_mode = 0;  // fall back to baseline
                 g_hexagon_appcfg.dsp_cache_trace_bit0 = 0;
                 g_hexagon_appcfg.dsp_cache_trace_bit1 = 0;
             } else {
-                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to NPU (payload=0x%x)",
-                                     mode_bits, g_hexagon_appcfg.dsp_cache_trace_bit0,
+                GGMLHEXAGON_LOG_ALWAYS("[AP-CACHE-MODE] dsp_cache_mode=0x%x + power_mode=%s + dsp_cache_trace_bit0=%d + dsp_cache_trace_bit1=%d pushed to NPU (payload=0x%x)",
+                                     mode_bits, ggmlhexagon_power_mode_to_str(g_hexagon_appcfg.power_mode),
+                                     g_hexagon_appcfg.dsp_cache_trace_bit0,
                                      g_hexagon_appcfg.dsp_cache_trace_bit1, payload);
             }
 
@@ -2214,11 +2282,14 @@ static void pack_q4_1_quants(block_q4_1 * x, const uint8_t * qs) {
 }
 
 static size_t ggml_hexagon_repacked_size(enum ggml_type type, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) {
-    const uint32_t tile_size = htp_mm_get_weight_tile_size((int)ggml_hexagon_weight_dsp_type(type));
+    const int dsp_type = (int)ggml_hexagon_weight_dsp_type(type);
+    const uint32_t tile_size = htp_tensor_get_tile_size(dsp_type);
     if (tile_size == 0) return 0;
-    const uint32_t ne0_p = hex_round_up((uint32_t)ne0, 32);
+    // Q1_0/Q2_0 use non-square tiles (K=128/64); column tiles stay 32 rows.
+    const uint32_t tile_k = htp_tensor_get_tile_k(dsp_type);
+    const uint32_t ne0_p = hex_round_up((uint32_t)ne0, tile_k);
     const uint32_t ne1_p = hex_round_up((uint32_t)ne1, 32);
-    return (size_t)(ne0_p / 32) * (ne1_p / 32) * tile_size * ne2 * ne3;
+    return (size_t)(ne0_p / tile_k) * (ne1_p / 32) * tile_size * ne2 * ne3;
 }
 
 static void repack_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
@@ -2226,7 +2297,7 @@ static void repack_q4_0_tiled(ggml_tensor * t, const void * data, size_t offset,
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
@@ -2275,7 +2346,7 @@ static void repack_q4_1_tiled(ggml_tensor * t, const void * data, size_t offset,
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_1;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
@@ -2330,7 +2401,7 @@ static void repack_q8_0_tiled(ggml_tensor * t, const void * data, size_t offset,
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q8_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
@@ -2374,7 +2445,7 @@ static void repack_q4k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4   = ne0 / QK4_0;   // q4_0 blocks per row
     const int64_t nb_q4k  = ne0 / QK_K;    // q4_K blocks per row
@@ -2435,7 +2506,7 @@ static void repack_q6k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4   = ne0 / QK4_0;   // q4_0 blocks per row
     const int64_t nb_q6k  = ne0 / QK_K;    // q6_K blocks per row
@@ -2496,7 +2567,7 @@ static void repack_q5k_as_q4_0_tiled(ggml_tensor * t, const void * data, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4   = ne0 / QK4_0;   // q4_0 blocks per row
     const int64_t nb_q5k  = ne0 / QK_K;    // q5_K blocks per row
@@ -2555,7 +2626,7 @@ static void repack_mxfp4_tiled(ggml_tensor * t, const void * data, size_t offset
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_MXFP4;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_MXFP4;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
@@ -2608,7 +2679,7 @@ static void repack_tiled_q4_0(void * data, const ggml_tensor * t, size_t offset,
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
     int n_col_tiles = ne1_padded / 32;
     int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     for (int i3 = 0; i3 < ne3; i3++) {
@@ -2658,7 +2729,7 @@ static void repack_tiled_q4_1(void * data, const ggml_tensor * t, size_t offset,
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
     int n_col_tiles = ne1_padded / 32;
     int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_1;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_1;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     for (int i3 = 0; i3 < ne3; i3++) {
@@ -2711,7 +2782,7 @@ static void repack_tiled_q8_0(void * data, const ggml_tensor * t, size_t offset,
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
     int n_col_tiles = ne1_padded / 32;
     int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q8_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q8_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     for (int i3 = 0; i3 < ne3; i3++) {
@@ -2760,7 +2831,7 @@ static void repack_tiled_mxfp4(void * data, const ggml_tensor * t, size_t offset
     int64_t ne1_padded = hex_round_up((uint32_t)ne1, 32);
     int n_col_tiles = ne1_padded / 32;
     int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_MXFP4;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_MXFP4;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
 
     for (int i3 = 0; i3 < ne3; i3++) {
@@ -2834,7 +2905,7 @@ static void repack_tiled_q4_0_to_q4k(void * data, const ggml_tensor * t, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4  = ne0 / QK4_0;
     const int64_t nb_q4k = ne0 / QK_K;
@@ -2879,7 +2950,7 @@ static void repack_tiled_q4_0_to_q5k(void * data, const ggml_tensor * t, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4  = ne0 / QK4_0;
     const int64_t nb_q5k = ne0 / QK_K;
@@ -2924,7 +2995,7 @@ static void repack_tiled_q4_0_to_q6k(void * data, const ggml_tensor * t, size_t 
     const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
     const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
     const int n_k_tiles   = hex_round_up((uint32_t)ne0, 32) / 32;
-    const size_t tile_size = HTP_MM_WEIGHT_TILE_SIZE_Q4_0;
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q4_0;
     const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
     const int64_t nb_q4  = ne0 / QK4_0;
     const int64_t nb_q6k = ne0 / QK_K;
@@ -3039,7 +3110,7 @@ static bool hexagon_recover_k_scales(const ggml_half * prod, int n, int lmin, in
     return false;
 }
 
-// tile layout: see HTP_MM_WEIGHT_TILE_SIZE_Q3_K in htp/matmul-ops.h
+// tile layout: see "Tiled Weight Formats" (Q3_K) in docs/backend/snapdragon/developer.md
 static void repack_q3_K_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     GGML_ASSERT(offset == 0);
 
@@ -3055,7 +3126,7 @@ static void repack_q3_K_tiled(ggml_tensor * t, const void * data, size_t offset,
 
     const int n_col_tiles = ne1_padded / 32;
     const int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size   = HTP_MM_WEIGHT_TILE_SIZE_Q3_K;
+    const size_t tile_size   = HTP_TENSOR_TILE_SIZE_Q3_K;
     const size_t matrix_size = (size_t) n_col_tiles * n_k_tiles * tile_size;
 
     const int64_t sb_per_row = ne0 / QK_K;
@@ -3118,7 +3189,7 @@ static void repack_tiled_q3_K(void * data, const ggml_tensor * t, size_t offset,
 
     const int n_col_tiles = ne1_padded / 32;
     const int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size   = HTP_MM_WEIGHT_TILE_SIZE_Q3_K;
+    const size_t tile_size   = HTP_TENSOR_TILE_SIZE_Q3_K;
     const size_t matrix_size = (size_t) n_col_tiles * n_k_tiles * tile_size;
 
     const int64_t sb_per_row = ne0 / QK_K;
@@ -3199,7 +3270,7 @@ static void repack_tiled_q3_K(void * data, const ggml_tensor * t, size_t offset,
     GGML_UNUSED(size);
 }
 
-// tile layout: see HTP_MM_WEIGHT_TILE_SIZE_Q2_K in htp/matmul-ops.h
+// tile layout: see "Tiled Weight Formats" (Q2_K) in docs/backend/snapdragon/developer.md
 static void repack_q2_K_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
     GGML_ASSERT(offset == 0);
 
@@ -3215,7 +3286,7 @@ static void repack_q2_K_tiled(ggml_tensor * t, const void * data, size_t offset,
 
     const int n_col_tiles = ne1_padded / 32;
     const int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size   = HTP_MM_WEIGHT_TILE_SIZE_Q2_K;
+    const size_t tile_size   = HTP_TENSOR_TILE_SIZE_Q2_K;
     const size_t matrix_size = (size_t) n_col_tiles * n_k_tiles * tile_size;
 
     const int64_t sb_per_row = ne0 / QK_K;
@@ -3235,13 +3306,11 @@ static void repack_q2_K_tiled(ggml_tensor * t, const void * data, size_t offset,
                 for (int kt = 0; kt < n_k_tiles; kt++) {
                     const int kt_local = kt % 8;  // k-tile within the super-block
                     const block_q2_K * b = &src_row[kt / 8];
-                    const float d    = GGML_FP16_TO_FP32(b->d);
-                    const float dmin = GGML_FP16_TO_FP32(b->dmin);
 
                     uint8_t * tile = matrix_dst + ((size_t) ct * n_k_tiles + kt) * tile_size;
-                    uint8_t * lo_pl = tile;
-                    ggml_half * sc_pl = (ggml_half *) (tile + 256);
-                    ggml_half * m_pl  = (ggml_half *) (tile + 384);
+                    uint8_t * lo_pl   = tile;
+                    uint8_t * sc_pl   = tile + 256;
+                    ggml_half * dd_pl = (ggml_half *) (tile + 320);
 
                     for (int lk = 0; lk < 32; lk++) {
                         const int g   = lk >> 2;
@@ -3249,9 +3318,11 @@ static void repack_q2_K_tiled(ggml_tensor * t, const void * data, size_t offset,
                         lo_pl[(g >> 2) * 128 + pos] |= (uint8_t) (q2_3_K_get_low2(b->qs, kt_local * 32 + lk) << ((g & 3) * 2));
                     }
                     for (int sub = 0; sub < 2; sub++) {
-                        const uint8_t sc = b->scales[kt_local * 2 + sub];
-                        sc_pl[sub * 32 + row] = GGML_FP32_TO_FP16( d    * (float) (sc & 0xF));
-                        m_pl [sub * 32 + row] = GGML_FP32_TO_FP16(-dmin * (float) (sc >> 4));
+                        sc_pl[sub * 32 + row] = b->scales[kt_local * 2 + sub];
+                    }
+                    // d / -dmin live once per 8-row band of the tile j of the super-block
+                    if (row / 8 == kt_local % 4) {
+                        dd_pl[row % 8] = kt_local < 4 ? b->d : (ggml_half) (b->dmin ^ 0x8000);
                     }
                 }
             }
@@ -3261,7 +3332,7 @@ static void repack_q2_K_tiled(ggml_tensor * t, const void * data, size_t offset,
     GGML_UNUSED(size);
 }
 
-// Reverse of repack_q2_K_tiled. Unpacks quants losslessly and normalizes scales/mins. Read-back only.
+// Reverse of repack_q2_K_tiled. Lossless: quants, raw scales and d/dmin are stored verbatim. Read-back only.
 static void repack_tiled_q2_K(void * data, const ggml_tensor * t, size_t offset, size_t size) {
     GGML_ASSERT(offset == 0);
 
@@ -3277,7 +3348,7 @@ static void repack_tiled_q2_K(void * data, const ggml_tensor * t, size_t offset,
 
     const int n_col_tiles = ne1_padded / 32;
     const int n_k_tiles   = ne0_padded / 32;
-    const size_t tile_size   = HTP_MM_WEIGHT_TILE_SIZE_Q2_K;
+    const size_t tile_size   = HTP_TENSOR_TILE_SIZE_Q2_K;
     const size_t matrix_size = (size_t) n_col_tiles * n_k_tiles * tile_size;
 
     const int64_t sb_per_row = ne0 / QK_K;
@@ -3296,14 +3367,12 @@ static void repack_tiled_q2_K(void * data, const ggml_tensor * t, size_t offset,
                     block_q2_K * b = &dst_row[sb];
                     memset(b, 0, sizeof(block_q2_K));
 
-                    ggml_half sub_scales[16];
-                    ggml_half sub_mins[16];
                     for (int kt_local = 0; kt_local < 8; kt_local++) {
                         const int kt = sb * 8 + kt_local;
                         const uint8_t *   tile  = matrix_src + ((size_t) ct * n_k_tiles + kt) * tile_size;
                         const uint8_t *   lo_pl = tile;
-                        const ggml_half * sc_pl = (const ggml_half *) (tile + 256);
-                        const ggml_half * m_pl  = (const ggml_half *) (tile + 384);
+                        const uint8_t *   sc_pl = tile + 256;
+                        const ggml_half * dd_pl = (const ggml_half *) (tile + 320);
 
                         for (int lk = 0; lk < 32; lk++) {
                             const int e   = kt_local * 32 + lk;
@@ -3314,36 +3383,213 @@ static void repack_tiled_q2_K(void * data, const ggml_tensor * t, size_t offset,
                         }
 
                         for (int sub = 0; sub < 2; sub++) {
-                            const float D = GGML_FP16_TO_FP32(sc_pl[sub * 32 + row]);
-                            const float M = GGML_FP16_TO_FP32(m_pl[sub * 32 + row]);
-                            sub_scales[kt_local * 2 + sub] = GGML_FP32_TO_FP16((D > 0.0f) ? D : 0.0f);
-                            sub_mins[kt_local * 2 + sub]   = GGML_FP32_TO_FP16((-M > 0.0f) ? -M : 0.0f);
+                            b->scales[kt_local * 2 + sub] = sc_pl[sub * 32 + row];
+                        }
+                        if (row / 8 == kt_local % 4) {
+                            if (kt_local < 4) {
+                                b->d = dd_pl[row % 8];
+                            } else {
+                                b->dmin = (ggml_half) (dd_pl[row % 8] ^ 0x8000);
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
 
-                    int ls[16];
-                    int lm[16];
-                    ggml_half * const dd[2] = { &b->d, &b->dmin };
-                    const ggml_half * const prod[2] = { sub_scales, sub_mins };
-                    int * const ll[2] = { ls, lm };
-                    for (int w = 0; w < 2; w++) {
-                        if (hexagon_recover_k_scales(prod[w], 16, 0, 15, dd[w], ll[w])) {
-                            continue;
-                        }
-                        float max_val = 0.0f;
-                        for (int j = 0; j < 16; j++) {
-                            max_val = (std::max)(max_val, GGML_FP16_TO_FP32(prod[w][j]));
-                        }
-                        *dd[w] = GGML_FP32_TO_FP16(max_val / 15.0f);
-                        const float d_actual = GGML_FP16_TO_FP32(*dd[w]);
-                        const float inv_d    = (d_actual > 0.0f) ? (1.0f / d_actual) : 0.0f;
-                        for (int j = 0; j < 16; j++) {
-                            ll[w][j] = (std::min)(15, (int) roundf(inv_d * GGML_FP16_TO_FP32(prod[w][j])));
+    GGML_UNUSED(size);
+}
+
+// Q1_0 tile: 32 rows x 128 cols of 1-bit quants. Quants live in 4 quarters
+// (32 cols each) in vrmpy byte order; scales are 32 fp16 d at offset 512.
+static inline void q1_0_tiled_bit_location(int k, int row, int & byte_offset, int & bit) {
+    const int quarter = k / 32;
+    const int kq      = k % 32;
+    byte_offset = quarter * 128 + 4 * row + (kq % 4);
+    bit         = kq / 4;
+}
+
+static void repack_q1_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
+    const block_q1_0 * src_matrix = (const block_q1_0 *) data;
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = (int)(ne0 / QK1_0);
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q1_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+
+    GGML_ASSERT(ne0 % QK1_0 == 0);
+
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
+
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_q1_0 * src_slice = src_matrix + (slice_idx - start_slice) * ne1 * n_k_tiles;
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
+        memset(matrix_dst, 0, matrix_size);
+
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                uint8_t * tile_dst = matrix_dst + ((size_t)ct * n_k_tiles + kt) * tile_size;
+                ggml_half * scale_dst = (ggml_half *)(tile_dst + 512);
+
+                for (int row = 0; row < 32; row++) {
+                    const int64_t r = ct * 32 + row;
+                    if (r >= ne1) {
+                        continue;
+                    }
+                    const block_q1_0 * b = &src_slice[r * n_k_tiles + kt];
+                    scale_dst[row] = b->d;
+                    for (int k = 0; k < QK1_0; k++) {
+                        int byte_offset;
+                        int bit;
+                        q1_0_tiled_bit_location(k, row, byte_offset, bit);
+                        if (b->qs[k / 8] & (1u << (k % 8))) {
+                            tile_dst[byte_offset] |= (uint8_t)(1u << bit);
                         }
                     }
+                }
+            }
+        }
+    }
 
-                    for (int j = 0; j < 16; j++) {
-                        b->scales[j] = (uint8_t) (ls[j] | (lm[j] << 4));
+    GGML_UNUSED(size);
+}
+
+static void repack_tiled_q1_0(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_q1_0 * dst_matrix = (block_q1_0 *) data;
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = (int)(ne0 / QK1_0);
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q1_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+    const size_t row_size_bytes = ggml_row_size(t->type, ne0);
+    const size_t slice_size = ne1 * row_size_bytes;
+
+    GGML_ASSERT(ne0 % QK1_0 == 0);
+
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
+
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const uint8_t * matrix_src = (const uint8_t *) t->data + slice_idx * matrix_size;
+        block_q1_0 * dst_slice = dst_matrix + (slice_idx - start_slice) * ne1 * n_k_tiles;
+
+        for (int ct = 0; ct < n_col_tiles; ct++) {
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                const uint8_t * tile_src = matrix_src + ((size_t)ct * n_k_tiles + kt) * tile_size;
+                const ggml_half * scale_src = (const ggml_half *)(tile_src + 512);
+
+                for (int row = 0; row < 32; row++) {
+                    const int64_t r = ct * 32 + row;
+                    if (r >= ne1) {
+                        continue;
+                    }
+                    block_q1_0 * b = &dst_slice[r * n_k_tiles + kt];
+                    memset(b->qs, 0, sizeof(b->qs));
+                    b->d = scale_src[row];
+                    for (int k = 0; k < QK1_0; k++) {
+                        int byte_offset;
+                        int bit;
+                        q1_0_tiled_bit_location(k, row, byte_offset, bit);
+                        if (tile_src[byte_offset] & (1u << bit)) {
+                            b->qs[k / 8] |= (uint8_t)(1u << (k % 8));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    GGML_UNUSED(size);
+}
+
+// Q2_0 tile: 32 rows x 64 cols of 2-bit quants in vrmpy order; scales are 32 fp16 d at offset 512.
+static void repack_q2_0_tiled(ggml_tensor * t, const void * data, size_t offset, size_t size) {
+    const block_q2_0 * src_matrix = (const block_q2_0 *) data;
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = (int)(ne0 / QK2_0);
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q2_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+
+    GGML_ASSERT(ne0 % QK2_0 == 0);
+
+    const size_t slice_size = (size_t)ne1 * ggml_row_size(t->type, ne0);
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
+
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const block_q2_0 * src_slice = src_matrix + (slice_idx - start_slice) * ne1 * n_k_tiles;
+        uint8_t * matrix_dst = (uint8_t *) t->data + slice_idx * matrix_size;
+        memset(matrix_dst, 0, matrix_size);
+
+        for (int64_t r = 0; r < ne1; r++) {
+            const int ct  = (int)(r / 32);
+            const int row = (int)(r % 32);
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                const block_q2_0 * b = &src_slice[r * n_k_tiles + kt];
+                uint8_t * tile = matrix_dst + ((size_t)ct * n_k_tiles + kt) * tile_size;
+                for (int group = 0; group < 16; group++) {
+                    for (int byte = 0; byte < 4; byte++) {
+                        const int k = 4 * group + byte;
+                        const uint8_t code = (b->qs[k / 4] >> (2 * (k % 4))) & 3;
+                        tile[(group >> 2) * 128 + 4 * row + byte] |= (uint8_t)(code << (2 * (group & 3)));
+                    }
+                }
+                memcpy(tile + 512 + 2 * row, &b->d, sizeof(b->d));
+            }
+        }
+    }
+
+    GGML_UNUSED(size);
+}
+
+static void repack_tiled_q2_0(void * data, const ggml_tensor * t, size_t offset, size_t size) {
+    block_q2_0 * dst_matrix = (block_q2_0 *) data;
+    const int64_t ne0 = t->ne[0], ne1 = t->ne[1], ne2 = t->ne[2], ne3 = t->ne[3];
+    const int n_col_tiles = hex_round_up((uint32_t)ne1, 32) / 32;
+    const int n_k_tiles   = (int)(ne0 / QK2_0);
+    const size_t tile_size = HTP_TENSOR_TILE_SIZE_Q2_0;
+    const size_t matrix_size = (size_t)n_col_tiles * n_k_tiles * tile_size;
+    const size_t row_size_bytes = ggml_row_size(t->type, ne0);
+    const size_t slice_size = ne1 * row_size_bytes;
+
+    GGML_ASSERT(ne0 % QK2_0 == 0);
+
+    int64_t start_slice = (int64_t)(offset / slice_size);
+    int64_t end_slice   = (int64_t)((offset + size + slice_size - 1) / slice_size);
+    if (end_slice > ne2 * ne3) {
+        end_slice = ne2 * ne3;
+    }
+
+    for (int64_t slice_idx = start_slice; slice_idx < end_slice; slice_idx++) {
+        const uint8_t * matrix_src = (const uint8_t *) t->data + slice_idx * matrix_size;
+        block_q2_0 * dst_slice = dst_matrix + (slice_idx - start_slice) * ne1 * n_k_tiles;
+
+        for (int64_t r = 0; r < ne1; r++) {
+            const int ct  = (int)(r / 32);
+            const int row = (int)(r % 32);
+            for (int kt = 0; kt < n_k_tiles; kt++) {
+                const uint8_t * tile = matrix_src + ((size_t)ct * n_k_tiles + kt) * tile_size;
+                block_q2_0 * b = &dst_slice[r * n_k_tiles + kt];
+                memset(b, 0, sizeof(*b));
+                memcpy(&b->d, tile + 512 + 2 * row, sizeof(b->d));
+                for (int group = 0; group < 16; group++) {
+                    for (int byte = 0; byte < 4; byte++) {
+                        const uint8_t packed = tile[(group >> 2) * 128 + 4 * row + byte];
+                        const uint8_t code = (packed >> (2 * (group & 3))) & 3;
+                        b->qs[group] |= (uint8_t)(code << (2 * byte));
                     }
                 }
             }
@@ -3635,14 +3881,17 @@ static bool ggml_hexagon_precompute_binary_params(
     const uint32_t src1_row_size_aligned = (uint32_t) hex_round_up(src1_row_size, 128);
     const uint32_t dst_row_size_aligned  = (uint32_t) hex_round_up(dst_row_size,  128);
 
+    if (!htp_binary_strides_safe(src0, src1, dst, elem_size)) {
+        return false;
+    }
+
     const bool is_add_id = (op == HTP_OP_ADD_ID);
     const bool is_scalar = !is_add_id && src1->ne[0] == 1;
-    const bool is_transposed = src0->nb[1] < src0_row_size || src1->nb[1] < src1_row_size || dst->nb[1] < dst_row_size;
-    const bool is_row_bcast = !is_add_id && !is_scalar && !is_transposed &&
+    const bool is_row_bcast = !is_add_id && !is_scalar &&
         src1->ne[0] == src0->ne[0] &&
         (src0->ne[1] > 1 || src0->ne[2] > 1 || src0->ne[3] > 1) &&
         src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1;
-    const bool is_same_shape = !is_add_id && !is_scalar && !is_transposed &&
+    const bool is_same_shape = !is_add_id && !is_scalar &&
         src1->ne[0] == src0->ne[0] &&
         src1->ne[1] == src0->ne[1] &&
         (src1->ne[2] == src0->ne[2] || src1->ne[2] == 1) &&
@@ -3692,20 +3941,19 @@ static bool ggml_hexagon_precompute_binary_params(
         kernel_type = HTP_BINARY_KERNEL_ROW_BCAST;
         src1_size = src1_row_size_aligned;
     } else if (is_scalar) {
-        const bool is_scalar_static = (src1->ne[2] == 1 && src1->ne[3] == 1) &&
-            (src1->ne[1] == 1 || src1->nb[1] == elem_size);
-        if (is_scalar_static) {
-            kernel_type = HTP_BINARY_KERNEL_SCALAR_DMA;
-            src1_size = hex_round_up((size_t) src1->ne[1] * elem_size, 128);
-        } else {
-            kernel_type = HTP_BINARY_KERNEL_SCALAR;
-        }
+        kernel_type = HTP_BINARY_KERNEL_SCALAR;
+        src1_size = hex_round_up(ggml_nelements(src1) * elem_size, 128);
+        kparams->src1_strided = !ggml_is_contiguous(src1) ? 1 : 0;
     } else if (is_same_shape) {
         kernel_type = HTP_BINARY_KERNEL_SAME_SHAPE;
     } else if (is_complex) {
         kernel_type = HTP_BINARY_KERNEL_COMPLEX;
+        src1_size = hex_round_up(ggml_nelements(src1) * elem_size + 128, 128);
+        kparams->src1_strided = !ggml_is_contiguous(src1) ? 1 : 0;
     } else {
         kernel_type = HTP_BINARY_KERNEL_REPEAT;
+        src1_size = hex_round_up(ggml_nelements(src1) * elem_size + 128, 128);
+        kparams->src1_strided = !ggml_is_contiguous(src1) ? 1 : 0;
     }
 
     kparams->kernel_type           = (uint32_t) kernel_type;
@@ -3714,6 +3962,38 @@ static bool ggml_hexagon_precompute_binary_params(
     kparams->src1_row_size_aligned = src1_row_size_aligned;
     kparams->dst_row_size_aligned  = dst_row_size_aligned;
     kparams->src1_size             = (uint32_t) src1_size;
+
+    const bool src0_contig_dim1 = (src0->nb[2] == src0->ne[1] * src0->nb[1]);
+    const bool src1_contig_dim1 = (src1->nb[2] == src1->ne[1] * src1->nb[1]);
+    const bool dst_contig_dim1  = (dst->nb[2]  == src0->ne[1] * dst->nb[1]);
+
+    const bool src0_contig_dim2 = (src0->nb[3] == src0->ne[2] * src0->nb[2]);
+    const bool src1_contig_dim2 = (src1->nb[3] == src1->ne[2] * src1->nb[2]);
+    const bool dst_contig_dim2  = (dst->nb[3]  == src0->ne[2] * dst->nb[2]);
+
+    bool split_at_ne01 = false;
+    if (src0->ne[2] > 1) {
+        if (kernel_type == HTP_BINARY_KERNEL_SAME_SHAPE) {
+            split_at_ne01 = (src1->ne[2] != src0->ne[2]) || !src0_contig_dim1 || !src1_contig_dim1 || !dst_contig_dim1;
+        } else if (kernel_type == HTP_BINARY_KERNEL_ROW_BCAST) {
+            split_at_ne01 = !src0_contig_dim1 || !dst_contig_dim1;
+        } else {
+            split_at_ne01 = true;
+        }
+    }
+    kparams->split_at_ne01 = split_at_ne01 ? 1 : 0;
+
+    bool split_at_ne02 = false;
+    if (src0->ne[3] > 1) {
+        if (kernel_type == HTP_BINARY_KERNEL_SAME_SHAPE) {
+            split_at_ne02 = (src1->ne[3] != src0->ne[3]) || !src0_contig_dim2 || !src1_contig_dim2 || !dst_contig_dim2;
+        } else if (kernel_type == HTP_BINARY_KERNEL_ROW_BCAST) {
+            split_at_ne02 = !src0_contig_dim2 || !dst_contig_dim2;
+        } else {
+            split_at_ne02 = true;
+        }
+    }
+    kparams->split_at_ne02 = split_at_ne02 ? 1 : 0;
 
     struct htp_binary_vtcm_layout L;
     htp_binary_vtcm_layout_build(&L, kparams, vtcm_budget);
@@ -3772,7 +4052,7 @@ static void ggml_hexagon_precompute_unary_params(
 
     const size_t elem_size = ggml_type_size(src0->type);
     const size_t src0_data_row_size = (size_t) src0->ne[0] * elem_size;
-    const size_t dst_data_row_size  = (size_t) dst->ne[0]  * elem_size;
+    const size_t dst_data_row_size  = (size_t) dst->ne[0]  * ggml_type_size(dst->type);
 
     const size_t src0_row_size_aligned = hex_round_up((uint32_t) src0_data_row_size, 128);
     const size_t dst_row_size_aligned  = hex_round_up((uint32_t) dst_data_row_size,  128);
@@ -3846,9 +4126,7 @@ static void ggml_hexagon_precompute_get_rows_params(
     const uint32_t nr = ne10 * ne11 * ne12;
 
     const ggml_tensor * src0_base = src0->view_src ? src0->view_src : src0;
-    const bool tiled = src0->type == GGML_TYPE_Q4_0 ||
-                       src0->type == GGML_TYPE_Q4_K ||
-                       src0->type == GGML_TYPE_Q6_K ||
+    const bool tiled = ggml_hexagon_is_repack_type(src0->type) ||
                        (src0_base->buffer && ggml_backend_buffer_is_hexagon_repack(src0_base->buffer)) ||
                        (src0->buffer && ggml_backend_buffer_is_hexagon_repack(src0->buffer));
 
@@ -3864,8 +4142,6 @@ static void ggml_hexagon_precompute_get_rows_params(
         kparams->kernel_type = HTP_GET_ROWS_KERNEL_FLAT;
     }
 
-    const uint32_t chunks_per_row = 1;
-    const uint32_t chunk_size = ne00;
     const uint32_t total_tasks = nr;
 
     kparams->n_threads = (std::min)((uint32_t)ctx->n_threads, total_tasks);
@@ -3873,7 +4149,7 @@ static void ggml_hexagon_precompute_get_rows_params(
     struct htp_get_rows_vtcm_layout vtcm_layout = {};
     const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024ull * 1024ull;
     while (kparams->n_threads > 0) {
-        htp_get_rows_vtcm_layout_build(&vtcm_layout, kparams->kernel_type, dsp_type, ne00, kparams->n_threads);
+        htp_get_rows_vtcm_layout_build(&vtcm_layout, kparams->kernel_type, dsp_type, ne00, total_tasks, (int) src1->type, kparams->n_threads);
         if (vtcm_layout.total_bytes <= vtcm_budget) {
             break;
         }
@@ -3881,19 +4157,15 @@ static void ggml_hexagon_precompute_get_rows_params(
     }
 
     if (kparams->n_threads == 0 && total_tasks > 0) {
-        htp_get_rows_vtcm_layout_build(&vtcm_layout, kparams->kernel_type, dsp_type, ne00, 1);
+        htp_get_rows_vtcm_layout_build(&vtcm_layout, kparams->kernel_type, dsp_type, ne00, total_tasks, (int) src1->type, 1);
     }
 
     kparams->vtcm_size = (total_tasks == 0) ? 0 : vtcm_layout.total_bytes;
     kparams->tasks_per_thread = kparams->n_threads > 0 ? (total_tasks + kparams->n_threads - 1) / kparams->n_threads : 0;
-
-    kparams->chunks_per_row = chunks_per_row;
-    kparams->chunk_size = chunk_size;
     kparams->total_tasks = total_tasks;
 
     kparams->div_ne10 = ne10 > 0 ? init_fastdiv_values(ne10) : fastdiv_values{0, 0};
     kparams->div_ne10_ne11 = (ne10 * ne11) > 0 ? init_fastdiv_values(ne10 * ne11) : fastdiv_values{0, 0};
-    kparams->div_chunks_per_row = chunks_per_row > 0 ? init_fastdiv_values(chunks_per_row) : fastdiv_values{0, 0};
     kparams->div_ne02 = ne02 > 0 ? init_fastdiv_values(ne02) : fastdiv_values{0, 0};
     kparams->div_ne03 = ne03 > 0 ? init_fastdiv_values(ne03) : fastdiv_values{0, 0};
 }
@@ -4036,7 +4308,6 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
     const struct ggml_tensor * src0,
     const struct ggml_tensor * src1,
     const struct ggml_tensor * dst,
-    int ne01_padded,
     bool is_matmul_id,
     bool is_batched
 ) {
@@ -4046,13 +4317,10 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
     // weights may be stored in a different format (see set_tensor)
     const int wtype = ggml_hexagon_weight_dsp_type(src0->type);
 
-    if (ne01_padded % 32 != 0) {
-        return false;
-    }
-
-    // HMX kernel requires raw src0->ne[1] to be 32-aligned
-    // (ne01_padded is always 32-aligned for repack types, so it alone is insufficient)
-    if (src0->ne[1] % 32 != 0) {
+    // HMX weight tiles accept non-32-aligned N for non-matmul_id; the solver
+    // sizes VTCM for the rounded-up N (see ne01_padded). MUL_MAT_ID still
+    // requires aligned N.
+    if (src0->ne[1] % HTP_TENSOR_TILE_N_ROWS != 0 && is_matmul_id) {
         return false;
     }
 
@@ -4060,7 +4328,8 @@ static bool ggml_hexagon_matmul_is_hmx_eligible(
         return false;
     }
 
-    if (ne00 % 32 != 0) {
+    // Q1_0/Q2_0 use non-square tiles (K=128/64); other types use K=32.
+    if (ne00 % (int) htp_tensor_get_tile_k(wtype) != 0) {
         return false;
     }
 
@@ -4088,13 +4357,10 @@ static bool ggml_hexagon_mm_is_hmx_eligible_shared(
     const struct ggml_tensor * src1,
     const struct ggml_tensor * dst
 ) {
-    const int wtype = src0->type;
-    const bool is_repack    = ggml_hexagon_is_repack_type((ggml_type) wtype);
     const bool is_matmul_id = (dst->op == GGML_OP_MUL_MAT_ID);
     const bool is_batched   = (src0->ne[2] * src0->ne[3] > 1 || src1->ne[2] * src1->ne[3] > 1);
-    const int  ne01_padded  = is_repack ? (int) hex_round_up((uint32_t) src0->ne[1], 32) : src0->ne[1];
 
-    return ggml_hexagon_matmul_is_hmx_eligible(src0, src1, dst, ne01_padded, is_matmul_id, is_batched);
+    return ggml_hexagon_matmul_is_hmx_eligible(src0, src1, dst, is_matmul_id, is_batched);
 }
 
 // Gate for QKV/FFN fusion eligibility: returns true when the MUL_MAT
@@ -4113,6 +4379,7 @@ static bool mm_is_hmx_eligible(const ggml_backend_hexagon_context * ctx, const g
 // NOTE: fusion is only attempted for MUL_MATs that match the QKV/FFN pattern.
 static bool is_mergeable_mul_mat(const ggml_backend_hexagon_context * ctx, const ggml_tensor * t) {
     if (!t || t->op != GGML_OP_MUL_MAT)   return false;
+    if (ggml_get_op_params_i32(t, 1) == GGML_HINT_SRC0_IS_HADAMARD) return false;
     if (t->src[1]->type != GGML_TYPE_F32) return false;
     if (t->src[0]->ne[2] != 1 || t->src[0]->ne[3] != 1) return false;
     return ggml_is_quantized(t->src[0]->type) && !mm_is_hmx_eligible(ctx, t);
@@ -4202,7 +4469,8 @@ static void ggml_hexagon_precompute_fused_mmnx_params(
 
     const int wtype = (int) ggml_hexagon_weight_dsp_type((ggml_type) src0->type);
     const bool is_repack = ggml_hexagon_is_repack_type((ggml_type) wtype);
-    const int ne00_padded = is_repack ? (int) hex_round_up((uint32_t) ne00, 32) : ne00;
+    const uint32_t tile_k = htp_tensor_get_tile_k(wtype);
+    const int ne00_padded = is_repack ? (int) hex_round_up((uint32_t) ne00, tile_k) : ne00;
     const int ne01_padded = is_repack ? (int) hex_round_up((uint32_t) ne01, 32) : ne01;
     const int ne11_padded = (int) hex_round_up((uint32_t) ne11, 32);
     const int ne01_tiled  = (int) hex_round_up((uint32_t) ne01_padded, 32);
@@ -4211,7 +4479,7 @@ static void ggml_hexagon_precompute_fused_mmnx_params(
     const bool is_batched = (src0->ne[2] * src0->ne[3] > 1 || ne12 * ne13 > 1);
 
     if (ctx->has_hmx &&
-        ggml_hexagon_matmul_is_hmx_eligible(src0, act, nullptr, ne01_padded, false, is_batched)) {
+        ggml_hexagon_matmul_is_hmx_eligible(src0, act, nullptr, false, is_batched)) {
         if (ggml_hexagon_precompute_hmx_mm_params(ctx, src0, act, nullptr, wtype, ne00_padded, ne01_tiled,
                     src0->ne[2], ne11, ne12, ne11_padded, false, is_batched, 0, vtcm_budget, kparams)) {
             kparams->n_weights = (uint8_t) n_weights;
@@ -4318,7 +4586,8 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     size_t vtcm_budget,
     struct htp_mm_kernel_params * kparams
 ) {
-    const int aligned_tile_size = htp_mm_get_weight_aligned_tile_size(wtype);
+    const int n_threads = (int) ctx->n_threads;
+    const int ne10      = src1->ne[0];
     // Force the pipelined path for plain MUL_MAT (MUL_MAT_ID keeps the
     // non-pipelined setting, matching upstream): the synchronous (m<=32)
     // branch yields corrupted, non-deterministic output in this integration
@@ -4326,11 +4595,13 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     // Qualcomm uses the following logic to decide whether to enable HMX pipeline:
     // const bool pipeline = is_matmul_id ? false : htp_mm_hmx_pipeline(ne11);
     const bool pipeline = is_matmul_id ? false : true;
-    const int n_threads = (int) ctx->n_threads;
-    const int ne10      = src1->ne[0];
 
     const bool is_batched_val   = is_matmul_id ? false : is_batched;
     const int group_size        = (ne02 > 0 ? ne12 / ne02 : 1);
+    // Flat F16/F32/BF16 store no 32x32 tiles; solver/layout take 0 like dspqueue.
+    const int aligned_tile_size = (wtype == GGML_TYPE_F16 || wtype == GGML_TYPE_F32 ||
+                                  wtype == GGML_TYPE_BF16)
+                                ? 0 : (int) htp_tensor_get_tile_padded_size(wtype);
 
     size_t m_chunk              = 0;
     size_t n_chunk              = 0;
@@ -4367,11 +4638,14 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     kparams->n_chunk            = (int32_t) n_chunk;
     kparams->n_threads          = n_threads;
     kparams->n_act_threads      = act_threads_selected;
-    kparams->tile_size          = (int32_t) htp_mm_get_weight_tile_size(wtype);
+    // F16/F32/BF16 stay flat in the fastrpc mempool (no 32x32 tiling).
+    // hmx_mm_2d_f32 uses is_tiled = (tile_size > 0) and would skip the
+    // flat->tile dequant, leaving raw weights where HMX expects fp16 tiles.
+    kparams->tile_size          = (wtype == GGML_TYPE_F16 || wtype == GGML_TYPE_F32 ||
+                                  wtype == GGML_TYPE_BF16)
+                                ? 0 : (int32_t) htp_tensor_get_tile_size(wtype);
     kparams->aligned_tile_size  = (int32_t) aligned_tile_size;
-    kparams->act_row_size      = (int32_t)((wtype == GGML_TYPE_Q4_1)
-                                        ? htp_mm_q8_1_tiled_row_size(ne10)
-                                        : htp_mm_q8_0_tiled_row_size(ne10));
+    kparams->act_row_size      = (int32_t) htp_mm_tiled_act_row_size(wtype, (uint32_t) ne10);
     kparams->vtcm_size          = (int32_t) vtcm_size;
     kparams->vtcm_src0_size     = 0;
     kparams->div_n_act_threads  = init_fastdiv_values((uint32_t) act_threads_selected);
@@ -4381,7 +4655,7 @@ static bool ggml_hexagon_precompute_hmx_mm_params(
     kparams->vtcm_dst_size      = 0;
 
     if (is_batched && !is_matmul_id) {
-        kparams->kernel_type = HTP_MM_KERNEL_HMX_F16_BATCHED;
+        kparams->kernel_type = HTP_MM_KERNEL_HMX_BATCHED;
     } else {
         kparams->kernel_type = HTP_MM_KERNEL_HMX_2D;
     }
@@ -4417,17 +4691,15 @@ static void ggml_hexagon_precompute_hvx_mm_params(
 
     if (is_quant) {
         // Quantized HVX
-        kparams->tile_size = (int32_t) htp_mm_get_weight_tile_size(wtype);
-        kparams->aligned_tile_size = (int32_t) htp_mm_get_weight_aligned_tile_size(wtype);
+        kparams->tile_size = (int32_t) htp_tensor_get_tile_size(wtype);
+        kparams->aligned_tile_size = (int32_t) htp_tensor_get_tile_padded_size(wtype);
 
-        const bool k_align = (ne10 % 32 == 0);
+        const bool k_align = (ne10 % (int) htp_tensor_get_tile_k(wtype) == 0);
 
         if (is_matmul_id) {
             kparams->kernel_type   = (src1_nrows < (int) ctx->n_threads)
                 ? HTP_MM_KERNEL_HVX_QUANT_BLOCK : HTP_MM_KERNEL_HVX_QUANT_ROW;
-            kparams->act_row_size = (int32_t)((wtype == GGML_TYPE_Q4_1)
-                ? htp_mm_q8_1_tiled_row_size(ne10)
-                : htp_mm_q8_0_tiled_row_size(ne10));
+            kparams->act_row_size = (int32_t) htp_mm_tiled_act_row_size(wtype, (uint32_t) ne10);
 
             size_t vtcm_src0_size = 0, vtcm_src1_size = 0, vtcm_dst_size = 0;
             uint32_t max_prefetch = (src1_nrows > HTP_MM_HMX_MIN_NROWS) ? 2 : 16;
@@ -4458,9 +4730,7 @@ static void ggml_hexagon_precompute_hvx_mm_params(
             kparams->vtcm_dst_size  = (int32_t) vtcm_dst_size;
         } else {
             if (k_align) {
-                kparams->act_row_size = (int32_t)((wtype == GGML_TYPE_Q4_1)
-                    ? htp_mm_q8_1_tiled_row_size(ne10)
-                    : htp_mm_q8_0_tiled_row_size(ne10));
+                kparams->act_row_size = (int32_t) htp_mm_tiled_act_row_size(wtype, (uint32_t) ne10);
                 if (src1_nrows < (int)ctx->n_threads) {
                     kparams->kernel_type = HTP_MM_KERNEL_HVX_QUANT_BLOCK;
                 } else {
@@ -4600,8 +4870,10 @@ static void ggml_hexagon_precompute_mm_params(
     // select kernels and VTCM layout by the storage type
     const int wtype         = ggml_hexagon_weight_dsp_type(src0->type);
     const bool is_repack    = ggml_hexagon_is_repack_type((ggml_type) wtype);
-    const int ne00_padded   = is_repack ? (int) hex_round_up((uint32_t) ne00, 32) : ne00;
-    const int ne01_padded   = is_repack ? (int) hex_round_up((uint32_t) ne01, 32) : ne01;
+    const int ne00_padded   = is_repack ? (int) hex_round_up((uint32_t) ne00, htp_tensor_get_tile_k(wtype)) : ne00;
+    // VTCM has to hold whole 32-row weight tiles, so size for the rounded-up N
+    // even when the tensor itself is ragged. Matches dspqueue ne01_tiled.
+    const int ne01_padded   = (int) hex_round_up((uint32_t) ne01, 32);
     const int ne11_padded   = (int) hex_round_up((uint32_t) ne11, 32);
 
     const bool is_batched   = (ne02 * ne03 > 1 || ne12 * ne13 > 1);
@@ -4631,7 +4903,7 @@ static void ggml_hexagon_precompute_mm_params(
     // HMX-first policy: try HMX precomputation if eligible, fall back to HVX.
     bool hmx_enabled = ctx->has_hmx;
     bool hmx_basic = hmx_enabled && ggml_hexagon_matmul_is_hmx_eligible(
-            src0, src1, dst, ne01_padded, is_matmul_id, is_batched);
+            src0, src1, dst, is_matmul_id, is_batched);
 
     // HMX eligibility diagnostic: categorize why basic check failed
     if (!hmx_enabled) {
@@ -4640,11 +4912,11 @@ static void ggml_hexagon_precompute_mm_params(
         ctx->n_hmx_basic_pass++;
     } else {
         // Diagnose which condition failed (order matches ggml_hexagon_matmul_is_hmx_eligible)
-        if (ne01_padded % 32 != 0) {
+        if (src0->ne[1] % HTP_TENSOR_TILE_N_ROWS != 0 && is_matmul_id) {
             ctx->n_hmx_basic_fail_ne01++;
         } else if (!ggml_hexagon_is_hmx_weight_type((ggml_type) wtype)) {
             ctx->n_hmx_basic_fail_wtype++;
-        } else if (ne00 % 32 != 0) {
+        } else if (ne00 % (int) htp_tensor_get_tile_k(wtype) != 0) {
             ctx->n_hmx_basic_fail_ne00++;
         } else if (!is_matmul_id && is_batched && wtype != GGML_TYPE_F16) {
             ctx->n_hmx_basic_fail_batched++;
@@ -4690,6 +4962,27 @@ finalize:
     }
 }
 
+// A MUL_MAT with GGML_HINT_SRC0_IS_HADAMARD is an FWHT over src1, not a
+// real matmul: src0 is only a Hadamard-matrix hint and is never read.
+static bool ggml_hexagon_op_mul_mat_use_fwht(const struct ggml_tensor * dst) {
+    if (dst->op != GGML_OP_MUL_MAT || ggml_get_op_params_i32(dst, 1) != GGML_HINT_SRC0_IS_HADAMARD) {
+        return false;
+    }
+
+    const struct ggml_tensor * src0 = dst->src[0];
+    const struct ggml_tensor * src1 = dst->src[1];
+
+    const int64_t n = src1->ne[0];
+    if (n < 32 || (n & (n - 1)) != 0) {
+        return false;
+    }
+
+    return src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 &&
+           (src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16) &&
+           ggml_is_contiguous_rows(src1) && ggml_is_contiguous(dst) &&
+           ggml_are_same_shape(src1, dst);
+}
+
 // =================================================================================================
 //  section-9: backend implementation
 // =================================================================================================
@@ -4697,6 +4990,16 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
                                           ggml_backend_hexagon_context * ctx) {
     const struct ggml_tensor * src0 = dst->src[0];
     const struct ggml_tensor * src1 = dst->src[1];
+
+    if (ggml_get_op_params_i32(dst, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
+        if (!ggml_hexagon_op_mul_mat_use_fwht(dst)) {
+            return false;
+        }
+        struct htp_unary_kernel_params ukparams;
+        ggml_hexagon_precompute_unary_params(ctx, HTP_OP_HADAMARD, src1, nullptr, dst, &ukparams);
+        return ukparams.vtcm_row_per_thread > 0 &&
+               (size_t) ukparams.vtcm_size <= (size_t) ctx->socinfo.vtcm_size_in_mb * 1024 * 1024;
+    }
 
     const int64_t m                 = src0->ne[1];
     const int64_t k                 = src0->ne[0];
@@ -4723,6 +5026,8 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
     }
 
     switch (src0->type) {
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q2_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_IQ4_NL:
@@ -4734,8 +5039,7 @@ static bool ggmlhexagon_supported_mul_mat(const struct ggml_tensor * dst,
         case GGML_TYPE_Q3_K:
         case GGML_TYPE_Q2_K:
         {
-            if (src0->ne[0] % ((src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q5_K || src0->type == GGML_TYPE_Q6_K ||
-                                src0->type == GGML_TYPE_Q3_K || src0->type == GGML_TYPE_Q2_K) ? QK_K : 32)) {
+            if (src0->ne[0] % ggml_blck_size(src0->type)) {
                 return false;
             }
 
@@ -5202,8 +5506,7 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
     const ggml_tensor * dst  = op;
 
     const ggml_tensor * src0_base = src0->view_src ? src0->view_src : src0;
-    const bool is_repack_type = src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_K ||
-                                src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_Q8_0;
+    const bool is_repack_type = ggml_hexagon_is_repack_type(src0->type);
 
     if (is_repack_type && src0->view_src) {
         return false;
@@ -5212,9 +5515,8 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
     bool is_repacked = false;
     if (src0_base->buffer && ggml_backend_buffer_is_hexagon_repack(src0_base->buffer)) {
         is_repacked = true;
-        // fastrpc stores Q4_K/Q6_K as Q4_0 tiled in the repack buffer
-        if (src0->type != GGML_TYPE_Q4_0 && src0->type != GGML_TYPE_Q4_K &&
-            src0->type != GGML_TYPE_Q6_K && src0->type != GGML_TYPE_Q8_0) {
+        // fastrpc stores some K-quants as Q4_0 tiled in the repack buffer
+        if (!ggml_hexagon_is_repack_type(src0->type) && src0->type != GGML_TYPE_BF16) {
             return false;
         }
     }
@@ -5233,6 +5535,7 @@ static bool hexagon_validate_get_rows(ggml_backend_hexagon_context * ctx, const 
     }
 
     if (src0->type != GGML_TYPE_F32 && src0->type != GGML_TYPE_F16 &&
+        src0->type != GGML_TYPE_Q1_0 && src0->type != GGML_TYPE_Q2_0 &&
         src0->type != GGML_TYPE_Q4_0 && src0->type != GGML_TYPE_Q4_K &&
         src0->type != GGML_TYPE_Q6_K && src0->type != GGML_TYPE_Q8_0 && src0->type != GGML_TYPE_I32) {
         return false;
@@ -5543,6 +5846,220 @@ static bool hexagon_validate_im2col(ggml_backend_hexagon_context * ctx, const gg
         return false;
     }
     return true;
+}
+
+static bool im2col_3d_calc_output_size(uint32_t input, uint32_t kernel, int32_t stride, int32_t padding,
+                                       int32_t dilation, uint32_t * output) {
+    if (stride <= 0 || padding < 0 || dilation <= 0 || kernel == 0) {
+        return false;
+    }
+
+    const int64_t numerator = (int64_t) input + 2LL * padding - (int64_t) dilation * (kernel - 1) - 1;
+    if (numerator < 0) {
+        return false;
+    }
+
+    const uint64_t size = (uint64_t) (numerator / stride) + 1;
+    if (size == 0 || size > UINT32_MAX) {
+        return false;
+    }
+
+    *output = (uint32_t) size;
+    return true;
+}
+
+// Precompute htp_im2col_kernel_params for IM2COL_3D on the AP side. Mirrors
+// ggml_hexagon_precompute_im2col_3d_params in ggml-hexagon.cpp; the shared
+// op_im2col_3d kernel consumes the packed params via op.kernel_params.
+static bool ggml_hexagon_precompute_im2col_3d_params(
+    ggml_backend_hexagon_context * ctx,
+    const struct ggml_tensor * op,
+    struct htp_im2col_kernel_params * kparams
+) {
+    memset(kparams, 0, sizeof(*kparams));
+    kparams->kernel_type = HTP_IM2COL_KERNEL_UNSUPPORTED;
+
+    const struct ggml_tensor * src0 = op->src[0];
+    const struct ggml_tensor * src1 = op->src[1];
+    const struct ggml_tensor * dst  = op;
+
+    if (!src0 || !src1 || !dst) {
+        return false;
+    }
+
+    if (src1->type != GGML_TYPE_F32 || (dst->type != GGML_TYPE_F16 && dst->type != GGML_TYPE_F32)) {
+        return false;
+    }
+
+    if (src1->nb[0] != sizeof(float) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+
+    const int32_t * params = (const int32_t *) op->op_params;
+    const int32_t s0 = params[0], s1 = params[1], s2 = params[2];
+    const int32_t p0 = params[3], p1 = params[4], p2 = params[5];
+    const int32_t d0 = params[6], d1 = params[7], d2 = params[8];
+    const int32_t ic = params[9];
+
+    if (s0 <= 0 || s1 <= 0 || s2 <= 0 ||
+        p0 < 0  || p1 < 0  || p2 < 0  ||
+        d0 <= 0 || d1 <= 0 || d2 <= 0 || ic <= 0) {
+        return false;
+    }
+
+    if (src1->ne[3] % ic != 0) {
+        return false;
+    }
+
+    const uint32_t IC = (uint32_t) ic;
+    const uint32_t N  = (uint32_t) (src1->ne[3] / IC);
+    if (N == 0) {
+        return false;
+    }
+
+    uint32_t OW, OH, OD;
+    if (!im2col_3d_calc_output_size(src1->ne[0], src0->ne[0], s0, p0, d0, &OW) ||
+        !im2col_3d_calc_output_size(src1->ne[1], src0->ne[1], s1, p1, d1, &OH) ||
+        !im2col_3d_calc_output_size(src1->ne[2], src0->ne[2], s2, p2, d2, &OD)) {
+        return false;
+    }
+
+    const uint32_t KD = (uint32_t) src0->ne[2];
+    const uint32_t KH = (uint32_t) src0->ne[1];
+    const uint32_t KW = (uint32_t) src0->ne[0];
+    const uint32_t ID = (uint32_t) src1->ne[2];
+    const uint32_t IH = (uint32_t) src1->ne[1];
+    const uint32_t IW = (uint32_t) src1->ne[0];
+
+    const uint64_t patch_stride_64 = (uint64_t) IC * KD * KH * KW;
+    const uint64_t total_rows_64   = (uint64_t) N * OD * OH;
+    const uint64_t dst_ne3_64      = (uint64_t) OD * N;
+
+    if (patch_stride_64 > UINT32_MAX || total_rows_64 > UINT32_MAX || dst_ne3_64 > UINT32_MAX) {
+        return false;
+    }
+    const uint32_t patch_stride = (uint32_t) patch_stride_64;
+    const uint32_t total_rows   = (uint32_t) total_rows_64;
+    const uint32_t dst_ne3      = (uint32_t) dst_ne3_64;
+
+    if (dst->ne[0] != patch_stride || dst->ne[1] != OW || dst->ne[2] != OH || dst->ne[3] != dst_ne3) {
+        return false;
+    }
+
+    const uint32_t dst_elem = (dst->type == GGML_TYPE_F16) ? sizeof(ggml_fp16_t) : sizeof(float);
+
+    const bool is_patchembed = ggml_is_contiguous(src1) &&
+                               (s0 == (int32_t) KW && s1 == (int32_t) KH && s2 == (int32_t) KD &&
+                                p0 == 0 && p1 == 0 && p2 == 0 &&
+                                d0 == 1 && d1 == 1 && d2 == 1);
+
+    const uint32_t max_threads = (ctx && ctx->n_threads > 0) ? (uint32_t) ctx->n_threads : 8;
+    const uint32_t n_threads   = (total_rows < max_threads) ? total_rows : max_threads;
+    const uint32_t vtcm_size   = (ctx && ctx->socinfo.vtcm_size_in_mb > 0)
+                                     ? (uint32_t) (ctx->socinfo.vtcm_size_in_mb * 1024 * 1024) : 0;
+
+    if (is_patchembed) {
+        const uint64_t src_row_bytes_raw = (uint64_t) IC * KD * KH * IW * sizeof(float);
+        const uint64_t dst_row_bytes_raw = (uint64_t) OW * patch_stride * dst_elem;
+        if (src_row_bytes_raw <= UINT32_MAX && dst_row_bytes_raw <= UINT32_MAX) {
+            const uint32_t src_row_bytes = hex_round_up((uint32_t) src_row_bytes_raw, 256);
+            const uint32_t dst_row_bytes = hex_round_up((uint32_t) dst_row_bytes_raw, 256);
+
+            struct htp_im2col_vtcm_layout layout;
+            htp_im2col_vtcm_layout_build(&layout, src_row_bytes, dst_row_bytes, n_threads);
+
+            if (vtcm_size == 0 || layout.total_bytes <= vtcm_size) {
+                kparams->kernel_type          = HTP_IM2COL_KERNEL_PATCHEMBED_DMA;
+                kparams->is_2d                = 0;
+                kparams->is_3d                = 1;
+                kparams->n_threads            = (uint8_t) n_threads;
+                kparams->vtcm_size            = layout.total_bytes;
+                kparams->off_src              = layout.off_src;
+                kparams->off_dst              = layout.off_dst;
+                kparams->src_bytes_per_thread = layout.src_bytes_per_thread;
+                kparams->dst_bytes_per_thread = layout.dst_bytes_per_thread;
+                kparams->src_row_bytes        = src_row_bytes;
+                kparams->dst_row_bytes        = dst_row_bytes;
+                kparams->owb                  = OW;
+                kparams->wb                   = IW;
+                kparams->nbpr                 = 1;
+                kparams->N                    = N;
+                kparams->IC                   = IC;
+                kparams->ID                   = ID;
+                kparams->IH                   = IH;
+                kparams->IW                   = IW;
+                kparams->KD                   = KD;
+                kparams->KH                   = KH;
+                kparams->KW                   = KW;
+                kparams->OD                   = OD;
+                kparams->OH                   = OH;
+                kparams->OW                   = OW;
+                kparams->patch_stride         = patch_stride;
+                kparams->total_rows           = total_rows;
+                return true;
+            }
+        }
+    }
+
+    for (uint32_t owb = (OW < 256 ? OW : 256); owb >= 1; owb--) {
+        const uint64_t Wb = (uint64_t) (owb - 1) * s0 + (uint64_t) (KW - 1) * d0 + 1;
+        if (Wb > UINT32_MAX) {
+            if (owb == 1) break;
+            continue;
+        }
+
+        const uint64_t src_row_bytes_raw = (uint64_t) IC * KD * KH * Wb * sizeof(float);
+        const uint64_t dst_row_bytes_raw = (uint64_t) owb * patch_stride * dst_elem;
+        if (src_row_bytes_raw > UINT32_MAX || dst_row_bytes_raw > UINT32_MAX) {
+            if (owb == 1) break;
+            continue;
+        }
+
+        const uint32_t src_row_bytes = hex_round_up((uint32_t) src_row_bytes_raw, 256);
+        const uint32_t dst_row_bytes = hex_round_up((uint32_t) dst_row_bytes_raw, 256);
+
+        struct htp_im2col_vtcm_layout layout;
+        htp_im2col_vtcm_layout_build(&layout, src_row_bytes, dst_row_bytes, n_threads);
+
+        if (vtcm_size == 0 || layout.total_bytes <= vtcm_size) {
+            kparams->kernel_type          = HTP_IM2COL_KERNEL_BLOCKED_DMA;
+            kparams->is_2d                = 0;
+            kparams->is_3d                = 1;
+            kparams->n_threads            = (uint8_t) n_threads;
+            kparams->vtcm_size            = layout.total_bytes;
+            kparams->off_src              = layout.off_src;
+            kparams->off_dst              = layout.off_dst;
+            kparams->src_bytes_per_thread = layout.src_bytes_per_thread;
+            kparams->dst_bytes_per_thread = layout.dst_bytes_per_thread;
+            kparams->src_row_bytes        = src_row_bytes;
+            kparams->dst_row_bytes        = dst_row_bytes;
+            kparams->owb                  = owb;
+            kparams->wb                   = (uint32_t) Wb;
+            kparams->nbpr                 = (OW + owb - 1) / owb;
+            kparams->N                    = N;
+            kparams->IC                   = IC;
+            kparams->ID                   = ID;
+            kparams->IH                   = IH;
+            kparams->IW                   = IW;
+            kparams->KD                   = KD;
+            kparams->KH                   = KH;
+            kparams->KW                   = KW;
+            kparams->OD                   = OD;
+            kparams->OH                   = OH;
+            kparams->OW                   = OW;
+            kparams->patch_stride         = patch_stride;
+            kparams->total_rows           = total_rows;
+            return true;
+        }
+        if (owb == 1) break;
+    }
+
+    return false;
+}
+
+static bool hexagon_validate_im2col_3d(ggml_backend_hexagon_context * ctx, const ggml_tensor * op) {
+    struct htp_im2col_kernel_params kparams;
+    return ggml_hexagon_precompute_im2col_3d_params(ctx, op, &kparams);
 }
 
 // Qwen3.5-2B delta net: offload conv1d to avoid cgraph split
@@ -5897,11 +6414,11 @@ static bool ggml_hexagon_precompute_concat_params(
             return false;
         }
 
-        kparams->kernel_type           = HTP_CONCAT_KERNEL_TRANSPOSED;
-        kparams->n_threads             = (uint8_t) n_threads;
-        kparams->vtcm_size             = layout.total_bytes;
-        kparams->spad0_size_per_thread = layout.src0_spad_size_per_thread;
-        kparams->spad1_size_per_thread = layout.src1_spad_size_per_thread;
+        kparams->kernel_type                       = HTP_CONCAT_KERNEL_TRANSPOSED;
+        kparams->n_threads                         = (uint8_t) n_threads;
+        kparams->vtcm_size                         = layout.total_bytes;
+        kparams->u.transposed.spad0_size_per_thread = layout.src0_spad_size_per_thread;
+        kparams->u.transposed.spad1_size_per_thread = layout.src1_spad_size_per_thread;
         return true;
     }
 
@@ -6018,7 +6535,7 @@ static bool ggml_hexagon_precompute_cpy_params(
 
     const uint32_t n_threads = ctx->n_threads > 0 ? (uint32_t) ctx->n_threads : 4;
     struct htp_copy_convert_vtcm_layout layout;
-    htp_copy_convert_vtcm_layout_build(&layout, (uint32_t) src0->ne[0], src_type_size, dst_type_size, n_threads);
+    htp_copy_convert_vtcm_layout_build(&layout, (uint32_t) src0->ne[0], (uint32_t) src0->ne[1], src_type_size, dst_type_size, n_threads);
 
     const size_t vtcm_budget = ctx->socinfo.vtcm_size_in_mb * 1024ull * 1024ull;
     if (vtcm_budget > 0 && layout.total_bytes > vtcm_budget) {
@@ -6033,6 +6550,9 @@ static bool ggml_hexagon_precompute_cpy_params(
     kparams->u.convert.dst_buf_size  = layout.dst_buf_size;
     kparams->u.convert.spad0_size_per_thread = layout.spad0_size_per_thread;
     kparams->u.convert.spad1_size_per_thread = layout.spad1_size_per_thread;
+    kparams->u.convert.src0_row_stride = layout.src0_row_stride;
+    kparams->u.convert.dst_row_stride  = layout.dst_row_stride;
+    kparams->u.convert.blk_rows        = layout.blk_rows;
     kparams->u.convert.div_ne01      = init_fastdiv_values((uint32_t) src0->ne[1]);
     kparams->u.convert.div_ne02_ne01 = init_fastdiv_values((uint32_t) (src0->ne[2] * src0->ne[1]));
     return true;
@@ -6224,6 +6744,7 @@ static void init_op_validators(void) {
     s_op_validators[GGML_OP_ARGMAX]         = hexagon_validate_argmax;
     s_op_validators[GGML_OP_PAD]            = hexagon_validate_pad;
     s_op_validators[GGML_OP_IM2COL]         = hexagon_validate_im2col;
+    s_op_validators[GGML_OP_IM2COL_3D]      = hexagon_validate_im2col_3d;
     s_op_validators[GGML_OP_GATED_DELTA_NET]= hexagon_validate_gated_delta_net;
     s_op_validators[GGML_OP_TRI]            = hexagon_validate_tri;
     s_op_validators[GGML_OP_SOLVE_TRI]      = hexagon_validate_solve_tri;
@@ -6468,6 +6989,24 @@ static void ggml_backend_hexagon_buffer_set_tensor(ggml_backend_buffer_t buffer,
                     memcpy(tensor->data, data, size);
                 }
                 break;
+            case GGML_TYPE_Q1_0:
+                if (dp >= base && dp < end) {
+                    GGMLHEXAGON_LOG_DEBUG("repack");
+                    repack_q1_0_tiled(tensor, data, offset, size);
+                } else {
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
+                    memcpy(tensor->data, data, size);
+                }
+                break;
+            case GGML_TYPE_Q2_0:
+                if (dp >= base && dp < end) {
+                    GGMLHEXAGON_LOG_DEBUG("repack");
+                    repack_q2_0_tiled(tensor, data, offset, size);
+                } else {
+                    GGMLHEXAGON_LOG_DEBUG("cpu buffer");
+                    memcpy(tensor->data, data, size);
+                }
+                break;
             default:
                 GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                 memcpy((char *)tensor->data + offset, data, size);
@@ -6605,6 +7144,24 @@ static void ggml_backend_hexagon_buffer_get_tensor(ggml_backend_buffer_t buffer,
                     if (dp >= base && dp < end) {
                         GGMLHEXAGON_LOG_DEBUG("unpack");
                         repack_tiled_q2_K(data, tensor, offset, size);
+                    } else {
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
+                    return;
+                case GGML_TYPE_Q1_0:
+                    if (dp >= base && dp < end) {
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
+                        repack_tiled_q1_0(data, tensor, offset, size);
+                    } else {
+                        GGMLHEXAGON_LOG_DEBUG("cpu buffer");
+                        memcpy(data, (const char *)tensor->data + offset, size);
+                    }
+                    return;
+                case GGML_TYPE_Q2_0:
+                    if (dp >= base && dp < end) {
+                        GGMLHEXAGON_LOG_DEBUG("unpack");
+                        repack_tiled_q2_0(data, tensor, offset, size);
                     } else {
                         GGMLHEXAGON_LOG_DEBUG("cpu buffer");
                         memcpy(data, (const char *)tensor->data + offset, size);
@@ -6841,6 +7398,8 @@ static size_t ggml_backend_hexagon_buffer_type_get_alloc_size(ggml_backend_buffe
     // For quantized weight types that will be repacked to tile-based layout
     // in set_tensor, allocate enough space for the repacked data.
     switch (tensor->type) {
+        case GGML_TYPE_Q1_0:
+        case GGML_TYPE_Q2_0:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:
         case GGML_TYPE_Q8_0:
@@ -7316,6 +7875,19 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 for (int k = 0; k < HTP_OP_MAX_INPUTS; k++) op.src_idx[k] = -1;
                 op.opcode   = node->op;
                 memcpy(op.params, node->op_params, sizeof(op.params));
+                if (node->op == GGML_OP_MUL_MAT &&
+                    ggml_get_op_params_i32(node, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
+                    // FWHT over src1; src0 is only a Hadamard-matrix hint and is not transferred.
+                    ggml_hexagon_precompute_unary_params(ctx, HTP_OP_HADAMARD,
+                        node->src[1], nullptr, node,
+                        (struct htp_unary_kernel_params *) op.kernel_params);
+                    op.htp_opcode = HTP_OP_HADAMARD;
+                    op.src_idx[0] = get_or_add_tensor_idx(node->src[1]);
+                    for (int k = 1; k < HTP_OP_MAX_INPUTS; k++) op.src_idx[k] = -1;
+                    op.dst_idx[0] = get_or_add_tensor_idx(node);
+                    hex_ops.push_back(op);
+                    continue;
+                }
                 if (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) {
                     const bool is_matmul_id = (node->op == GGML_OP_MUL_MAT_ID);
                     ggml_hexagon_precompute_mm_params(ctx, node->src[0], node->src[1], node, op, is_matmul_id, NULL);
@@ -7405,6 +7977,10 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                         ggml_hexagon_precompute_concat_params(ctx, node,
                             (struct htp_concat_kernel_params *) op.kernel_params);
                         op.htp_opcode = HTP_OP_CONCAT;
+                    } else if (node->op == GGML_OP_IM2COL_3D) {
+                        ggml_hexagon_precompute_im2col_3d_params(ctx, node,
+                            (struct htp_im2col_kernel_params *) op.kernel_params);
+                        op.htp_opcode = HTP_OP_IM2COL_3D;
                     }
                 }
                 op.src_idx[0] = get_or_add_tensor_idx(node->src[0]);
@@ -7454,7 +8030,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                     if (didx < n_tensors) dst_indices[didx] = 1;
                 }
                 for (const auto & op : hex_ops) {
-                    if (op.opcode == GGML_OP_MUL_MAT) {
+                    if (op.opcode == GGML_OP_MUL_MAT && op.htp_opcode != HTP_OP_HADAMARD) {
                         uint32_t sidx = op.src_idx[0];
                         if (sidx < n_tensors && !dst_indices[sidx] &&
                             !ctx->ever_dst_ptrs.count(tensor_src[sidx]->data)) {
@@ -7472,6 +8048,13 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             // indices. This ensures Phase 5/8 see live tensor pointers and
             // ne/nb/data from the current graph state.
             for (auto * node : supported_nodes) {
+                if (node->op == GGML_OP_MUL_MAT &&
+                    ggml_get_op_params_i32(node, 1) == GGML_HINT_SRC0_IS_HADAMARD) {
+                    // match the miss path: only the activation and dst are transferred
+                    get_or_add_tensor_idx(node->src[1]);
+                    get_or_add_tensor_idx(node);
+                    continue;
+                }
                 get_or_add_tensor_idx(node->src[0]);
                 if (node->src[1]) get_or_add_tensor_idx(node->src[1]);
                 if (node->src[2]) get_or_add_tensor_idx(node->src[2]);
@@ -7571,7 +8154,7 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
                 }
             }
 
-            if (qkv_ffn_enabled && op.opcode == GGML_OP_MUL_MAT) {
+            if (qkv_ffn_enabled && op.opcode == GGML_OP_MUL_MAT && op.htp_opcode != HTP_OP_HADAMARD) {
                 // QKV fusion: 3 MUL_MAT (Q,K,V) -> HTP_OP_MUL_MAT_NX.
                 // The Q/K/V MUL_MATs may appear in either Q,K,V or Q,V,K order
                 // depending on the model (e.g. Gemma4/Llama3 uses Q,K,V, Qwen3 uses Q,V,K).
@@ -7739,7 +8322,8 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
             // Gate: only fuse for HMX-eligible or single-row (decode).
             // Multi-row HVX matmuls benefit less from fusing the bias add
             // and the VTCM layout would need to accommodate src2.
-            if (is_opfusion_enabled(OPFUSE_MUL_MAT_ADD) && op.opcode == GGML_OP_MUL_MAT && i + 1 < hex_ops.size()) {
+            if (is_opfusion_enabled(OPFUSE_MUL_MAT_ADD) && op.opcode == GGML_OP_MUL_MAT &&
+                op.htp_opcode != HTP_OP_HADAMARD && i + 1 < hex_ops.size()) {
                 const hex_op_desc & next = hex_ops[i + 1];
                 if (next.opcode == GGML_OP_ADD &&
                     (next.src_idx[0] == op.dst_idx[0] || next.src_idx[1] == op.dst_idx[0])) {
@@ -8341,16 +8925,17 @@ static enum ggml_status ggmlhexagon_backend_graph_compute_batch(ggml_backend_t b
         if (is_quant_weight) {
             auto it = ctx->tiled_pool_offsets.find(t->data);
             if (it != ctx->tiled_pool_offsets.end()) {
-                const int32_t ne0_p = (int32_t)hex_round_up((uint32_t)t->ne[0], 32);
+                const int dsp_type = (int)ggml_hexagon_weight_dsp_type(t->type);
+                const int32_t tile_k = (int32_t)htp_tensor_get_tile_k(dsp_type);
+                const int32_t ne0_p = (int32_t)hex_round_up((uint32_t)t->ne[0], (uint32_t)tile_k);
                 const int32_t ne1_p = (int32_t)hex_round_up((uint32_t)t->ne[1], 32);
-                td->ne[0] = ne0_p;
-                td->ne[1] = ne1_p;
+                // keep logical ne[] (matches upstream); pad only in the tiled nb[] math
+                td->ne[0] = (int32_t)t->ne[0];
+                td->ne[1] = (int32_t)t->ne[1];
                 // nb[1] is used by NPU DMA as weight_stride = weight + nc * nb[1].
-                // In the tiled layout, tiles are stored as (ne1_p/32) x (ne0_p/32)
-                // tiles of tile_size bytes each. The byte offset to column nc is
-                // (nc/32) * (ne0_p/32) * tile_size, so nb[1] = (ne0_p/32) * tile_size / 32.
-                // ggml_row_size gives the original (non-tiled) stride, which is wrong here.
-                td->nb[1] = (int32_t)((ne0_p / 32) * htp_mm_get_weight_tile_size((int)ggml_hexagon_weight_dsp_type(t->type)) / 32);
+                // Tiles are stored (ne1_p/32) x (ne0_p/tile_k) of tile_size bytes each,
+                // so the byte offset of column nc is (nc/32)*(ne0_p/tile_k)*tile_size.
+                td->nb[1] = (int32_t)((ne0_p / tile_k) * (int32_t)htp_tensor_get_tile_size(dsp_type) / 32);
                 td->nb[2] = td->nb[1] * ne1_p;
                 td->nb[3] = td->nb[2] * (int32_t)t->ne[2];
                 td->data_len = (uint32_t)ggml_hexagon_repacked_size(t->type, t->ne[0], t->ne[1], t->ne[2], t->ne[3]);
@@ -9258,6 +9843,12 @@ ggml_backend_reg_t ggml_backend_hexagon_reg() {
             static_assert((unsigned int) HTP_TYPE_Q3_K == (unsigned int) GGML_TYPE_Q3_K,
                           "please update hexagon_type to match ggml_type");
             static_assert((unsigned int) HTP_TYPE_Q2_K == (unsigned int) GGML_TYPE_Q2_K,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_BF16 == (unsigned int) GGML_TYPE_BF16,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q1_0 == (unsigned int) GGML_TYPE_Q1_0,
+                          "please update hexagon_type to match ggml_type");
+            static_assert((unsigned int) HTP_TYPE_Q2_0 == (unsigned int) GGML_TYPE_Q2_0,
                           "please update hexagon_type to match ggml_type");
 
             int ret = htpdrv_init();
