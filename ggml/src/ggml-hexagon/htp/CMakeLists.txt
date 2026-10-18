@@ -18,6 +18,7 @@ set(HTP_OPS_SRCS
     work-queue.c
     dma-queue.c
     hmx-queue.c
+    htp-dcache.c
     matmul-ops.c
     flash-attn-ops.c
     gated-delta-net-ops.c
@@ -30,6 +31,7 @@ set(HTP_OPS_SRCS
     set-rows-ops.c
     get-rows-ops.c
     cpy-ops.c
+    gather-rows.c
     repeat-ops.c
     ssm-conv.c
     cumsum-ops.c
@@ -55,7 +57,6 @@ if (GGML_HEXAGON_USE_MEMPOOL)
     add_library(${HTP_LIB} SHARED
         entry.c
         ${CMAKE_CURRENT_BINARY_DIR}/ggml_htp_skel.c
-        htp-tensor.c
         ${HTP_OPS_SRCS}
     )
 
@@ -78,7 +79,6 @@ else()
     add_library(${HTP_LIB} SHARED
         main.c
         htp_iface_skel.c
-        htp-tensor.c
         ${HTP_OPS_SRCS}
     )
 
